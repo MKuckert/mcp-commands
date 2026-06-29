@@ -1,0 +1,37 @@
+{
+  "$schema": "/Users/mkuckert/.config/nono/nono-profile.schema.json",
+  "extends": "opencode",
+  "meta": {
+    "author": "Martin Kuckert",
+    "name": "opencode-mcp-commands"
+  },
+  "groups": {
+    "include": []
+  },
+  "workdir": {
+    "access": "readwrite"
+  },
+  "filesystem": {
+    "read": [
+      "~/.cache",
+      "~/.claude",
+      "~/.config",
+      "~/.config/nono",
+      "~/private",
+      "~/private/dev"
+    ],
+    "write": ["~/.npm/_cacache/tmp", "~/private/dev/mcp-commands"]
+  },
+  "network": {
+    "allow_domain": ["localhost"],
+    "allow_port": [11438, 12010]
+  },
+  "session_hooks": {
+    "before": {
+      "script": "/Users/mkuckert/private/dev/mcp-commands/.nono/hooks/before.sh"
+    },
+    "after": {
+      "script": "/Users/mkuckert/private/dev/mcp-commands/.nono/hooks/after.sh"
+    }
+  }
+}
