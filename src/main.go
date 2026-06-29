@@ -1,13 +1,94 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
+
+type discoveredTool struct {
+	Name        string
+	Path        string
+	Description string
+}
+
+func discoverTools(scriptsDir string) ([]discoveredTool, error) {
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read scripts directory: %w", err)
+	}
+
+	var tools []discoveredTool
+
+	for _, entry := range entries {
+		// Skip directories and non-executables
+		if entry.IsDir() {
+			continue
+		}
+
+		// Resolve symlinks
+		filePath := filepath.Join(scriptsDir, entry.Name())
+		resolvedPath, err := filepath.EvalSymlinks(filePath)
+		if err != nil {
+			continue
+		}
+
+		// Check if the resolved path is executable
+		fileInfo, err := os.Stat(resolvedPath)
+		if err != nil {
+			continue
+		}
+
+		if fileInfo.Mode()&0111 == 0 {
+			continue
+		}
+
+		// Extract description from the first 10 lines
+		description := extractDescription(resolvedPath)
+
+		// Tool name is the file basename without extension
+		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+
+		tools = append(tools, discoveredTool{
+			Name:        name,
+			Path:        resolvedPath,
+			Description: description,
+		})
+	}
+
+	return tools, nil
+}
+
+func extractDescription(filePath string) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() && lineCount < 10 {
+		lineCount++
+		line := scanner.Text()
+
+		// Check for # Description: ... or // Description: ...
+		if strings.Contains(line, "Description:") {
+			parts := strings.SplitN(line, "Description:", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	return ""
+}
 
 func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
@@ -36,6 +117,16 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Discover tools
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to discover tools: %w", err)
+	}
+
+	if len(tools) == 0 {
+		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsDir)
+	}
+
 	// Placeholder for server initialization
 	fmt.Fprintf(os.Stderr, "Starting mcp-commands server\n")
 	fmt.Fprintf(os.Stderr, "Dir: %s\n", dir)
@@ -43,6 +134,10 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	fmt.Fprintf(os.Stderr, "Watch: %v\n", watch)
 	fmt.Fprintf(os.Stderr, "IP: %s\n", ip)
 	fmt.Fprintf(os.Stderr, "Port: %d\n", port)
+	fmt.Fprintf(os.Stderr, "Discovered tools: %d\n", len(tools))
+	for _, tool := range tools {
+		fmt.Fprintf(os.Stderr, "  - %s: %s\n", tool.Name, tool.Description)
+	}
 
 	// Wait for signal
 	<-sigCtx.Done()
