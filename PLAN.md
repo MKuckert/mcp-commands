@@ -22,7 +22,7 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
   - **Description:** Create a new Go module in a subdirectory (`src/`) with `go.mod` (module name `github.com/mkuckert/mcp-commands`), `main.go`, and `go.sum`. Add `github.com/modelcontextprotocol/go-sdk` as the sole external dependency. Parse CLI flags using the `flag` package: `--dir` (required), `--scripts` (required), `--watch` (bool), `--ip` (default `127.0.0.1`), `--port` (default `0`, stdio mode when unset). Exit non-zero with usage on missing required flags.
   - **Review Criteria:** `go build` produces a binary. Running without `--scripts` or `--dir` prints a helpful error and exits non-zero. Running with valid flags starts without crashing.
 
-- [/] **Task 2: Tool Discovery**
+- [x] **Task 2: Tool Discovery**
   - **Description:** Implement `func discoverTools(scriptsDir string) ([]discoveredTool, error)`. Walk the `--scripts` directory (non-recursive). For each file: check executable bit (`os.FileMode & 0111`). Read up to 10 lines; extract description from the first line matching `# Description: ...` or `// Description: ...`. Build a `discoveredTool` struct: `{ Name, Path, Description string }`. Tool names are the file basename without extension. Symlinks to executables are followed.
   - **Review Criteria:** Returns correct list for a sample directory. Non-executables and subdirectories are skipped. Missing description comment results in an empty string (not an error).
 

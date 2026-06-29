@@ -6,17 +6,6 @@ import (
 	"testing"
 )
 
-func TestFlagParsing(t *testing.T) {
-	// This is a placeholder test to verify the basic structure
-	// Real testing will be done with integration tests
-	t.Run("basic_test", func(t *testing.T) {
-		// Verify that the module loads without errors
-		if testing.Short() {
-			t.Skip("Skipping in short mode")
-		}
-	})
-}
-
 func TestDiscoverTools(t *testing.T) {
 	t.Run("discovers_executable_scripts", func(t *testing.T) {
 		// Create a temporary directory with test scripts
