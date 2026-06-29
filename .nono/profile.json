@@ -1,6 +1,6 @@
 {
   "$schema": "/Users/mkuckert/.config/nono/nono-profile.schema.json",
-  "extends": "opencode",
+  "extends": "always-further/opencode",
   "meta": {
     "author": "Martin Kuckert",
     "name": "opencode-mcp-commands"
@@ -12,19 +12,38 @@
     "access": "readwrite"
   },
   "filesystem": {
+    "read_file": [
+      "~/.aliases",
+      "~/.bash_profile",
+      "~/.bash_prompt",
+      "~/.editorconfig",
+      "~/.extra",
+      "~/.exports",
+      "~/.gitconfig-agents",
+      "~/.gitconfig-private",
+      "~/.gitconfig-work",
+      "~/.gitignore",
+      "~/.path",
+      "~/.tigrc",
+      "~/.vimrc"
+    ],
     "read": [
       "~/.cache",
-      "~/.claude",
       "~/.config",
       "~/.config/nono",
       "~/private",
       "~/private/dev"
     ],
-    "write": ["~/.npm/_cacache/tmp", "~/private/dev/mcp-commands"]
+    "write": ["~/.npm/_cacache/tmp", "~/private/dev/mcp-commands"],
+    "deny": ["~/.gitconfig"]
   },
   "network": {
     "allow_domain": ["localhost"],
     "allow_port": [11438, 12010]
+  },
+  "environment": {
+    "allow_vars": ["HOME"],
+    "set_vars": { "GIT_CONFIG_GLOBAL": "~/.gitconfig-agents" }
   },
   "session_hooks": {
     "before": {
