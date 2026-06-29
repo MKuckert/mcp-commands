@@ -18,7 +18,7 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Project Skeleton & CLI Setup**
+- [x] **Task 1: Project Skeleton & CLI Setup**
   - **Description:** Create a new Go module in a subdirectory (`src/`) with `go.mod` (module name `github.com/mkuckert/mcp-commands`), `main.go`, and `go.sum`. Add `github.com/modelcontextprotocol/go-sdk` as the sole external dependency. Parse CLI flags using the `flag` package: `--dir` (required), `--scripts` (required), `--watch` (bool), `--ip` (default `127.0.0.1`), `--port` (default `0`, stdio mode when unset). Exit non-zero with usage on missing required flags.
   - **Review Criteria:** `go build` produces a binary. Running without `--scripts` or `--dir` prints a helpful error and exits non-zero. Running with valid flags starts without crashing.
 
