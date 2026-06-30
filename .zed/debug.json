@@ -5,7 +5,15 @@
     "request": "launch",
     "mode": "exec",
     "program": "${ZED_WORKTREE_ROOT}/src/mcp-commands",
-    "args": ["--dir", ".", "--scripts", "androidbuild/src/mcpandroidbuild/"],
+    "args": [
+      "--dir",
+      ".",
+      "--scripts",
+      "androidbuild/src/mcpandroidbuild/",
+      "--port",
+      "1235",
+      "--watch",
+    ],
     "build": {
       "command": "go",
       "cwd": "${ZED_WORKTREE_ROOT}/src/",
