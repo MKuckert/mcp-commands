@@ -30,7 +30,7 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
   - **Description:** For each `discoveredTool`, call `server.AddTool` (low-level variant) with a hand-crafted `inputSchema` of `{"type": "object", "additionalProperties": {"type": "string"}}` to accept any string key-value arguments. The handler is a closure capturing the script path. Initialize the MCP server via `mcp.NewServer` before registration.
   - **Review Criteria:** `tools/list` response contains one entry per discovered script with correct name and description. `tools/call` with an unknown tool name returns a proper MCP error response.
 
-- [ ] **Task 4: Tool Execution**
+- [/] **Task 4: Tool Execution**
   - **Description:** Inside each tool handler: convert the `arguments` map to `[]string` (`--key value` pairs, sorted by key for determinism). Build `exec.CommandContext(ctx, scriptPath, args...)` with a 5-minute deadline injected via `context.WithTimeout`. Set `cmd.Dir` to the already-chdir'd working directory. Capture stdout and stderr into separate `bytes.Buffer`. On completion: if exit code != 0 or timeout, return `isError: true` with combined output as `TextContent`. Otherwise return `isError: false` with stdout.
   - **Review Criteria:** A script that echoes its args returns correct output. A non-zero exit returns `isError: true`. A script sleeping > 5 min is killed and returns a timeout error. `cmd.Wait()` is always called to reap the subprocess.
 

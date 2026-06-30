@@ -2,17 +2,28 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+const (
+	defaultToolTimeout = 5 * time.Minute
+	maxToolOutputBytes = 10 << 20
 )
 
 type discoveredTool struct {
@@ -30,19 +41,16 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	var tools []discoveredTool
 
 	for _, entry := range entries {
-		// Skip directories and non-executables
 		if entry.IsDir() {
 			continue
 		}
 
-		// Resolve symlinks
 		filePath := filepath.Join(scriptsDir, entry.Name())
 		resolvedPath, err := filepath.EvalSymlinks(filePath)
 		if err != nil {
 			continue
 		}
 
-		// Check if the resolved path is executable
 		fileInfo, err := os.Stat(resolvedPath)
 		if err != nil {
 			continue
@@ -52,10 +60,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			continue
 		}
 
-		// Extract description from the first 10 lines
 		description := extractDescription(resolvedPath)
-
-		// Tool name is the file basename without extension
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
@@ -81,7 +86,6 @@ func extractDescription(filePath string) string {
 		lineCount++
 		line := scanner.Text()
 
-		// Check for # Description: ... or // Description: ...
 		if strings.Contains(line, "Description:") {
 			parts := strings.SplitN(line, "Description:", 2)
 			if len(parts) == 2 {
@@ -93,6 +97,129 @@ func extractDescription(filePath string) string {
 	return ""
 }
 
+func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return map[string]any{}, nil
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal(trimmed, &args); err == nil {
+		return args, nil
+	}
+
+	var encoded string
+	if err := json.Unmarshal(trimmed, &encoded); err == nil {
+		if err := json.Unmarshal([]byte(encoded), &args); err == nil {
+			return args, nil
+		}
+	}
+
+	return nil, fmt.Errorf("arguments must be a JSON object")
+}
+
+func argumentsToCLIArgs(args map[string]any) []string {
+	if len(args) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	cliArgs := make([]string, 0, len(args)*2)
+	for _, key := range keys {
+		value := args[key]
+		rv := reflect.ValueOf(value)
+		if rv.IsValid() && rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() != reflect.Uint8 {
+			for i := 0; i < rv.Len(); i++ {
+				cliArgs = append(cliArgs, "--"+key, fmt.Sprint(rv.Index(i).Interface()))
+			}
+			continue
+		}
+
+		if value == nil {
+			cliArgs = append(cliArgs, "--"+key, "")
+			continue
+		}
+
+		cliArgs = append(cliArgs, "--"+key, fmt.Sprint(value))
+	}
+
+	return cliArgs
+}
+
+func combineToolOutput(stdout, stderr []byte) string {
+	combined := append([]byte{}, stdout...)
+	if len(stderr) > 0 {
+		if len(combined) > 0 {
+			combined = append(combined, '\n')
+		}
+		combined = append(combined, stderr...)
+	}
+
+	if len(combined) <= maxToolOutputBytes {
+		return string(combined)
+	}
+
+	truncated := string(combined[:maxToolOutputBytes])
+	return truncated + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
+}
+
+func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration) (*mcp.CallToolResult, error) {
+	parsedArgs, err := parseToolArguments(rawArgs)
+	if err != nil {
+		return nil, err
+	}
+
+	cliArgs := argumentsToCLIArgs(parsedArgs)
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
+	cmd.Dir = "."
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	waitErr := cmd.Wait()
+	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
+
+	if waitErr != nil {
+		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+			message := fmt.Sprintf("tool timed out after %s", timeout)
+			if combinedOutput != "" {
+				message += "\n" + combinedOutput
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: message}},
+				IsError: true,
+			}, nil
+		}
+
+		if combinedOutput == "" {
+			combinedOutput = waitErr.Error()
+		}
+
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
+			IsError: true,
+		}, nil
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
+	}, nil
+}
+
 func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
@@ -101,15 +228,12 @@ func main() {
 	portFlag := flag.Int("port", 0, "Port for HTTP server (0 = stdio mode)")
 	flag.Parse()
 
-	// Validate required flags
 	if *dirFlag == "" || *scriptsFlag == "" {
-
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
 		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--ip <ip>] [--port <port>]\n")
 		os.Exit(1)
 	}
 
-	// Run the server
 	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *ipFlag, *portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -117,11 +241,9 @@ func main() {
 }
 
 func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, port int) error {
-	// Create a context that cancels on SIGINT/SIGTERM
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Discover tools
 	tools, err := discoverTools(scriptsDir)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
@@ -131,21 +253,17 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsDir)
 	}
 
-	// Create MCP server
 	impl := &mcp.Implementation{
 		Name:    "mcp-commands",
 		Version: "1.0.0",
 	}
 	server := mcp.NewServer(impl, nil)
 
-	// Register each discovered tool
 	for _, discoveredTool := range tools {
-		// Capture tool details in closure
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
 		toolDescription := discoveredTool.Description
 
-		// Hand-crafted input schema accepting any string key-value arguments
 		inputSchema := map[string]any{
 			"type": "object",
 			"additionalProperties": map[string]any{
@@ -153,37 +271,23 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 			},
 		}
 
-		// Marshal schema to JSON for the Tool.
-		// Use json.RawMessage so the schema remains a JSON object, not base64-encoded bytes.
 		schemaJSON, err := json.Marshal(inputSchema)
 		if err != nil {
 			return fmt.Errorf("failed to marshal input schema for tool %s: %w", toolName, err)
 		}
 
-		// Create tool definition
 		toolDef := &mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
 			InputSchema: json.RawMessage(schemaJSON),
 		}
 
-		// Create handler closure capturing tool path and name
-		// Handler signature: ToolHandler func(context.Context, *CallToolRequest) (*CallToolResult, error)
 		handler := func(scriptPath, name string) mcp.ToolHandler {
 			return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				// For now, return a placeholder indicating tool was called
-				// Task 4 will implement actual execution
-				output := fmt.Sprintf("Tool '%s' called with arguments: %v\n", name, req.Params.Arguments)
-				result := &mcp.CallToolResult{
-					Content: []mcp.Content{
-						&mcp.TextContent{Text: output},
-					},
-				}
-				return result, nil
+				return executeTool(ctx, scriptPath, req.Params.Arguments, defaultToolTimeout)
 			}
 		}(toolPath, toolName)
 
-		// Add tool to server using low-level API
 		server.AddTool(toolDef, handler)
 		fmt.Fprintf(os.Stderr, "Registered tool: %s\n", toolName)
 	}
@@ -196,7 +300,6 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	fmt.Fprintf(os.Stderr, "Port: %d\n", port)
 	fmt.Fprintf(os.Stderr, "Discovered tools: %d\n", len(tools))
 
-	// Wait for signal
 	<-sigCtx.Done()
 	return nil
 }
