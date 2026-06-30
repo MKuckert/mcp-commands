@@ -65,11 +65,11 @@
       "name": "Manifest",
       "options": {
         "baseURL": "http://localhost:11438/v1",
-        "apiKey": "mnfst_fg2oPyRbADke61Mj406BoEuKcavenT1bsbnLwLVuUFQ",
+        "apiKey": "mnfst_9TRgPLoGbH7R3pA6jTzQUCEnYTdZXQnOATWGMO-IyZc",
       },
       "models": {
         "mini": {
-          "name": "Mini (apple on device)",
+          "name": "Mini (apple on device, Qwen3.5-0.8B)",
           "headers": {
             "X-Manifest-Tier": "mini",
           },
@@ -81,7 +81,7 @@
           },
         },
         "medium": {
-          "name": "Medium (Qwen3.6-27B, Haiku, GPT-5.4-mini)",
+          "name": "Medium (Haiku, GPT-5.4-mini)",
           "headers": {
             "X-Manifest-Tier": "medium",
           },
