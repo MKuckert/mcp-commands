@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp/tool"
 )
 
 type discoveredTool struct {
@@ -127,7 +130,53 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsDir)
 	}
 
-	// Placeholder for server initialization
+	// Create MCP server
+	server := mcp.NewServer(mcp.ServerOptions{
+		Name:    "mcp-commands",
+		Version: "1.0.0",
+	})
+
+	// Register each discovered tool
+	for _, discoveredTool := range tools {
+		// Capture tool details in closure
+		toolName := discoveredTool.Name
+		toolPath := discoveredTool.Path
+		toolDescription := discoveredTool.Description
+
+		// Hand-crafted input schema accepting any string key-value arguments
+		inputSchema := map[string]interface{}{
+			"type": "object",
+			"additionalProperties": map[string]interface{}{
+				"type": "string",
+			},
+		}
+
+		// Create handler closure capturing tool path and name
+		handler := func(scriptPath, name string) mcp.ToolHandlerFunc {
+			return func(ctx context.Context, arguments map[string]interface{}) (*tool.ToolResultContent, error) {
+				// For now, return a placeholder indicating tool was called
+				// Task 4 will implement actual execution
+				output := fmt.Sprintf("Tool '%s' called with arguments: %v\n", name, arguments)
+				return tool.NewToolResultTextContent(output), nil
+			}
+		}(toolPath, toolName)
+
+		// Create tool definition
+		toolDef := &tool.Tool{
+			Name:        toolName,
+			Description: toolDescription,
+			InputSchema: inputSchema,
+		}
+
+		// Add tool to server
+		err = server.AddTool(toolDef, handler)
+		if err != nil {
+			return fmt.Errorf("failed to register tool %s: %w", toolName, err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Registered tool: %s\n", toolName)
+	}
+
 	fmt.Fprintf(os.Stderr, "Starting mcp-commands server\n")
 	fmt.Fprintf(os.Stderr, "Dir: %s\n", dir)
 	fmt.Fprintf(os.Stderr, "Scripts: %s\n", scriptsDir)
@@ -135,9 +184,6 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	fmt.Fprintf(os.Stderr, "IP: %s\n", ip)
 	fmt.Fprintf(os.Stderr, "Port: %d\n", port)
 	fmt.Fprintf(os.Stderr, "Discovered tools: %d\n", len(tools))
-	for _, tool := range tools {
-		fmt.Fprintf(os.Stderr, "  - %s: %s\n", tool.Name, tool.Description)
-	}
 
 	// Wait for signal
 	<-sigCtx.Done()
