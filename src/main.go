@@ -103,6 +103,7 @@ func main() {
 
 	// Validate required flags
 	if *dirFlag == "" || *scriptsFlag == "" {
+
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
 		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--ip <ip>] [--port <port>]\n")
 		os.Exit(1)
@@ -145,14 +146,15 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		toolDescription := discoveredTool.Description
 
 		// Hand-crafted input schema accepting any string key-value arguments
-		inputSchema := map[string]interface{}{
+		inputSchema := map[string]any{
 			"type": "object",
-			"additionalProperties": map[string]interface{}{
+			"additionalProperties": map[string]any{
 				"type": "string",
 			},
 		}
 
-		// Marshal schema to JSON for the Tool
+		// Marshal schema to JSON for the Tool.
+		// Use json.RawMessage so the schema remains a JSON object, not base64-encoded bytes.
 		schemaJSON, err := json.Marshal(inputSchema)
 		if err != nil {
 			return fmt.Errorf("failed to marshal input schema for tool %s: %w", toolName, err)
@@ -162,7 +164,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		toolDef := &mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
-			InputSchema: schemaJSON,
+			InputSchema: json.RawMessage(schemaJSON),
 		}
 
 		// Create handler closure capturing tool path and name
