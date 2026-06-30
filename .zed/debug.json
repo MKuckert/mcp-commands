@@ -1,0 +1,15 @@
+[
+  {
+    "label": "Debug Prebuilt Binary",
+    "adapter": "Delve",
+    "request": "launch",
+    "mode": "exec",
+    "program": "${ZED_WORKTREE_ROOT}/src/mcp-commands",
+    "args": ["--dir", ".", "--scripts", "androidbuild/src/mcpandroidbuild/"],
+    "build": {
+      "command": "go",
+      "cwd": "${ZED_WORKTREE_ROOT}/src/",
+      "args": ["build"],
+    },
+  },
+]
