@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestDiscoverTools(t *testing.T) {
 	t.Run("discovers_executable_scripts", func(t *testing.T) {
+
 		// Create a temporary directory with test scripts
 		tmpDir := t.TempDir()
 
@@ -188,4 +193,69 @@ echo "Hello"
 			}
 		}
 	})
+}
+
+func TestWatchTools(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server)
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
+	if err := os.WriteFile(addedScriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+		t.Fatalf("failed to create second script: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := clientSession.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools failed: %v", err)
+		}
+		if len(res.Tools) == 2 {
+			cancel()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watchTools did not update before deadline: got %d tools", len(res.Tools))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
+	}
 }

@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -169,6 +170,111 @@ func combineToolOutput(stdout, stderr []byte) string {
 	return truncated + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
+type toolRegistry struct {
+	server *mcp.Server
+	mu     sync.Mutex
+	names  []string
+}
+
+func newToolRegistry(server *mcp.Server) *toolRegistry {
+	return &toolRegistry{server: server}
+}
+
+func (r *toolRegistry) replace(tools []discoveredTool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.names) > 0 {
+		r.server.RemoveTools(r.names...)
+	}
+
+	r.names = make([]string, 0, len(tools))
+	for _, discoveredTool := range tools {
+		toolName := discoveredTool.Name
+		toolPath := discoveredTool.Path
+		toolDescription := discoveredTool.Description
+
+		r.server.AddTool(&mcp.Tool{
+			Name:        toolName,
+			Description: toolDescription,
+			InputSchema: mustJSONMarshal(map[string]any{
+				"type": "object",
+				"additionalProperties": map[string]any{
+					"type": "string",
+				},
+			}),
+		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout)
+		})
+
+		r.names = append(r.names, toolName)
+	}
+}
+
+func mustJSONMarshal(v any) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func snapshotScriptsDir(scriptsDir string) (string, error) {
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		return "", err
+	}
+
+	var builder strings.Builder
+	for _, entry := range entries {
+		builder.WriteString(entry.Name())
+		builder.WriteByte(':')
+		if info, err := os.Stat(filepath.Join(scriptsDir, entry.Name())); err == nil {
+			builder.WriteString(info.Mode().String())
+		} else {
+			builder.WriteString("error")
+		}
+		builder.WriteByte('\n')
+	}
+
+	return builder.String(), nil
+}
+
+func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
+	currentSnapshot, err := snapshotScriptsDir(scriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to snapshot scripts directory: %w", err)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			nextSnapshot, err := snapshotScriptsDir(scriptsDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to watch scripts directory: %v\n", err)
+				continue
+			}
+			if nextSnapshot == currentSnapshot {
+				continue
+			}
+
+			tools, err := discoverTools(scriptsDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
+				continue
+			}
+
+			registry.replace(tools)
+			currentSnapshot = nextSnapshot
+		}
+	}
+}
+
 func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration) (*mcp.CallToolResult, error) {
 	parsedArgs, err := parseToolArguments(rawArgs)
 	if err != nil {
@@ -275,42 +381,19 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		Version: "1.0.0",
 	}
 	server := mcp.NewServer(impl, nil)
-
-	for _, discoveredTool := range tools {
-		toolName := discoveredTool.Name
-		toolPath := discoveredTool.Path
-		toolDescription := discoveredTool.Description
-
-		inputSchema := map[string]any{
-			"type": "object",
-			"additionalProperties": map[string]any{
-				"type": "string",
-			},
-		}
-
-		schemaJSON, err := json.Marshal(inputSchema)
-		if err != nil {
-			return fmt.Errorf("failed to marshal input schema for tool %s: %w", toolName, err)
-		}
-
-		toolDef := &mcp.Tool{
-			Name:        toolName,
-			Description: toolDescription,
-			InputSchema: json.RawMessage(schemaJSON),
-		}
-
-		handler := func(scriptPath string) mcp.ToolHandler {
-			return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return executeTool(ctx, scriptPath, req.Params.Arguments, defaultToolTimeout)
-			}
-		}(toolPath)
-
-		server.AddTool(toolDef, handler)
-		fmt.Fprintf(os.Stderr, "Registered tool: %s\n", toolName)
-	}
+	registry := newToolRegistry(server)
+	registry.replace(tools)
 
 	if err := os.Chdir(dirAbs); err != nil {
 		return fmt.Errorf("failed to change working directory: %w", err)
+	}
+
+	if watch {
+		go func() {
+			if err := watchTools(sigCtx, scriptsAbs, registry, 2*time.Second); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "Warning: watch loop stopped: %v\n", err)
+			}
+		}()
 	}
 
 	if port > 0 {

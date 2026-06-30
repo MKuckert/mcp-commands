@@ -38,7 +38,7 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
   - **Description:** Full bootstrap order: (1) parse flags, (2) resolve `--scripts` and `--dir` to absolute paths, (3) discover tools, (4) register tools on MCP server, (5) `os.Chdir(--dir)`, (6) start transport. If `--port > 0`, start `mcp.NewStreamableHTTPHandler` on `--ip:--port` via `net/http`; otherwise call `server.Run(ctx, &mcp.StdioTransport{})`. Handle `SIGINT`/`SIGTERM` via `signal.NotifyContext` for clean shutdown.
   - **Review Criteria:** Stdio mode completes a full `initialize` → `tools/list` → `tools/call` round-trip. HTTP mode responds on the configured address. Ctrl-C shuts down without leaving zombie processes.
 
-- [ ] **Task 6: `--watch` Hot-Reload**
+- [x] **Task 6: `--watch` Hot-Reload**
   - **Description:** When `--watch` is set, launch a background goroutine that polls the `--scripts` directory every 2 seconds using `os.ReadDir`. On any change (file added, removed, or executable bit changed), re-run discovery and re-register all tools atomically behind a mutex. Send a `notifications/tools/list_changed` notification via the SDK if supported.
   - **Review Criteria:** Adding or removing a script file while the server is running updates `tools/list` within ~2 seconds. No race conditions under `go test -race`.
 
