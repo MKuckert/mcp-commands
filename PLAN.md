@@ -29,7 +29,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
     - Existing `TestWatchTools` still passes.
     - A new or updated sub-test verifies that overwriting a script's content (name and mode unchanged) produces a different snapshot string, and that `watchTools` subsequently calls `registry.replace`.
 
-- [ ] **Task 3: Remove global `os.Chdir`; store `dirAbs` on `toolRegistry`**
+- [x] **Task 3: Remove global `os.Chdir`; store `dirAbs` on `toolRegistry`**
   - **Description:** `run()` calls `os.Chdir(dirAbs)` to set a global working directory, which is thread-unsafe and an anti-pattern. The fix: store `dirAbs` on `toolRegistry` at construction time. Change `newToolRegistry(server *mcp.Server)` to `newToolRegistry(server *mcp.Server, dir string) *toolRegistry`, storing `dir` as a field `dirAbs string`. Inside `replace()`, the closure passed to `mcp.Server.AddTool` captures `r.dirAbs` and sets `cmd.Dir = r.dirAbs` in `executeTool`. `executeTool` gains a `dir string` parameter for this. Remove `os.Chdir` from `run()` and remove `cmd.Dir = "."` from `executeTool`. The `replace()` and `watchTools()` signatures remain unchanged.
   - **Review Criteria:**
     - `os.Chdir` is absent from the codebase.

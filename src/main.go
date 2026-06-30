@@ -29,6 +29,7 @@ const (
 	maxToolOutputBytes    = 1 << 20
 	scanDescriptionLines  = 10
 	scanDescriptionPrefix = "Description:"
+	watchToolsInterval    = 2 * time.Second
 	serverName            = "mcp-commands"
 	serverVersion         = "0.1.0"
 )
@@ -182,12 +183,13 @@ func combineToolOutput(stdout, stderr []byte) string {
 
 type toolRegistry struct {
 	server *mcp.Server
+	dirAbs string
 	mu     sync.Mutex
 	names  []string
 }
 
-func newToolRegistry(server *mcp.Server) *toolRegistry {
-	return &toolRegistry{server: server}
+func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
+	return &toolRegistry{server: server, dirAbs: dir}
 }
 
 func (r *toolRegistry) replace(tools []discoveredTool) {
@@ -214,7 +216,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 				},
 			}),
 		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout)
+			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout, r.dirAbs)
 		})
 
 		r.names = append(r.names, toolName)
@@ -290,7 +292,7 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 }
 
-func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration) (*mcp.CallToolResult, error) {
+func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	parsedArgs, err := parseToolArguments(rawArgs)
 	if err != nil {
 		return nil, err
@@ -301,7 +303,7 @@ func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
-	cmd.Dir = "."
+	cmd.Dir = dir
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -396,16 +398,12 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server)
+	registry := newToolRegistry(server, dirAbs)
 	registry.replace(tools)
-
-	if err := os.Chdir(dirAbs); err != nil {
-		return fmt.Errorf("failed to change working directory: %w", err)
-	}
 
 	if watch {
 		go func() {
-			if err := watchTools(sigCtx, scriptsAbs, registry, 2*time.Second); err != nil && !errors.Is(err, context.Canceled) {
+			if err := watchTools(sigCtx, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(os.Stderr, "Warning: watch loop stopped: %v\n", err)
 			}
 		}()

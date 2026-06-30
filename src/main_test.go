@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,7 +262,7 @@ func TestWatchTools(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server)
+	registry := newToolRegistry(server, "")
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -331,7 +332,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server)
+	registry := newToolRegistry(server, "")
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -392,5 +393,37 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
+func TestExecuteToolWithWorkingDirectory(t *testing.T) {
+	// Create a temporary directory that will be the working directory
+	workDir := t.TempDir()
+
+	// Create a script that outputs its current working directory
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "pwd.sh")
+	scriptContent := "#!/bin/bash\npwd"
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	// Execute the script with the working directory set
+	ctx := context.Background()
+	result, err := executeTool(ctx, scriptPath, nil, 5*time.Second, workDir)
+	if err != nil {
+		t.Fatalf("executeTool failed: %v", err)
+	}
+
+	if result.IsError {
+		t.Fatalf("executeTool returned an error: %s", result.Content[0])
+	}
+
+	// Extract the working directory from the script's output
+	outputPath := strings.TrimSpace(result.Content[0].(*mcp.TextContent).Text)
+
+	// Verify that the output matches the workDir we supplied
+	if outputPath != workDir {
+		t.Errorf("expected working directory %q, got %q", workDir, outputPath)
 	}
 }
