@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -225,7 +226,7 @@ func main() {
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
 	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
 	ipFlag := flag.String("ip", "127.0.0.1", "IP address for HTTP server")
-	portFlag := flag.Int("port", 0, "Port for HTTP server (0 = stdio mode)")
+	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	flag.Parse()
 
 	if *dirFlag == "" || *scriptsFlag == "" {
@@ -244,13 +245,29 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	tools, err := discoverTools(scriptsDir)
+	scriptsAbs, err := filepath.Abs(scriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve scripts path: %w", err)
+	}
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve dir path: %w", err)
+	}
+
+	if _, err := os.Stat(scriptsAbs); err != nil {
+		return fmt.Errorf("scripts path inaccessible: %w", err)
+	}
+	if _, err := os.Stat(dirAbs); err != nil {
+		return fmt.Errorf("dir path inaccessible: %w", err)
+	}
+
+	tools, err := discoverTools(scriptsAbs)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
 
 	if len(tools) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsDir)
+		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
 	}
 
 	impl := &mcp.Implementation{
@@ -282,24 +299,41 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 			InputSchema: json.RawMessage(schemaJSON),
 		}
 
-		handler := func(scriptPath, name string) mcp.ToolHandler {
+		handler := func(scriptPath string) mcp.ToolHandler {
 			return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 				return executeTool(ctx, scriptPath, req.Params.Arguments, defaultToolTimeout)
 			}
-		}(toolPath, toolName)
+		}(toolPath)
 
 		server.AddTool(toolDef, handler)
 		fmt.Fprintf(os.Stderr, "Registered tool: %s\n", toolName)
 	}
 
-	fmt.Fprintf(os.Stderr, "Starting mcp-commands server\n")
-	fmt.Fprintf(os.Stderr, "Dir: %s\n", dir)
-	fmt.Fprintf(os.Stderr, "Scripts: %s\n", scriptsDir)
-	fmt.Fprintf(os.Stderr, "Watch: %v\n", watch)
-	fmt.Fprintf(os.Stderr, "IP: %s\n", ip)
-	fmt.Fprintf(os.Stderr, "Port: %d\n", port)
-	fmt.Fprintf(os.Stderr, "Discovered tools: %d\n", len(tools))
+	if err := os.Chdir(dirAbs); err != nil {
+		return fmt.Errorf("failed to change working directory: %w", err)
+	}
 
-	<-sigCtx.Done()
-	return nil
+	if port > 0 {
+		addr := fmt.Sprintf("%s:%d", ip, port)
+		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+			return server
+		}, nil)
+		serverHTTP := &http.Server{Addr: addr, Handler: handler}
+
+		go func() {
+			<-sigCtx.Done()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			_ = serverHTTP.Shutdown(shutdownCtx)
+		}()
+
+		fmt.Fprintf(os.Stderr, "Starting HTTP server on %s\n", addr)
+		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("failed to start HTTP server: %w", err)
+		}
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Starting stdio server\n")
+	return server.Run(sigCtx, &mcp.StdioTransport{})
 }

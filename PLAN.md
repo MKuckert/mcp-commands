@@ -30,11 +30,11 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
   - **Description:** For each `discoveredTool`, call `server.AddTool` (low-level variant) with a hand-crafted `inputSchema` of `{"type": "object", "additionalProperties": {"type": "string"}}` to accept any string key-value arguments. The handler is a closure capturing the script path. Initialize the MCP server via `mcp.NewServer` before registration.
   - **Review Criteria:** `tools/list` response contains one entry per discovered script with correct name and description. `tools/call` with an unknown tool name returns a proper MCP error response.
 
-- [/] **Task 4: Tool Execution**
+- [x] **Task 4: Tool Execution**
   - **Description:** Inside each tool handler: convert the `arguments` map to `[]string` (`--key value` pairs, sorted by key for determinism). Build `exec.CommandContext(ctx, scriptPath, args...)` with a 5-minute deadline injected via `context.WithTimeout`. Set `cmd.Dir` to the already-chdir'd working directory. Capture stdout and stderr into separate `bytes.Buffer`. On completion: if exit code != 0 or timeout, return `isError: true` with combined output as `TextContent`. Otherwise return `isError: false` with stdout.
   - **Review Criteria:** A script that echoes its args returns correct output. A non-zero exit returns `isError: true`. A script sleeping > 5 min is killed and returns a timeout error. `cmd.Wait()` is always called to reap the subprocess.
 
-- [ ] **Task 5: Transport & Startup Sequence**
+- [x] **Task 5: Transport & Startup Sequence**
   - **Description:** Full bootstrap order: (1) parse flags, (2) resolve `--scripts` and `--dir` to absolute paths, (3) discover tools, (4) register tools on MCP server, (5) `os.Chdir(--dir)`, (6) start transport. If `--port > 0`, start `mcp.NewStreamableHTTPHandler` on `--ip:--port` via `net/http`; otherwise call `server.Run(ctx, &mcp.StdioTransport{})`. Handle `SIGINT`/`SIGTERM` via `signal.NotifyContext` for clean shutdown.
   - **Review Criteria:** Stdio mode completes a full `initialize` → `tools/list` → `tools/call` round-trip. HTTP mode responds on the configured address. Ctrl-C shuts down without leaving zombie processes.
 
