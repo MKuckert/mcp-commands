@@ -24,8 +24,12 @@ import (
 )
 
 const (
-	defaultToolTimeout = 5 * time.Minute
-	maxToolOutputBytes = 10 << 20
+	defaultToolTimeout    = 5 * time.Minute
+	maxToolOutputBytes    = 1 << 20
+	scanDescriptionLines  = 10
+	scanDescriptionPrefix = "Description:"
+	serverName            = "mcp-commands"
+	serverVersion         = "0.1.0"
 )
 
 type discoveredTool struct {
@@ -58,6 +62,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			continue
 		}
 
+		// Check executable flag
 		if fileInfo.Mode()&0111 == 0 {
 			continue
 		}
@@ -84,16 +89,20 @@ func extractDescription(filePath string) string {
 
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
-	for scanner.Scan() && lineCount < 10 {
+	for scanner.Scan() && lineCount < scanDescriptionLines {
 		lineCount++
 		line := scanner.Text()
 
-		if strings.Contains(line, "Description:") {
-			parts := strings.SplitN(line, "Description:", 2)
+		if strings.Contains(line, scanDescriptionPrefix) {
+			parts := strings.SplitN(line, scanDescriptionPrefix, 2)
 			if len(parts) == 2 {
 				return strings.TrimSpace(parts[1])
 			}
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return ""
 	}
 
 	return ""
@@ -377,8 +386,8 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	}
 
 	impl := &mcp.Implementation{
-		Name:    "mcp-commands",
-		Version: "1.0.0",
+		Name:    serverName,
+		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
 	registry := newToolRegistry(server)
