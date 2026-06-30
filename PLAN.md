@@ -22,7 +22,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
     - The watch-loop path in `watchTools` logs the returned error to stderr and calls `continue` (matching the existing pattern for other `snapshotScriptsDir` errors at line 268).
     - Unit test for the `os.Stat` failure path: use `t.Skip("requires non-root") if os.Getuid() == 0` guard, then create a temp file, remove read permission (`chmod 000` equivalent), and assert that `snapshotScriptsDir` returns a non-nil error. Document the root-guard limitation in the test's comment.
 
-- [ ] **Task 2: Fix hot-reload snapshot to detect content changes**
+- [x] **Task 2: Fix hot-reload snapshot to detect content changes**
   - **Description:** `snapshotScriptsDir` currently encodes only `Name` and `Mode` per entry. It must also include `ModTime` (nanosecond precision via `UnixNano()`) and `Size` so that edits to an existing script (e.g., updating the `Description:` comment) trigger a re-discovery. This task is done on the clean error-returning path established in Task 1.
   - **Review Criteria:**
     - `snapshotScriptsDir` includes `info.ModTime().UnixNano()` and `info.Size()` in the snapshot string for each entry.

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -244,6 +245,10 @@ func snapshotScriptsDir(scriptsDir string) (string, error) {
 		builder.WriteString(entry.Name())
 		builder.WriteByte(':')
 		builder.WriteString(info.Mode().String())
+		builder.WriteByte(':')
+		builder.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
+		builder.WriteByte(':')
+		builder.WriteString(strconv.FormatInt(info.Size(), 10))
 		builder.WriteByte('\n')
 	}
 
