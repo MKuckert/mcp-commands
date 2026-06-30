@@ -236,13 +236,14 @@ func snapshotScriptsDir(scriptsDir string) (string, error) {
 
 	var builder strings.Builder
 	for _, entry := range entries {
+		info, err := os.Stat(filepath.Join(scriptsDir, entry.Name()))
+		if err != nil {
+			return "", err
+		}
+
 		builder.WriteString(entry.Name())
 		builder.WriteByte(':')
-		if info, err := os.Stat(filepath.Join(scriptsDir, entry.Name())); err == nil {
-			builder.WriteString(info.Mode().String())
-		} else {
-			builder.WriteString("error")
-		}
+		builder.WriteString(info.Mode().String())
 		builder.WriteByte('\n')
 	}
 

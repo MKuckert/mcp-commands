@@ -195,6 +195,38 @@ echo "Hello"
 	})
 }
 
+func TestSnapshotScriptsDirReturnsErrorOnStatFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("requires non-root")
+	}
+
+	// Root can bypass the permission failure this regression test relies on,
+	// so skip it when running as uid 0.
+	tmpDir := t.TempDir()
+	secretDir := filepath.Join(tmpDir, "secret")
+	if err := os.Mkdir(secretDir, 0o755); err != nil {
+		t.Fatalf("failed to create secret directory: %v", err)
+	}
+
+	targetPath := filepath.Join(secretDir, "script.sh")
+	if err := os.WriteFile(targetPath, []byte("#!/bin/bash\necho hidden\n"), 0o755); err != nil {
+		t.Fatalf("failed to create target script: %v", err)
+	}
+	if err := os.Chmod(secretDir, 0o000); err != nil {
+		t.Fatalf("failed to remove permissions from secret directory: %v", err)
+	}
+	defer os.Chmod(secretDir, 0o755)
+
+	linkPath := filepath.Join(tmpDir, "script-link.sh")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	if _, err := snapshotScriptsDir(tmpDir); err == nil {
+		t.Fatal("expected snapshotScriptsDir to fail when os.Stat cannot access an entry")
+	}
+}
+
 func TestWatchTools(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")

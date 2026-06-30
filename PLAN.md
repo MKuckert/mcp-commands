@@ -14,7 +14,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Surface errors in `snapshotScriptsDir` instead of silent substitution**
+- [x] **Task 1: Surface errors in `snapshotScriptsDir` instead of silent substitution**
   - **Description:** When `os.Stat` fails inside `snapshotScriptsDir` (e.g., a file is deleted after `ReadDir` returns — TOCTOU), the code silently appends the literal string `"error"` to the snapshot. This fakes state and violates the error-handling principle. The error must be returned to the caller. `watchTools` already logs `snapshotScriptsDir` errors to stderr and continues on the ticker path; this behaviour is acceptable and must be preserved for the new return path too.
   - **Review Criteria:**
     - `snapshotScriptsDir` returns `("", error)` when any `os.Stat` call inside it fails.
