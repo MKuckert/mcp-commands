@@ -10,7 +10,7 @@ permission:
   list: allow
   bash:
     "*": deny
-    go: allow
+    go *: allow
   android_*: allow
   question: allow
   task: allow
@@ -20,8 +20,8 @@ permission:
     supabase-postgres-best-practices: deny
   todowrite: deny
   doom_loop: allow
-  external_dirs:
-    - /Users/mkuckert/go/
+  external_directory:
+    /Users/mkuckert/.go/**: allow
 color: "#00AA00"
 steps: 500
 ---

@@ -13,7 +13,6 @@ import (
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/modelcontextprotocol/go-sdk/mcp/tool"
 )
 
 type discoveredTool struct {
@@ -132,10 +131,11 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	}
 
 	// Create MCP server
-	server := mcp.NewServer(mcp.ServerOptions{
+	impl := &mcp.Implementation{
 		Name:    "mcp-commands",
 		Version: "1.0.0",
-	})
+	}
+	server := mcp.NewServer(impl, nil)
 
 	// Register each discovered tool
 	for _, discoveredTool := range tools {
@@ -152,35 +152,37 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 			},
 		}
 
-		// Marshal schema to JSON
+		// Marshal schema to JSON for the Tool
 		schemaJSON, err := json.Marshal(inputSchema)
 		if err != nil {
 			return fmt.Errorf("failed to marshal input schema for tool %s: %w", toolName, err)
 		}
 
-		// Create handler closure capturing tool path and name
-		handler := func(scriptPath, name string) mcp.ToolHandlerFunc {
-			return func(ctx context.Context, arguments map[string]interface{}) (*tool.ToolResultContent, error) {
-				// For now, return a placeholder indicating tool was called
-				// Task 4 will implement actual execution
-				output := fmt.Sprintf("Tool '%s' called with arguments: %v\n", name, arguments)
-				return tool.NewToolResultTextContent(output), nil
-			}
-		}(toolPath, toolName)
-
 		// Create tool definition
-		toolDef := &tool.Tool{
+		toolDef := &mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
 			InputSchema: schemaJSON,
 		}
 
-		// Add tool to server
-		err = server.AddTool(toolDef, handler)
-		if err != nil {
-			return fmt.Errorf("failed to register tool %s: %w", toolName, err)
-		}
+		// Create handler closure capturing tool path and name
+		// Handler signature: ToolHandler func(context.Context, *CallToolRequest) (*CallToolResult, error)
+		handler := func(scriptPath, name string) mcp.ToolHandler {
+			return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				// For now, return a placeholder indicating tool was called
+				// Task 4 will implement actual execution
+				output := fmt.Sprintf("Tool '%s' called with arguments: %v\n", name, req.Params.Arguments)
+				result := &mcp.CallToolResult{
+					Content: []mcp.Content{
+						&mcp.TextContent{Text: output},
+					},
+				}
+				return result, nil
+			}
+		}(toolPath, toolName)
 
+		// Add tool to server using low-level API
+		server.AddTool(toolDef, handler)
 		fmt.Fprintf(os.Stderr, "Registered tool: %s\n", toolName)
 	}
 

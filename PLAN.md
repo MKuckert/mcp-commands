@@ -26,9 +26,9 @@ Create a standalone Go binary (`mcp-commands`) that dynamically discovers execut
   - **Description:** Implement `func discoverTools(scriptsDir string) ([]discoveredTool, error)`. Walk the `--scripts` directory (non-recursive). For each file: check executable bit (`os.FileMode & 0111`). Read up to 10 lines; extract description from the first line matching `# Description: ...` or `// Description: ...`. Build a `discoveredTool` struct: `{ Name, Path, Description string }`. Tool names are the file basename without extension. Symlinks to executables are followed.
   - **Review Criteria:** Returns correct list for a sample directory. Non-executables and subdirectories are skipped. Missing description comment results in an empty string (not an error).
 
-- [/] **Task 3: Dynamic Tool Registration**
-   - **Description:** For each `discoveredTool`, call `server.AddTool` (low-level variant) with a hand-crafted `inputSchema` of `{"type": "object", "additionalProperties": {"type": "string"}}` to accept any string key-value arguments. The handler is a closure capturing the script path. Initialize the MCP server via `mcp.NewServer` before registration.
-   - **Review Criteria:** `tools/list` response contains one entry per discovered script with correct name and description. `tools/call` with an unknown tool name returns a proper MCP error response.
+- [x] **Task 3: Dynamic Tool Registration**
+  - **Description:** For each `discoveredTool`, call `server.AddTool` (low-level variant) with a hand-crafted `inputSchema` of `{"type": "object", "additionalProperties": {"type": "string"}}` to accept any string key-value arguments. The handler is a closure capturing the script path. Initialize the MCP server via `mcp.NewServer` before registration.
+  - **Review Criteria:** `tools/list` response contains one entry per discovered script with correct name and description. `tools/call` with an unknown tool name returns a proper MCP error response.
 
 - [ ] **Task 4: Tool Execution**
   - **Description:** Inside each tool handler: convert the `arguments` map to `[]string` (`--key value` pairs, sorted by key for determinism). Build `exec.CommandContext(ctx, scriptPath, args...)` with a 5-minute deadline injected via `context.WithTimeout`. Set `cmd.Dir` to the already-chdir'd working directory. Capture stdout and stderr into separate `bytes.Buffer`. On completion: if exit code != 0 or timeout, return `isError: true` with combined output as `TextContent`. Otherwise return `isError: false` with stdout.
