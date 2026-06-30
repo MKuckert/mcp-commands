@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -151,6 +152,12 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 			},
 		}
 
+		// Marshal schema to JSON
+		schemaJSON, err := json.Marshal(inputSchema)
+		if err != nil {
+			return fmt.Errorf("failed to marshal input schema for tool %s: %w", toolName, err)
+		}
+
 		// Create handler closure capturing tool path and name
 		handler := func(scriptPath, name string) mcp.ToolHandlerFunc {
 			return func(ctx context.Context, arguments map[string]interface{}) (*tool.ToolResultContent, error) {
@@ -165,7 +172,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 		toolDef := &tool.Tool{
 			Name:        toolName,
 			Description: toolDescription,
-			InputSchema: inputSchema,
+			InputSchema: schemaJSON,
 		}
 
 		// Add tool to server
