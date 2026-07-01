@@ -40,7 +40,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
     - Existing tests pass; update any `newToolRegistry` call in `main_test.go` to supply an empty string or `t.TempDir()` as the dir argument.
     - A new sub-test confirms that the executed script's working directory matches the `dirAbs` supplied to `newToolRegistry`.
 
-- [ ] **Task 4: Validate argument keys in `argumentsToCLIArgs`**
+- [x] **Task 4: Validate argument keys in `argumentsToCLIArgs`**
   - **Description:** JSON keys supplied by the caller are blindly prepended with `--` and forwarded to the script. An empty key produces `--` (POSIX end-of-flags sentinel); keys with spaces, `=`, or leading `-` corrupt the script's argument parser. Change the function signature to `argumentsToCLIArgs(args map[string]any) ([]string, error)`. Add a validation step that rejects any key not matching the regex `^[a-zA-Z][a-zA-Z0-9_-]*$`. Return a descriptive error for any invalid key. Update `executeTool` to handle this error and return an `IsError` `CallToolResult`.
   - **Review Criteria:**
     - `argumentsToCLIArgs` returns `([]string, error)`.

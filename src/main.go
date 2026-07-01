@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,13 +132,20 @@ func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 	return nil, fmt.Errorf("arguments must be a JSON object")
 }
 
-func argumentsToCLIArgs(args map[string]any) []string {
+var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	if len(args) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	keys := make([]string, 0, len(args))
 	for key := range args {
+		if !argumentKeyPattern.MatchString(key) {
+			// Reject digit-leading keys so we never generate ambiguous flags that can
+			// be parsed as positional arguments or mistaken for numeric values.
+			return nil, fmt.Errorf("invalid argument key %q: keys must match %s", key, argumentKeyPattern.String())
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -161,7 +169,7 @@ func argumentsToCLIArgs(args map[string]any) []string {
 		cliArgs = append(cliArgs, "--"+key, fmt.Sprint(value))
 	}
 
-	return cliArgs
+	return cliArgs, nil
 }
 
 func combineToolOutput(stdout, stderr []byte) string {
@@ -298,7 +306,14 @@ func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage
 		return nil, err
 	}
 
-	cliArgs := argumentsToCLIArgs(parsedArgs)
+	cliArgs, err := argumentsToCLIArgs(parsedArgs)
+	if err != nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil
+	}
+
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

@@ -1,6 +1,6 @@
 {
   "$schema": "/Users/mkuckert/.config/nono/nono-profile.schema.json",
-  "extends": "always-further/opencode",
+  "extends": "opencode",
   "meta": {
     "author": "Martin Kuckert",
     "name": "opencode-mcp-commands"
@@ -34,7 +34,7 @@
       "~/private",
       "~/private/dev"
     ],
-    "allow": ["~/.npm/_cacache/tmp", "~/.go"],
+    "allow": ["~/.npm/_cacache/tmp", "~/.go", "~/private/dev/mcp-commands"],
     "deny": ["~/.gitconfig"]
   },
   "network": {

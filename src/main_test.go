@@ -396,6 +396,81 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}
 }
 
+func TestArgumentsToCLIArgsValidatesKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "empty_key",
+			args:    map[string]any{"": "value"},
+			wantErr: true,
+		},
+		{
+			name:    "digit_leading_key",
+			args:    map[string]any{"1flag": "value"},
+			wantErr: true,
+		},
+		{
+			name:    "space_in_key",
+			args:    map[string]any{"bad key": "value"},
+			wantErr: true,
+		},
+		{
+			name:    "equals_in_key",
+			args:    map[string]any{"bad=key": "value"},
+			wantErr: true,
+		},
+		{
+			name:    "leading_dash_key",
+			args:    map[string]any{"-flag": "value"},
+			wantErr: true,
+		},
+		{
+			name:    "valid_single_char_key",
+			args:    map[string]any{"v": "value"},
+			wantErr: false,
+		},
+		{
+			name:    "valid_multi_char_key",
+			args:    map[string]any{"my-flag": "value", "foo_bar": "value"},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := argumentsToCLIArgs(tt.args)
+			if tt.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "noop.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho noop\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	result, err := executeTool(context.Background(), scriptPath, mustJSONMarshal(map[string]any{"1flag": "value"}), 5*time.Second, scriptDir)
+	if err != nil {
+		t.Fatalf("executeTool returned unexpected error: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected IsError result for invalid argument key, got %#v", result)
+	}
+	if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "invalid argument key") {
+		t.Fatalf("expected descriptive invalid-key error, got %q", got)
+	}
+}
+
 func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 	// Create a temporary directory that will be the working directory
 	workDir := t.TempDir()
