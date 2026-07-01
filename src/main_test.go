@@ -586,3 +586,39 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 		t.Errorf("expected working directory %q, got %q", workDir, outputPath)
 	}
 }
+
+func TestParseToolArgumentsRejectsDoubleEncodedJSON(t *testing.T) {
+	// This test explicitly documents that the fallback double-decode has been removed.
+	// parseToolArguments must reject double-encoded JSON strings and only accept
+	// proper JSON objects (or empty/null).
+
+	// Create a valid JSON object that will be JSON-encoded as a string
+	validObject := `{"key": "value"}`
+	doubleEncodedJSON := []byte(`"` + strings.ReplaceAll(validObject, `"`, `\"`) + `"`)
+
+	_, err := parseToolArguments(doubleEncodedJSON)
+	if err == nil {
+		t.Fatal("expected parseToolArguments to reject double-encoded JSON, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "arguments must be a JSON object") {
+		t.Fatalf("expected error matching 'arguments must be a JSON object', got %q", err.Error())
+	}
+
+	// Verify that a proper JSON object still works
+	_, err = parseToolArguments([]byte(`{"key": "value"}`))
+	if err != nil {
+		t.Fatalf("expected parseToolArguments to accept proper JSON object, got error: %v", err)
+	}
+
+	// Verify that empty input still works
+	_, err = parseToolArguments([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("expected parseToolArguments to accept empty object, got error: %v", err)
+	}
+
+	// Verify that null still works
+	_, err = parseToolArguments([]byte(`null`))
+	if err != nil {
+		t.Fatalf("expected parseToolArguments to accept null, got error: %v", err)
+	}
+}

@@ -50,7 +50,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
     - Unit tests cover at least: empty key, digit-leading key, space-containing key, valid single-char key, valid multi-char key.
     - Code comment in `argumentsToCLIArgs` explains why digit-leading keys are rejected.
 
-- [ ] **Task 5: Handle boolean and nil values correctly in `argumentsToCLIArgs`**
+- [x] **Task 5: Handle boolean and nil values correctly in `argumentsToCLIArgs`**
   - **Description:** This task modifies `argumentsToCLIArgs` after the signature change in Task 4. Current behaviour: `nil` emits `--key ""`; `bool` values are `fmt.Sprint`ed to `"true"`/`"false"`. Correct behaviour per POSIX/GNU conventions: `true` → emit `--key` with no value argument; `false` → omit the flag entirely; `nil` → omit the flag entirely. Implement via type-switch (`switch v := value.(type) { case bool: ... }`) — not via string comparison — so that string arguments whose value happens to be `"true"` are unaffected.
   - **Review Criteria:**
     - Boolean detection uses a type-switch on `bool`, not string comparison.
@@ -62,7 +62,7 @@ Address the six findings raised in the code review of `src/main.go`. Each task i
     - No regression for string, numeric, and slice value types.
     - Behaviour change is noted in a code comment: `nil` and `false` booleans are now silently dropped; scripts relying on `--key ""` for nil must be updated.
 
-- [ ] **Task 6: Enforce strict JSON-object input in `parseToolArguments`**
+- [x] **Task 6: Enforce strict JSON-object input in `parseToolArguments`**
   - **Description:** `parseToolArguments` contains a double-decode fallback: if the raw message is not a plain JSON object, it attempts to decode it as a JSON-encoded string containing JSON. This masks malformed inputs from callers. Remove the fallback. The function must succeed only when the raw message is a proper JSON object (or empty/null).
   - **Review Criteria:**
     - The fallback `json.Unmarshal`-of-a-string block is removed.

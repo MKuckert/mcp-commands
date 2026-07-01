@@ -118,18 +118,11 @@ func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 	}
 
 	var args map[string]any
-	if err := json.Unmarshal(trimmed, &args); err == nil {
-		return args, nil
+	if err := json.Unmarshal(trimmed, &args); err != nil {
+		return nil, fmt.Errorf("arguments must be a JSON object")
 	}
 
-	var encoded string
-	if err := json.Unmarshal(trimmed, &encoded); err == nil {
-		if err := json.Unmarshal([]byte(encoded), &args); err == nil {
-			return args, nil
-		}
-	}
-
-	return nil, fmt.Errorf("arguments must be a JSON object")
+	return args, nil
 }
 
 var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
