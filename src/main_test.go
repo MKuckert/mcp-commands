@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -447,6 +448,89 @@ func TestArgumentsToCLIArgsValidatesKeys(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestArgumentsToCLIArgsBooleanAndNilHandling(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     map[string]any
+		expected []string
+		desc     string
+	}{
+		{
+			name:     "boolean_true_emits_flag_only",
+			args:     map[string]any{"flag": true},
+			expected: []string{"--flag"},
+			desc:     "true value → --flag with no value argument",
+		},
+		{
+			name:     "boolean_false_omits_flag",
+			args:     map[string]any{"flag": false},
+			expected: []string{},
+			desc:     "false value → flag omitted entirely",
+		},
+		{
+			name:     "nil_value_omits_flag",
+			args:     map[string]any{"flag": nil},
+			expected: []string{},
+			desc:     "nil value → flag omitted entirely (previously emitted as --flag \"\")",
+		},
+		{
+			name:     "string_true_treated_as_plain_string",
+			args:     map[string]any{"flag": "true"},
+			expected: []string{"--flag", "true"},
+			desc:     "string \"true\" still treated as plain string argument",
+		},
+		{
+			name:     "string_false_treated_as_plain_string",
+			args:     map[string]any{"flag": "false"},
+			expected: []string{"--flag", "false"},
+			desc:     "string \"false\" still treated as plain string argument",
+		},
+		{
+			name:     "mixed_true_false_nil_and_strings",
+			args:     map[string]any{"bool_true": true, "bool_false": false, "nil_val": nil, "str_val": "string", "num_val": 42},
+			expected: []string{"--bool_true", "--num_val", "42", "--str_val", "string"},
+			desc:     "mixed types: true emitted, false/nil omitted, strings/numbers pass through",
+		},
+		{
+			name:     "numeric_values_still_work",
+			args:     map[string]any{"count": 42, "ratio": 3.14},
+			expected: []string{"--count", "42", "--ratio", "3.14"},
+			desc:     "numeric types unaffected",
+		},
+		{
+			name:     "slice_values_still_work",
+			args:     map[string]any{"items": []string{"a", "b", "c"}},
+			expected: []string{"--items", "a", "--items", "b", "--items", "c"},
+			desc:     "slice types unaffected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := argumentsToCLIArgs(tt.args)
+			if err != nil {
+				t.Fatalf("argumentsToCLIArgs failed: %v", err)
+			}
+
+			// Compare as sorted slices because the order may vary due to map iteration
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d args, got %d: %v (test: %s)", len(tt.expected), len(got), got, tt.desc)
+			}
+
+			if len(got) > 0 {
+				sort.Strings(got)
+				expected := tt.expected
+				sort.Strings(expected)
+				for i := range expected {
+					if got[i] != expected[i] {
+						t.Errorf("arg %d: expected %q, got %q (test: %s)", i, expected[i], got[i], tt.desc)
+					}
+				}
 			}
 		})
 	}

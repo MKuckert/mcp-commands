@@ -153,16 +153,29 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	cliArgs := make([]string, 0, len(args)*2)
 	for _, key := range keys {
 		value := args[key]
+
+		// Handle boolean values via type-switch, not string comparison.
+		// Per POSIX/GNU conventions: true → emit flag only; false/nil → omit entirely.
+		// This does not affect string values "true"/"false", which are still passed as-is.
+		if boolVal, isBool := value.(bool); isBool {
+			if boolVal {
+				// true: emit flag with no value argument
+				cliArgs = append(cliArgs, "--"+key)
+			}
+			// false: omit flag entirely
+			continue
+		}
+
+		// nil values are omitted entirely (previously emitted as --key "")
+		if value == nil {
+			continue
+		}
+
 		rv := reflect.ValueOf(value)
 		if rv.IsValid() && rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() != reflect.Uint8 {
 			for i := 0; i < rv.Len(); i++ {
 				cliArgs = append(cliArgs, "--"+key, fmt.Sprint(rv.Index(i).Interface()))
 			}
-			continue
-		}
-
-		if value == nil {
-			cliArgs = append(cliArgs, "--"+key, "")
 			continue
 		}
 
