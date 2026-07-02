@@ -33,11 +33,11 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
   - **Description:** Rename the CLI flag `--ip` to `--host` in `src/main.go`. Update all references, including usage text. Keep the default value `127.0.0.1`.
   - **Review Criteria:** Running `mcp-commands --host 0.0.0.0` binds the HTTP server to `0.0.0.0`. The old `--ip` flag should no longer be recognized.
 
-- [ ] **Task 4: Add Stream Tags to Process Output**
-  - **Description:** Update `combineToolOutput(stdout, stderr []byte)` to wrap output in `<stdout>...</stdout>` and `<stderr>...</stderr>` tags respectively. 
-    1. Do not use `<stdin>` (per process I/O definitions).
-    2. Ensure `executeTool` captures and passes `stderr` to `combineToolOutput` even when the process exits with `0` (fixing an existing bug).
-  - **Review Criteria:** Executing a tool that produces both stdout and stderr returns a string like `<stdout>\nfoo\n</stdout>\n<stderr>\nbar\n</stderr>`.
+- [x] **Task 4: Add Stream Tags to Process Output**
+   - **Description:** Update `combineToolOutput(stdout, stderr []byte)` to wrap output in `<stdout>...</stdout>` and `<stderr>...</stderr>` tags respectively. 
+     1. Do not use `<stdin>` (per process I/O definitions).
+     2. Ensure `executeTool` captures and passes `stderr` to `combineToolOutput` even when the process exits with `0` (fixing an existing bug).
+   - **Review Criteria:** Executing a tool that produces both stdout and stderr returns a string like `<stdout>\nfoo\n</stdout>\n<stderr>\nbar\n</stderr>`.
 
 - [ ] **Task 5: Replace Polling with `fsnotify` in `watchTools`**
   - **Description:**

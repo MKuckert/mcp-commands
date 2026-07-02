@@ -195,19 +195,37 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	return cliArgs, nil
 }
 
-// combineToolOutput merges stdout and stderr from a tool execution, inserting
-// a newline between them if both are present. It enforces a maximum byte limit
-// (maxToolOutputBytes) to prevent overwhelming the MCP client with massive outputs,
-// appending a truncation warning if the limit is exceeded.
+// combineToolOutput merges stdout and stderr from a tool execution, wrapping each
+// in XML-style tags (<stdout>...</stdout> and <stderr>...</stderr>). It enforces
+// a maximum byte limit (maxToolOutputBytes) to prevent overwhelming the MCP client
+// with massive outputs, appending a truncation warning if the limit is exceeded.
 func combineToolOutput(stdout, stderr []byte) string {
-	combined := append([]byte{}, stdout...)
-	if len(stderr) > 0 {
-		if len(combined) > 0 {
-			combined = append(combined, '\n')
+	var result bytes.Buffer
+
+	// Write stdout tag if present
+	if len(stdout) > 0 {
+		result.WriteString("<stdout>\n")
+		result.Write(stdout)
+		if !bytes.HasSuffix(stdout, []byte("\n")) {
+			result.WriteByte('\n')
 		}
-		combined = append(combined, stderr...)
+		result.WriteString("</stdout>")
 	}
 
+	// Write stderr tag if present
+	if len(stderr) > 0 {
+		if result.Len() > 0 {
+			result.WriteByte('\n')
+		}
+		result.WriteString("<stderr>\n")
+		result.Write(stderr)
+		if !bytes.HasSuffix(stderr, []byte("\n")) {
+			result.WriteByte('\n')
+		}
+		result.WriteString("</stderr>")
+	}
+
+	combined := result.Bytes()
 	if len(combined) <= maxToolOutputBytes {
 		return string(combined)
 	}
@@ -400,7 +418,7 @@ func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage
 	}
 
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
+		Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
 	}, nil
 }
 
