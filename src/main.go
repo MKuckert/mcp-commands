@@ -41,6 +41,10 @@ type discoveredTool struct {
 	Description string
 }
 
+// discoverTools scans the given directory for executable files and symlinks
+// resolving to executables. It skips subdirectories and non-executable files.
+// For each valid executable, it extracts the description and constructs a
+// discoveredTool record, which is later registered with the MCP server.
 func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	entries, err := os.ReadDir(scriptsDir)
 	if err != nil {
@@ -83,6 +87,11 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	return tools, nil
 }
 
+// extractDescription reads the first scanDescriptionLines of a file and
+// looks for a line containing scanDescriptionPrefix ("Description:").
+// If found, it returns the string following the prefix. This is used
+// to populate the description field of the MCP Tool, providing LLMs
+// with context on what the tool does.
 func extractDescription(filePath string) string {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -111,6 +120,9 @@ func extractDescription(filePath string) string {
 	return ""
 }
 
+// parseToolArguments unmarshals the JSON arguments provided by the MCP client
+// into a Go map. It handles empty or null payloads by returning an empty map,
+// preventing unmarshal errors when tools are called without arguments.
 func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -127,6 +139,10 @@ func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 
 var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
+// argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
+// formatted for execution. It enforces strict naming rules for keys to prevent
+// injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
+// false -> omitted). Slices are expanded into multiple flags (e.g., --key val1 --key val2).
 func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	if len(args) == 0 {
 		return nil, nil
@@ -178,6 +194,10 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	return cliArgs, nil
 }
 
+// combineToolOutput merges stdout and stderr from a tool execution, inserting
+// a newline between them if both are present. It enforces a maximum byte limit
+// (maxToolOutputBytes) to prevent overwhelming the MCP client with massive outputs,
+// appending a truncation warning if the limit is exceeded.
 func combineToolOutput(stdout, stderr []byte) string {
 	combined := append([]byte{}, stdout...)
 	if len(stderr) > 0 {
@@ -195,6 +215,9 @@ func combineToolOutput(stdout, stderr []byte) string {
 	return truncated + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
+// toolRegistry manages the dynamic registration and deregistration of tools
+// within the MCP server. It ensures thread-safe updates via a mutex, allowing
+// tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
 	server *mcp.Server
 	dirAbs string
@@ -206,6 +229,9 @@ func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
 	return &toolRegistry{server: server, dirAbs: dir}
 }
 
+// replace unregisters all currently tracked tools and registers a new set of tools.
+// It defines the InputSchema dynamically, allowing tools to accept arbitrary
+// string key-value arguments, which are then passed to the execution wrapper.
 func (r *toolRegistry) replace(tools []discoveredTool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -245,6 +271,10 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
+// snapshotScriptsDir generates a concise string representation of the scripts
+// directory state, combining filenames, permissions, modification times, and
+// file sizes. This is used as a lightweight mechanism to detect changes in
+// the directory contents for the hot-reload feature.
 func snapshotScriptsDir(scriptsDir string) (string, error) {
 	entries, err := os.ReadDir(scriptsDir)
 	if err != nil {
@@ -271,6 +301,10 @@ func snapshotScriptsDir(scriptsDir string) (string, error) {
 	return builder.String(), nil
 }
 
+// watchTools runs a continuous loop that periodically snapshots the scripts
+// directory to detect changes (e.g., added, modified, or removed scripts).
+// When a change is detected, it re-discovers tools and updates the registry,
+// enabling hot-reloading without restarting the MCP server.
 func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
 	currentSnapshot, err := snapshotScriptsDir(scriptsDir)
 	if err != nil {
@@ -306,6 +340,10 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 }
 
+// executeTool runs the script at scriptPath as a subprocess in the specified
+// working directory. It parses the JSON arguments from the MCP request, converts
+// them to CLI flags, and binds the context to a timeout to prevent hanging tools.
+// The output is captured, combined, and returned as an MCP CallToolResult.
 func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	parsedArgs, err := parseToolArguments(rawArgs)
 	if err != nil {
