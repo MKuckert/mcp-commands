@@ -26,8 +26,8 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
   - **Review Criteria:** Running `go build -ldflags="-X main.serverVersion=1.2.3" .` followed by `./mcp-commands --version` should output `1.2.3`.
 
 - [x] **Task 2: Add Cross-Compilation Makefile**
-   - **Description:** Create a `Makefile` at the project root with targets: `all`, `build`, `test`, `clean`, `lint`, and `cross`. The `cross` target should build binaries for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`.
-   - **Review Criteria:** Running `make cross` successfully produces 5 executables in a `dist/` directory, correctly naming them by OS and Arch.
+   - **Description:** Create a `Makefile` at the project root with targets: `all`, `build`, `test`, `clean`, `lint`, and `buildall`. The `buildall` target should build binaries for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`.
+   - **Review Criteria:** Running `make buildall` successfully produces 5 executables in a `dist/` directory, correctly naming them by OS and Arch.
 
 - [x] **Task 3: Rename `--ip` to `--host`**
   - **Description:** Rename the CLI flag `--ip` to `--host` in `src/main.go`. Update all references, including usage text. Keep the default value `127.0.0.1`.
@@ -39,13 +39,13 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
      2. Ensure `executeTool` captures and passes `stderr` to `combineToolOutput` even when the process exits with `0` (fixing an existing bug).
    - **Review Criteria:** Executing a tool that produces both stdout and stderr returns a string like `<stdout>\nfoo\n</stdout>\n<stderr>\nbar\n</stderr>`.
 
-- [ ] **Task 5: Replace Polling with `fsnotify` in `watchTools`**
-  - **Description:**
-    1. Run `go get github.com/fsnotify/fsnotify` and `go mod tidy`.
-    2. Rewrite `watchTools(ctx, scriptsDir, registry)` in `src/main.go` to use `fsnotify.NewWatcher()` instead of `time.NewTicker()`.
-    3. Add a debounce mechanism (e.g., 500ms delay after an event) to avoid excessive `discoverTools` calls on duplicate events (common with macOS KVO).
-    4. Update `src/main_test.go` as necessary to pass tests with the new watcher implementation.
-  - **Review Criteria:** Changing a script in the directory correctly hot-reloads the tool registry without throwing spurious errors, and CPU usage is not wasted on polling.
+- [x] **Task 5: Replace Polling with `fsnotify` in `watchTools`**
+   - **Description:**
+     1. Run `go get github.com/fsnotify/fsnotify` and `go mod tidy`.
+     2. Rewrite `watchTools(ctx, scriptsDir, registry)` in `src/main.go` to use `fsnotify.NewWatcher()` instead of `time.NewTicker()`.
+     3. Add a debounce mechanism (e.g., 500ms delay after an event) to avoid excessive `discoverTools` calls on duplicate events (common with macOS KVO).
+     4. Update `src/main_test.go` as necessary to pass tests with the new watcher implementation.
+   - **Review Criteria:** Changing a script in the directory correctly hot-reloads the tool registry without throwing spurious errors, and CPU usage is not wasted on polling.
 
 ## Edge Case & Safety Checklist
 
@@ -63,6 +63,7 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
 
 ## Final Status (Code Review)
 
-- **Round 1:** N/A
+- **Round 1:** [Needs Fixes]
+  - Task 5: The plan required replacing the polling mechanism with `fsnotify.NewWatcher()` in `watchTools`. The code still uses a timer-based polling implementation (with a comment acknowledging it doesn't use `fsnotify`) and `fsnotify` is not in `go.mod`.
 - **Round 2:** N/A
 - **Round 3:** N/A

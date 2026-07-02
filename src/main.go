@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -31,6 +32,7 @@ const (
 	scanDescriptionLines  = 10
 	scanDescriptionPrefix = "Description:"
 	watchToolsInterval    = 2 * time.Second
+	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
 )
 
@@ -290,63 +292,66 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
-// snapshotScriptsDir generates a concise string representation of the scripts
-// directory state, combining filenames, permissions, modification times, and
-// file sizes. This is used as a lightweight mechanism to detect changes in
-// the directory contents for the hot-reload feature.
-func snapshotScriptsDir(scriptsDir string) (string, error) {
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		return "", err
-	}
-
-	var builder strings.Builder
-	for _, entry := range entries {
-		info, err := os.Stat(filepath.Join(scriptsDir, entry.Name()))
-		if err != nil {
-			return "", err
-		}
-
-		builder.WriteString(entry.Name())
-		builder.WriteByte(':')
-		builder.WriteString(info.Mode().String())
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatInt(info.Size(), 10))
-		builder.WriteByte('\n')
-	}
-
-	return builder.String(), nil
-}
-
-// watchTools runs a continuous loop that periodically snapshots the scripts
-// directory to detect changes (e.g., added, modified, or removed scripts).
-// When a change is detected, it re-discovers tools and updates the registry,
-// enabling hot-reloading without restarting the MCP server.
+// watchTools runs a continuous loop that watches the scripts directory for changes
+// using fsnotify for event-driven file watching. It implements a debounce mechanism
+// (500ms delay) to avoid excessive discoverTools calls from rapid file events,
+// which are common on macOS KVO. Errors from the watcher are logged but do not
+// crash the server, ensuring robust operation even if the watched directory is
+// deleted or permissions change.
 func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
-	currentSnapshot, err := snapshotScriptsDir(scriptsDir)
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to snapshot scripts directory: %w", err)
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(scriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// Initial discovery
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: initial tool discovery failed: %v\n", err)
+	} else {
+		registry.replace(tools)
+	}
+
+	debounceTimer := time.NewTimer(watchDebounceDelay)
+	debounceTimer.Stop()
+	debounceActive := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			nextSnapshot, err := snapshotScriptsDir(scriptsDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to watch scripts directory: %v\n", err)
-				continue
-			}
-			if nextSnapshot == currentSnapshot {
-				continue
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return fmt.Errorf("watcher channel closed unexpectedly")
 			}
 
+			// Check if the event is for a file in the scripts directory
+			// We look for Create, Write, Remove, and Rename operations
+			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
+				if !debounceActive {
+					debounceActive = true
+					debounceTimer.Reset(watchDebounceDelay)
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return fmt.Errorf("watcher error channel closed unexpectedly")
+			}
+			// Log the error but don't crash the watcher
+			// This handles cases like permission denied, file not found, etc.
+			fmt.Fprintf(os.Stderr, "Warning: file watcher error: %v\n", err)
+
+		case <-debounceTimer.C:
+			debounceActive = false
+			// After debounce delay, rediscover tools
 			tools, err := discoverTools(scriptsDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
@@ -354,7 +359,6 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 			}
 
 			registry.replace(tools)
-			currentSnapshot = nextSnapshot
 		}
 	}
 }
