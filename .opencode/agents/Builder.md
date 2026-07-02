@@ -11,6 +11,8 @@ permission:
   bash:
     "*": deny
     go *: allow
+    make *: allow
+    mcp-commands *: allow
   android_*: allow
   question: allow
   task: allow
