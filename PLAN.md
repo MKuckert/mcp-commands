@@ -18,7 +18,7 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Add `--version` flag & make `serverVersion` build-injectable**
+- [x] **Task 1: Add `--version` flag & make `serverVersion` build-injectable**
   - **Description:** 
     1. Change `const serverVersion = "0.1.0"` to `var serverVersion = "0.1.0"` in `src/main.go`.
     2. Add a `--version` flag using `flag.Bool("version", false, "...")`.

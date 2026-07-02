@@ -32,8 +32,9 @@ const (
 	scanDescriptionPrefix = "Description:"
 	watchToolsInterval    = 2 * time.Second
 	serverName            = "mcp-commands"
-	serverVersion         = "0.1.0"
 )
+
+var serverVersion = "0.2.0"
 
 type discoveredTool struct {
 	Name        string
@@ -409,7 +410,13 @@ func main() {
 	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
 	ipFlag := flag.String("ip", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(serverVersion)
+		os.Exit(0)
+	}
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
