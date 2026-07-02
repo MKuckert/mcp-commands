@@ -1,4 +1,4 @@
-module github.com/mkuckert/mcp-commands
+module github.com/mkuckert/mcp-commands/src
 
 go 1.25.0
 
