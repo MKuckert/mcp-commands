@@ -29,7 +29,7 @@ Enhance `mcp-commands` with better tooling support (versioning, cross-compilatio
    - **Description:** Create a `Makefile` at the project root with targets: `all`, `build`, `test`, `clean`, `lint`, and `cross`. The `cross` target should build binaries for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`.
    - **Review Criteria:** Running `make cross` successfully produces 5 executables in a `dist/` directory, correctly naming them by OS and Arch.
 
-- [ ] **Task 3: Rename `--ip` to `--host`**
+- [x] **Task 3: Rename `--ip` to `--host`**
   - **Description:** Rename the CLI flag `--ip` to `--host` in `src/main.go`. Update all references, including usage text. Keep the default value `127.0.0.1`.
   - **Review Criteria:** Running `mcp-commands --host 0.0.0.0` binds the HTTP server to `0.0.0.0`. The old `--ip` flag should no longer be recognized.
 

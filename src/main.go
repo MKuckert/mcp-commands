@@ -408,7 +408,7 @@ func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
 	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
-	ipFlag := flag.String("ip", "127.0.0.1", "IP address for HTTP server")
+	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
@@ -420,17 +420,17 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--ip <ip>] [--port <port>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>]\n")
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *ipFlag, *portFlag); err != nil {
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, port int) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -476,7 +476,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	}
 
 	if port > 0 {
-		addr := fmt.Sprintf("%s:%d", ip, port)
+		addr := fmt.Sprintf("%s:%d", host, port)
 		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 			return server
 		}, nil)

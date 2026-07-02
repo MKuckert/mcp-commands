@@ -58,7 +58,7 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 
 _Exposes the MCP server over HTTP for remote or web-based clients._
 
-Pass `--ip` to bind to a specific IP address (default is `127.0.0.1`, use `0.0.0.0` to bind to all interfaces and make MCP accessible from other devices).
+Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0.0.0` to bind to all interfaces and make MCP accessible from other devices).
 
 ### Creating Tools
 
