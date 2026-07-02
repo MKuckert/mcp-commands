@@ -2,5 +2,5 @@
 build/
 out/
 tmp/
-node_modules
-src/mcp-commands
+dist/
+node_modules/
