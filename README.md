@@ -20,7 +20,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 Ensure you have [Go](https://go.dev/dl/) installed, then run:
 
 ```bash
-go install github.com/mkuckert/mcp-commands/src@latest
+go install github.com/mkuckert/mcp-commands@latest
 ```
 
 _(Adjust package path based on your repository structure)_

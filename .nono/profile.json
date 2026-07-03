@@ -38,7 +38,7 @@
     "deny": ["~/.gitconfig"]
   },
   "network": {
-    "allow_domain": ["localhost", "proxy.golang.org"],
+    "allow_domain": ["localhost", "proxy.golang.org", "sum.golang.org"],
     "allow_port": [11438, 12010]
   },
   "environment": {
