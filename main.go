@@ -28,8 +28,9 @@ import (
 const (
 	defaultToolTimeout    = 5 * time.Minute
 	maxToolOutputBytes    = 1 << 20
-	scanDescriptionLines  = 10
+	scanHeaderLines       = 30
 	scanDescriptionPrefix = "Description:"
+	scanParamPrefix       = "Param:"
 	watchToolsInterval    = 2 * time.Second
 	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
@@ -37,16 +38,24 @@ const (
 
 var serverVersion = "0.2.0"
 
+type paramSpec struct {
+	Name        string // validated against argumentKeyPattern
+	Type        string // "string" | "number" | "boolean"
+	Required    bool
+	Description string
+}
+
 type discoveredTool struct {
 	Name        string
 	Path        string
 	Description string
+	Params      []paramSpec
 }
 
 // discoverTools scans the given directory for executable files and symlinks
 // resolving to executables. It skips subdirectories and non-executable files.
-// For each valid executable, it extracts the description and constructs a
-// discoveredTool record, which is later registered with the MCP server.
+// For each valid executable, it extracts the description and parameters, then
+// constructs a discoveredTool record for later registration with the MCP server.
 func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	entries, err := os.ReadDir(scriptsDir)
 	if err != nil {
@@ -77,19 +86,21 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 		}
 
 		description := extractDescription(resolvedPath)
+		params := extractParams(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
 			Name:        name,
 			Path:        resolvedPath,
 			Description: description,
+			Params:      params,
 		})
 	}
 
 	return tools, nil
 }
 
-// extractDescription reads the first scanDescriptionLines of a file and
+// extractDescription reads the first scanHeaderLines of a file and
 // looks for a line containing scanDescriptionPrefix ("Description:").
 // If found, it returns the string following the prefix. This is used
 // to populate the description field of the MCP Tool, providing LLMs
@@ -103,7 +114,7 @@ func extractDescription(filePath string) string {
 
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
-	for scanner.Scan() && lineCount < scanDescriptionLines {
+	for scanner.Scan() && lineCount < scanHeaderLines {
 		lineCount++
 		line := scanner.Text()
 
@@ -120,6 +131,135 @@ func extractDescription(filePath string) string {
 	}
 
 	return ""
+}
+
+// extractParams reads the first scanHeaderLines of a file and parses
+// any Param: annotations. It returns a slice of paramSpec with all valid
+// parameters. Invalid or malformed annotations produce a stderr warning and
+// are skipped without panicking.
+//
+// The annotation syntax is:
+//
+//	# Param: <name> <type> <required|optional> "<description>"
+//
+// Validation includes:
+// - name must match argumentKeyPattern
+// - type must be one of "string", "number", "boolean"
+// - required token must be "required" or "optional"
+// - description must be quoted
+func extractParams(filePath string) []paramSpec {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return []paramSpec{}
+	}
+	defer file.Close()
+
+	var params []paramSpec
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+
+	for scanner.Scan() && lineCount < scanHeaderLines {
+		lineCount++
+		line := scanner.Text()
+
+		if !strings.Contains(line, scanParamPrefix) {
+			continue
+		}
+
+		// Split on the first occurrence of "Param:"
+		parts := strings.SplitN(line, scanParamPrefix, 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		rawAnnotation := strings.TrimSpace(parts[1])
+
+		// Parse the annotation: <name> <type> <required|optional> "<description>"
+		param, err := parseParamAnnotation(rawAnnotation, filePath, line)
+		if err != nil {
+			// Warning already logged in parseParamAnnotation
+			continue
+		}
+
+		params = append(params, param)
+	}
+
+	return params
+}
+
+// parseParamAnnotation parses a single parameter annotation string.
+// It expects format: <name> <type> <required|optional> "<description>"
+// Returns error if validation fails (warning already logged to stderr).
+func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, error) {
+	// Find the quoted description (everything after the last quote-wrapped string)
+	// The description is the last field, wrapped in quotes
+	lastQuoteIdx := strings.LastIndex(annotation, "\"")
+	firstQuoteIdx := strings.Index(annotation, "\"")
+
+	if firstQuoteIdx < 0 || lastQuoteIdx < 0 || firstQuoteIdx == lastQuoteIdx {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, "description must be quoted", fullLine)
+		return paramSpec{}, fmt.Errorf("malformed param annotation")
+	}
+
+	// Extract description (strip quotes)
+	description := annotation[firstQuoteIdx+1 : lastQuoteIdx]
+
+	// Extract the prefix (before the first quote)
+	prefix := strings.TrimSpace(annotation[:firstQuoteIdx])
+
+	// Split prefix into name, type, and required/optional token
+	tokens := strings.Fields(prefix)
+	if len(tokens) != 3 {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, "expected 3 fields (name, type, required|optional)", fullLine)
+		return paramSpec{}, fmt.Errorf("wrong field count")
+	}
+
+	name := tokens[0]
+	paramType := tokens[1]
+	requiredToken := tokens[2]
+
+	// Validate name against argumentKeyPattern
+	if !argumentKeyPattern.MatchString(name) {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid parameter name")
+	}
+
+	// Validate type
+	var typeOk bool
+	switch paramType {
+	case "string", "number", "boolean":
+		typeOk = true
+	default:
+		typeOk = false
+	}
+	if !typeOk {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid type")
+	}
+
+	// Validate required/optional token
+	var required bool
+	switch requiredToken {
+	case "required":
+		required = true
+	case "optional":
+		required = false
+	default:
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid required token")
+	}
+
+	return paramSpec{
+		Name:        name,
+		Type:        paramType,
+		Required:    required,
+		Description: description,
+	}, nil
 }
 
 // parseToolArguments unmarshals the JSON arguments provided by the MCP client

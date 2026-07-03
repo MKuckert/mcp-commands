@@ -48,7 +48,7 @@ required parameters before executing the script, failing loud on missing values.
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Define `paramSpec` type and parse `Param:` annotations**
+- [/] **Task 1: Define `paramSpec` type and parse `Param:` annotations**
   - **Description:** Introduce a `paramSpec` struct:
     ```go
     type paramSpec struct {

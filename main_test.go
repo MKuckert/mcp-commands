@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -195,6 +196,44 @@ echo "Hello"
 			}
 		}
 	})
+
+	t.Run("populates_params_from_annotations", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Create an executable script with Param annotations
+		scriptPath := filepath.Join(tmpDir, "with_params.sh")
+		scriptContent := `#!/bin/bash
+# Description: Script with parameters
+# Param: input string required "Input file path"
+# Param: format string optional "Output format"
+echo "Processing"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		tools, err := discoverTools(tmpDir)
+		if err != nil {
+			t.Fatalf("discoverTools failed: %v", err)
+		}
+
+		if len(tools) != 1 {
+			t.Errorf("Expected 1 tool, got %d", len(tools))
+		}
+
+		if len(tools) > 0 {
+			tool := tools[0]
+			if len(tool.Params) != 2 {
+				t.Errorf("Expected 2 params, got %d: %#v", len(tool.Params), tool.Params)
+			}
+			if len(tool.Params) > 0 && tool.Params[0].Name != "input" {
+				t.Errorf("Expected first param name 'input', got '%s'", tool.Params[0].Name)
+			}
+			if len(tool.Params) > 1 && tool.Params[1].Name != "format" {
+				t.Errorf("Expected second param name 'format', got '%s'", tool.Params[1].Name)
+			}
+		}
+	})
 }
 
 func TestWatchTools(t *testing.T) {
@@ -206,7 +245,7 @@ func TestWatchTools(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "")
-	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -271,7 +310,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "")
-	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -618,4 +657,201 @@ func TestCombineToolOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExtractParams(t *testing.T) {
+	t.Run("happy_path_all_types", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Description: Test script
+# Param: path string required "Path to the input file"
+# Param: dpi number optional "DPI for rasterisation (default 150)"
+# Param: verbose boolean optional "Print progress"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 3 {
+			t.Errorf("Expected 3 params, got %d", len(params))
+		}
+
+		if len(params) > 0 {
+			if params[0].Name != "path" || params[0].Type != "string" || !params[0].Required || params[0].Description != "Path to the input file" {
+				t.Errorf("First param mismatch: %#v", params[0])
+			}
+		}
+
+		if len(params) > 1 {
+			if params[1].Name != "dpi" || params[1].Type != "number" || params[1].Required || params[1].Description != "DPI for rasterisation (default 150)" {
+				t.Errorf("Second param mismatch: %#v", params[1])
+			}
+		}
+
+		if len(params) > 2 {
+			if params[2].Name != "verbose" || params[2].Type != "boolean" || params[2].Required || params[2].Description != "Print progress" {
+				t.Errorf("Third param mismatch: %#v", params[2])
+			}
+		}
+	})
+
+	t.Run("no_params", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Description: Test script with no params
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 0 {
+			t.Errorf("Expected 0 params, got %d", len(params))
+		}
+	})
+
+	t.Run("malformed_line_wrong_field_count", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: path string "missing required/optional"
+# Param: valid string required "Description"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		// Only the valid param should be extracted
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("unknown_type", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: invalid unknowntype required "Bad type"
+# Param: valid string required "Good type"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("bad_param_name_digit_leading", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: 1invalid string required "Digit leading name"
+# Param: valid string required "Good name"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("description_with_internal_spaces", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: path string required "This is a long description with many spaces"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Description != "This is a long description with many spaces" {
+			t.Errorf("Expected description preserved, got %q", params[0].Description)
+		}
+	})
+
+	t.Run("unquoted_description_is_malformed", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: invalid string required No quotes here
+# Param: valid string required "Quoted description"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("ignores_param_lines_beyond_scan_window", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		// Create a script with 35 lines (scanHeaderLines is 30)
+		lines := []string{"#!/bin/bash"}
+		lines = append(lines, "# Param: valid string required \"Within window\"")
+		// Add 32 more lines (total 34, so line 35 is outside)
+		for i := 0; i < 32; i++ {
+			lines = append(lines, fmt.Sprintf("# Line %d", i))
+		}
+		lines = append(lines, "# Param: ignored string required \"Beyond window\"")
+		lines = append(lines, "echo done")
+
+		scriptContent := strings.Join(lines, "\n")
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 param (beyond window ignored), got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
 }
