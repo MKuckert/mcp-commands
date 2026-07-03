@@ -20,7 +20,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 Ensure you have [Go](https://go.dev/dl/) installed, then run:
 
 ```bash
-go install github.com/mkuckert/mcp-commands/src@latest
+go install github.com/mkuckert/mcp-commands@latest
 ```
 
 _(Adjust package path based on your repository structure)_
@@ -58,7 +58,7 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 
 _Exposes the MCP server over HTTP for remote or web-based clients._
 
-Pass `--ip` to bind to a specific IP address (default is `127.0.0.1`, use `0.0.0.0` to bind to all interfaces and make MCP accessible from other devices).
+Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0.0.0` to bind to all interfaces and make MCP accessible from other devices).
 
 ### Creating Tools
 

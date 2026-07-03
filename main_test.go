@@ -197,64 +197,6 @@ echo "Hello"
 	})
 }
 
-func TestSnapshotScriptsDirReturnsErrorOnStatFailure(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("requires non-root")
-	}
-
-	// Root can bypass the permission failure this regression test relies on,
-	// so skip it when running as uid 0.
-	tmpDir := t.TempDir()
-	secretDir := filepath.Join(tmpDir, "secret")
-	if err := os.Mkdir(secretDir, 0o755); err != nil {
-		t.Fatalf("failed to create secret directory: %v", err)
-	}
-
-	targetPath := filepath.Join(secretDir, "script.sh")
-	if err := os.WriteFile(targetPath, []byte("#!/bin/bash\necho hidden\n"), 0o755); err != nil {
-		t.Fatalf("failed to create target script: %v", err)
-	}
-	if err := os.Chmod(secretDir, 0o000); err != nil {
-		t.Fatalf("failed to remove permissions from secret directory: %v", err)
-	}
-	defer os.Chmod(secretDir, 0o755)
-
-	linkPath := filepath.Join(tmpDir, "script-link.sh")
-	if err := os.Symlink(targetPath, linkPath); err != nil {
-		t.Fatalf("failed to create symlink: %v", err)
-	}
-
-	if _, err := snapshotScriptsDir(tmpDir); err == nil {
-		t.Fatal("expected snapshotScriptsDir to fail when os.Stat cannot access an entry")
-	}
-}
-
-func TestSnapshotScriptsDirDetectsContentChanges(t *testing.T) {
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
-
-	before, err := snapshotScriptsDir(tmpDir)
-	if err != nil {
-		t.Fatalf("snapshotScriptsDir failed: %v", err)
-	}
-
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta\necho beta\n"), 0o755); err != nil {
-		t.Fatalf("failed to update script: %v", err)
-	}
-
-	after, err := snapshotScriptsDir(tmpDir)
-	if err != nil {
-		t.Fatalf("snapshotScriptsDir failed after update: %v", err)
-	}
-
-	if before == after {
-		t.Fatal("expected snapshotScriptsDir to change when file content changes")
-	}
-}
-
 func TestWatchTools(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
@@ -327,11 +269,6 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	before, err := snapshotScriptsDir(tmpDir)
-	if err != nil {
-		t.Fatalf("snapshotScriptsDir failed: %v", err)
-	}
-
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "")
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
@@ -361,14 +298,6 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta now\n"), 0o755); err != nil {
 		t.Fatalf("failed to update script: %v", err)
-	}
-
-	after, err := snapshotScriptsDir(tmpDir)
-	if err != nil {
-		t.Fatalf("snapshotScriptsDir failed after update: %v", err)
-	}
-	if before == after {
-		t.Fatal("expected snapshotScriptsDir to change when file content changes")
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -579,7 +508,14 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 	}
 
 	// Extract the working directory from the script's output
-	outputPath := strings.TrimSpace(result.Content[0].(*mcp.TextContent).Text)
+	// The output is now wrapped in <stdout>...</stdout> tags
+	output := strings.TrimSpace(result.Content[0].(*mcp.TextContent).Text)
+
+	// Remove the tags and extract the actual output
+	if strings.HasPrefix(output, "<stdout>") && strings.HasSuffix(output, "</stdout>") {
+		output = output[len("<stdout>") : len(output)-len("</stdout>")]
+	}
+	outputPath := strings.TrimSpace(output)
 
 	// Verify that the output matches the workDir we supplied
 	if outputPath != workDir {
@@ -620,5 +556,66 @@ func TestParseToolArgumentsRejectsDoubleEncodedJSON(t *testing.T) {
 	_, err = parseToolArguments([]byte(`null`))
 	if err != nil {
 		t.Fatalf("expected parseToolArguments to accept null, got error: %v", err)
+	}
+}
+
+func TestCombineToolOutput(t *testing.T) {
+	tests := []struct {
+		name           string
+		stdout         []byte
+		stderr         []byte
+		expectedOutput string
+	}{
+		{
+			name:           "only_stdout",
+			stdout:         []byte("hello world"),
+			stderr:         nil,
+			expectedOutput: "<stdout>\nhello world\n</stdout>",
+		},
+		{
+			name:           "only_stderr",
+			stdout:         nil,
+			stderr:         []byte("error message"),
+			expectedOutput: "<stderr>\nerror message\n</stderr>",
+		},
+		{
+			name:           "both_stdout_and_stderr",
+			stdout:         []byte("output"),
+			stderr:         []byte("error"),
+			expectedOutput: "<stdout>\noutput\n</stdout>\n<stderr>\nerror\n</stderr>",
+		},
+		{
+			name:           "empty_both",
+			stdout:         nil,
+			stderr:         nil,
+			expectedOutput: "",
+		},
+		{
+			name:           "empty_stdout_with_stderr",
+			stdout:         []byte(""),
+			stderr:         []byte("error"),
+			expectedOutput: "<stderr>\nerror\n</stderr>",
+		},
+		{
+			name:           "stdout_with_trailing_newline",
+			stdout:         []byte("hello\n"),
+			stderr:         nil,
+			expectedOutput: "<stdout>\nhello\n</stdout>",
+		},
+		{
+			name:           "stdout_and_stderr_with_trailing_newlines",
+			stdout:         []byte("output\n"),
+			stderr:         []byte("error\n"),
+			expectedOutput: "<stdout>\noutput\n</stdout>\n<stderr>\nerror\n</stderr>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := combineToolOutput(tt.stdout, tt.stderr)
+			if got != tt.expectedOutput {
+				t.Errorf("expected %q, got %q", tt.expectedOutput, got)
+			}
+		})
 	}
 }

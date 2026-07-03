@@ -16,12 +16,12 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -31,9 +31,11 @@ const (
 	scanDescriptionLines  = 10
 	scanDescriptionPrefix = "Description:"
 	watchToolsInterval    = 2 * time.Second
+	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
-	serverVersion         = "0.1.0"
 )
+
+var serverVersion = "0.2.0"
 
 type discoveredTool struct {
 	Name        string
@@ -194,19 +196,37 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	return cliArgs, nil
 }
 
-// combineToolOutput merges stdout and stderr from a tool execution, inserting
-// a newline between them if both are present. It enforces a maximum byte limit
-// (maxToolOutputBytes) to prevent overwhelming the MCP client with massive outputs,
-// appending a truncation warning if the limit is exceeded.
+// combineToolOutput merges stdout and stderr from a tool execution, wrapping each
+// in XML-style tags (<stdout>...</stdout> and <stderr>...</stderr>). It enforces
+// a maximum byte limit (maxToolOutputBytes) to prevent overwhelming the MCP client
+// with massive outputs, appending a truncation warning if the limit is exceeded.
 func combineToolOutput(stdout, stderr []byte) string {
-	combined := append([]byte{}, stdout...)
-	if len(stderr) > 0 {
-		if len(combined) > 0 {
-			combined = append(combined, '\n')
+	var result bytes.Buffer
+
+	// Write stdout tag if present
+	if len(stdout) > 0 {
+		result.WriteString("<stdout>\n")
+		result.Write(stdout)
+		if !bytes.HasSuffix(stdout, []byte("\n")) {
+			result.WriteByte('\n')
 		}
-		combined = append(combined, stderr...)
+		result.WriteString("</stdout>")
 	}
 
+	// Write stderr tag if present
+	if len(stderr) > 0 {
+		if result.Len() > 0 {
+			result.WriteByte('\n')
+		}
+		result.WriteString("<stderr>\n")
+		result.Write(stderr)
+		if !bytes.HasSuffix(stderr, []byte("\n")) {
+			result.WriteByte('\n')
+		}
+		result.WriteString("</stderr>")
+	}
+
+	combined := result.Bytes()
 	if len(combined) <= maxToolOutputBytes {
 		return string(combined)
 	}
@@ -271,63 +291,66 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
-// snapshotScriptsDir generates a concise string representation of the scripts
-// directory state, combining filenames, permissions, modification times, and
-// file sizes. This is used as a lightweight mechanism to detect changes in
-// the directory contents for the hot-reload feature.
-func snapshotScriptsDir(scriptsDir string) (string, error) {
-	entries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		return "", err
-	}
-
-	var builder strings.Builder
-	for _, entry := range entries {
-		info, err := os.Stat(filepath.Join(scriptsDir, entry.Name()))
-		if err != nil {
-			return "", err
-		}
-
-		builder.WriteString(entry.Name())
-		builder.WriteByte(':')
-		builder.WriteString(info.Mode().String())
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
-		builder.WriteByte(':')
-		builder.WriteString(strconv.FormatInt(info.Size(), 10))
-		builder.WriteByte('\n')
-	}
-
-	return builder.String(), nil
-}
-
-// watchTools runs a continuous loop that periodically snapshots the scripts
-// directory to detect changes (e.g., added, modified, or removed scripts).
-// When a change is detected, it re-discovers tools and updates the registry,
-// enabling hot-reloading without restarting the MCP server.
+// watchTools runs a continuous loop that watches the scripts directory for changes
+// using fsnotify for event-driven file watching. It implements a debounce mechanism
+// (500ms delay) to avoid excessive discoverTools calls from rapid file events,
+// which are common on macOS KVO. Errors from the watcher are logged but do not
+// crash the server, ensuring robust operation even if the watched directory is
+// deleted or permissions change.
 func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
-	currentSnapshot, err := snapshotScriptsDir(scriptsDir)
+	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return fmt.Errorf("failed to snapshot scripts directory: %w", err)
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(scriptsDir)
+	if err != nil {
+		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// Initial discovery
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: initial tool discovery failed: %v\n", err)
+	} else {
+		registry.replace(tools)
+	}
+
+	debounceTimer := time.NewTimer(watchDebounceDelay)
+	debounceTimer.Stop()
+	debounceActive := false
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			nextSnapshot, err := snapshotScriptsDir(scriptsDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to watch scripts directory: %v\n", err)
-				continue
-			}
-			if nextSnapshot == currentSnapshot {
-				continue
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return fmt.Errorf("watcher channel closed unexpectedly")
 			}
 
+			// Check if the event is for a file in the scripts directory
+			// We look for Create, Write, Remove, and Rename operations
+			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
+				if !debounceActive {
+					debounceActive = true
+					debounceTimer.Reset(watchDebounceDelay)
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return fmt.Errorf("watcher error channel closed unexpectedly")
+			}
+			// Log the error but don't crash the watcher
+			// This handles cases like permission denied, file not found, etc.
+			fmt.Fprintf(os.Stderr, "Warning: file watcher error: %v\n", err)
+
+		case <-debounceTimer.C:
+			debounceActive = false
+			// After debounce delay, rediscover tools
 			tools, err := discoverTools(scriptsDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
@@ -335,7 +358,6 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 			}
 
 			registry.replace(tools)
-			currentSnapshot = nextSnapshot
 		}
 	}
 }
@@ -399,7 +421,7 @@ func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage
 	}
 
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
+		Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
 	}, nil
 }
 
@@ -407,23 +429,29 @@ func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
 	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
-	ipFlag := flag.String("ip", "127.0.0.1", "IP address for HTTP server")
+	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(serverVersion)
+		os.Exit(0)
+	}
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--ip <ip>] [--port <port>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>]\n")
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *ipFlag, *portFlag); err != nil {
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, port int) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -469,7 +497,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, ip string, por
 	}
 
 	if port > 0 {
-		addr := fmt.Sprintf("%s:%d", ip, port)
+		addr := fmt.Sprintf("%s:%d", host, port)
 		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 			return server
 		}, nil)
