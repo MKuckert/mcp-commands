@@ -48,7 +48,7 @@ required parameters before executing the script, failing loud on missing values.
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [/] **Task 1: Define `paramSpec` type and parse `Param:` annotations**
+- [x] **Task 1: Define `paramSpec` type and parse `Param:` annotations**
   - **Description:** Introduce a `paramSpec` struct:
     ```go
     type paramSpec struct {
@@ -78,7 +78,7 @@ required parameters before executing the script, failing loud on missing values.
       malformed, emits a stderr warning, and is skipped. There's no escaping mechanism for
       quotes inside the description; authors must avoid them.
 
-- [ ] **Task 2: Extend `discoveredTool` with `Params`**
+- [x] **Task 2: Extend `discoveredTool` with `Params`**
   - **Description:** Add `Params []paramSpec` to `discoveredTool`. In `discoverTools`,
     call `extractParams(resolvedPath)` and populate `discoveredTool.Params`. Update
     `scanDescriptionLines` constant: rename to `scanHeaderLines = 30` and use it in
