@@ -124,7 +124,7 @@ required parameters before executing the script, failing loud on missing values.
     - Duplicate param names: `properties` contains only one entry (the last); `required`
       contains the name at most once, present only if the last declaration was `required`.
 
-- [ ] **Task 4: Wire schema into `toolRegistry.replace`**
+- [x] **Task 4: Wire schema into `toolRegistry.replace`**
   - **Description:** In `toolRegistry.replace`, replace the hardcoded `InputSchema`
     with `buildInputSchema(discoveredTool.Params)`. No other changes to the registration
     logic.
@@ -134,7 +134,7 @@ required parameters before executing the script, failing loud on missing values.
     - Hot-reload (`watchTools`) picks up schema changes because `replace` is called on
       every rediscovery.
 
-- [ ] **Task 5: Server-side required-parameter validation**
+- [/] **Task 5: Server-side required-parameter validation**
   - **Description:** Use the **closure-with-pre-parse** approach to avoid doubling
     `executeTool`'s responsibilities:
 
@@ -186,7 +186,7 @@ required parameters before executing the script, failing loud on missing values.
       `TestExecuteToolWithWorkingDirectory` tests still pass (update their call sites
       to pass a `map[string]any` instead of `json.RawMessage`).
 
-- [ ] **Task 6: Update tests**
+- [/] **Task 6: Update tests**
   - **Description:** Add/update tests in `main_test.go`:
     1. **`TestExtractParams`** — table-driven:
        - Happy path: all three types, required + optional, quoted description with spaces.

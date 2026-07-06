@@ -426,10 +426,11 @@ func combineToolOutput(stdout, stderr []byte) string {
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing
 // tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
-	server *mcp.Server
-	dirAbs string
-	mu     sync.Mutex
-	names  []string
+	server      *mcp.Server
+	dirAbs      string
+	mu          sync.Mutex
+	names       []string
+	lastHandler mcp.ToolHandler
 }
 
 func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
@@ -454,14 +455,27 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		toolDescription := discoveredTool.Description
 		toolParams := discoveredTool.Params
 
+		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			parsedArgs, err := parseToolArguments(req.Params.Arguments)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateRequiredParams(req.Params.Name, parsedArgs, toolParams); err != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+					IsError: true,
+				}, nil
+			}
+			return executeTool(ctx, toolPath, parsedArgs, defaultToolTimeout, r.dirAbs)
+		})
+
 		r.server.AddTool(&mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
 			InputSchema: buildInputSchema(toolParams),
-		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout, r.dirAbs)
-		})
+		}, handlerFunc)
 
+		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
 }
@@ -545,17 +559,23 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 }
 
-// executeTool runs the script at scriptPath as a subprocess in the specified
-// working directory. It parses the JSON arguments from the MCP request, converts
-// them to CLI flags, and binds the context to a timeout to prevent hanging tools.
-// The output is captured, combined, and returned as an MCP CallToolResult.
-func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
-	parsedArgs, err := parseToolArguments(rawArgs)
-	if err != nil {
-		return nil, err
+func validateRequiredParams(tool string, args map[string]any, params []paramSpec) error {
+	for _, p := range params {
+		if p.Required {
+			if _, ok := args[p.Name]; !ok {
+				return fmt.Errorf("missing required parameter: %s", p.Name)
+			}
+		}
 	}
+	return nil
+}
 
-	cliArgs, err := argumentsToCLIArgs(parsedArgs)
+// executeTool runs the script at scriptPath as a subprocess in the specified
+// working directory. It accepts pre-parsed arguments as a map, converts them to
+// CLI flags, and binds the context to a timeout to prevent hanging tools.
+// The output is captured, combined, and returned as an MCP CallToolResult.
+func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
+	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},

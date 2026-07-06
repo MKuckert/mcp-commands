@@ -512,7 +512,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, mustJSONMarshal(map[string]any{"1flag": "value"}), 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, scriptPath, nil, 5*time.Second, workDir)
+	result, err := executeTool(ctx, scriptPath, map[string]any{}, 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -1053,4 +1053,126 @@ func TestBuildInputSchema(t *testing.T) {
 			t.Error("verbose should be required")
 		}
 	})
+}
+
+func TestValidateRequiredParams(t *testing.T) {
+	tests := []struct {
+		name      string
+		tool      string
+		args      map[string]any
+		params    []paramSpec
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "all_required_present",
+			tool: "mytool",
+			args: map[string]any{"path": "/tmp/file", "dpi": 150.0},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+				{Name: "dpi", Type: "number", Required: true},
+			},
+			wantErr: false,
+		},
+		{
+			name: "one_missing_required",
+			tool: "mytool",
+			args: map[string]any{},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+			},
+			wantErr:   true,
+			errSubstr: "missing required parameter: path",
+		},
+		{
+			name: "no_required_params",
+			tool: "mytool",
+			args: map[string]any{},
+			params: []paramSpec{
+				{Name: "verbose", Type: "boolean", Required: false},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty_params",
+			tool:    "mytool",
+			args:    map[string]any{},
+			params:  []paramSpec{},
+			wantErr: false,
+		},
+		{
+			name: "optional_absent_no_error",
+			tool: "mytool",
+			args: map[string]any{"path": "x"},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+				{Name: "format", Type: "string", Required: false},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRequiredParams(tt.tool, tt.args, tt.params)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("expected error containing %q, got %q", tt.errSubstr, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRequiredParamValidationViaRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "convert.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho done\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir)
+
+	registry.replace([]discoveredTool{
+		{
+			Name:        "convert",
+			Path:        scriptPath,
+			Description: "Convert a file",
+			Params: []paramSpec{
+				{Name: "path", Type: "string", Required: true, Description: "Input path"},
+			},
+		},
+	})
+
+	handler := registry.lastHandler
+	if handler == nil {
+		t.Fatal("lastHandler is nil after replace")
+	}
+
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "convert",
+			Arguments: json.RawMessage(`{}`),
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned unexpected error: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected IsError result, got %#v", result)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "missing required parameter: path") {
+		t.Fatalf("expected error message containing 'missing required parameter: path', got %q", text)
+	}
 }
