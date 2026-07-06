@@ -89,7 +89,7 @@ required parameters before executing the script, failing loud on missing values.
     - `scanHeaderLines = 30` is used everywhere the old `scanDescriptionLines` was used.
     - No regression in `extractDescription` behaviour.
 
-- [ ] **Task 3: Build per-tool JSON Schema from `paramSpec`**
+- [x] **Task 3: Build per-tool JSON Schema from `paramSpec`**
   - **Description:** Extract a helper `buildInputSchema(params []paramSpec) json.RawMessage`.
     - Iterate `params` in order. Use a `map[string]any` for `properties`; write each
       param entry keyed by `Name` (last write wins for duplicates — this is the

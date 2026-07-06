@@ -281,6 +281,53 @@ func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 
 var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
+// buildInputSchema constructs a JSON Schema for a tool's input parameters.
+// It takes a slice of paramSpec and builds a schema with a "properties" object
+// and a "required" array (omitted if empty). Duplicate param names are deduplicated:
+// the last declaration wins for both properties and required status.
+//
+// Returns a json.RawMessage containing:
+//
+//	{"type":"object","properties":{...},"required":[...]}
+//
+// The "required" key is omitted entirely if no params are required.
+func buildInputSchema(params []paramSpec) json.RawMessage {
+	properties := make(map[string]any)
+	lastRequired := make(map[string]bool)
+
+	// First pass: build properties map and track last-seen required status
+	for _, param := range params {
+		properties[param.Name] = map[string]any{
+			"type":        param.Type,
+			"description": param.Description,
+		}
+		lastRequired[param.Name] = param.Required
+	}
+
+	// Build the schema object
+	schema := map[string]any{
+		"type":       "object",
+		"properties": properties,
+	}
+
+	// Second pass: collect required names (using last-seen required status)
+	var requiredNames []string
+	seen := make(map[string]bool)
+	for _, param := range params {
+		if !seen[param.Name] && lastRequired[param.Name] {
+			requiredNames = append(requiredNames, param.Name)
+			seen[param.Name] = true
+		}
+	}
+
+	// Only add "required" key if there are required params
+	if len(requiredNames) > 0 {
+		schema["required"] = requiredNames
+	}
+
+	return mustJSONMarshal(schema)
+}
+
 // argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
 // formatted for execution. It enforces strict naming rules for keys to prevent
 // injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
@@ -390,8 +437,8 @@ func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
 }
 
 // replace unregisters all currently tracked tools and registers a new set of tools.
-// It defines the InputSchema dynamically, allowing tools to accept arbitrary
-// string key-value arguments, which are then passed to the execution wrapper.
+// It defines the InputSchema dynamically based on each tool's Param declarations,
+// allowing tools to accept typed parameters with proper schema validation.
 func (r *toolRegistry) replace(tools []discoveredTool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -405,16 +452,12 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
 		toolDescription := discoveredTool.Description
+		toolParams := discoveredTool.Params
 
 		r.server.AddTool(&mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
-			InputSchema: mustJSONMarshal(map[string]any{
-				"type": "object",
-				"additionalProperties": map[string]any{
-					"type": "string",
-				},
-			}),
+			InputSchema: buildInputSchema(toolParams),
 		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout, r.dirAbs)
 		})
