@@ -36,7 +36,7 @@ const (
 	serverName            = "mcp-commands"
 )
 
-var serverVersion = "0.2.0"
+var serverVersion = "0.3.0"
 
 type paramSpec struct {
 	Name        string // validated against argumentKeyPattern

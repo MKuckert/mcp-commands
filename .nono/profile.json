@@ -6,7 +6,7 @@
     "name": "opencode-mcp-commands"
   },
   "groups": {
-    "include": []
+    "include": ["go_runtime", "go_runtime_macos"]
   },
   "workdir": {
     "access": "readwrite"
