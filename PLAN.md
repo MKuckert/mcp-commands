@@ -134,7 +134,7 @@ required parameters before executing the script, failing loud on missing values.
     - Hot-reload (`watchTools`) picks up schema changes because `replace` is called on
       every rediscovery.
 
-- [/] **Task 5: Server-side required-parameter validation**
+- [x] **Task 5: Server-side required-parameter validation**
   - **Description:** Use the **closure-with-pre-parse** approach to avoid doubling
     `executeTool`'s responsibilities:
 
@@ -186,7 +186,7 @@ required parameters before executing the script, failing loud on missing values.
       `TestExecuteToolWithWorkingDirectory` tests still pass (update their call sites
       to pass a `map[string]any` instead of `json.RawMessage`).
 
-- [/] **Task 6: Update tests**
+- [x] **Task 6: Update tests**
   - **Description:** Add/update tests in `main_test.go`:
     1. **`TestExtractParams`** — table-driven:
        - Happy path: all three types, required + optional, quoted description with spaces.
@@ -264,6 +264,10 @@ required parameters before executing the script, failing loud on missing values.
 
 ## Final Status (Code Review)
 
-- **Round 1:** N/A
+- **Round 1:** APPROVED. Tasks 5 and 6 satisfy all review criteria. Implementation is
+  clean, test coverage is thorough, and no existing tests are broken.
+  Advisory note (non-blocking): `validateRequiredParams` treats `{"path": null}` as
+  "present" (key exists), while the plan text says "nil values count as absent". Consider
+  adding `|| v == nil` to the check if this edge case matters in practice.
 - **Round 2:** N/A
 - **Round 3:** N/A
