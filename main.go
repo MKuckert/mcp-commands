@@ -460,7 +460,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 			if err != nil {
 				return nil, err
 			}
-			if err := validateRequiredParams(req.Params.Name, parsedArgs, toolParams); err != nil {
+			if err := validateRequiredParams(parsedArgs, toolParams); err != nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
 					IsError: true,
@@ -559,7 +559,7 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 }
 
-func validateRequiredParams(tool string, args map[string]any, params []paramSpec) error {
+func validateRequiredParams(args map[string]any, params []paramSpec) error {
 	for _, p := range params {
 		if p.Required {
 			if _, ok := args[p.Name]; !ok {

@@ -1058,7 +1058,6 @@ func TestBuildInputSchema(t *testing.T) {
 func TestValidateRequiredParams(t *testing.T) {
 	tests := []struct {
 		name      string
-		tool      string
 		args      map[string]any
 		params    []paramSpec
 		wantErr   bool
@@ -1066,7 +1065,6 @@ func TestValidateRequiredParams(t *testing.T) {
 	}{
 		{
 			name: "all_required_present",
-			tool: "mytool",
 			args: map[string]any{"path": "/tmp/file", "dpi": 150.0},
 			params: []paramSpec{
 				{Name: "path", Type: "string", Required: true},
@@ -1076,7 +1074,6 @@ func TestValidateRequiredParams(t *testing.T) {
 		},
 		{
 			name: "one_missing_required",
-			tool: "mytool",
 			args: map[string]any{},
 			params: []paramSpec{
 				{Name: "path", Type: "string", Required: true},
@@ -1086,7 +1083,6 @@ func TestValidateRequiredParams(t *testing.T) {
 		},
 		{
 			name: "no_required_params",
-			tool: "mytool",
 			args: map[string]any{},
 			params: []paramSpec{
 				{Name: "verbose", Type: "boolean", Required: false},
@@ -1095,14 +1091,12 @@ func TestValidateRequiredParams(t *testing.T) {
 		},
 		{
 			name:    "empty_params",
-			tool:    "mytool",
 			args:    map[string]any{},
 			params:  []paramSpec{},
 			wantErr: false,
 		},
 		{
 			name: "optional_absent_no_error",
-			tool: "mytool",
 			args: map[string]any{"path": "x"},
 			params: []paramSpec{
 				{Name: "path", Type: "string", Required: true},
@@ -1114,7 +1108,7 @@ func TestValidateRequiredParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateRequiredParams(tt.tool, tt.args, tt.params)
+			err := validateRequiredParams(tt.args, tt.params)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
