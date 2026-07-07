@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -195,6 +197,44 @@ echo "Hello"
 			}
 		}
 	})
+
+	t.Run("populates_params_from_annotations", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		// Create an executable script with Param annotations
+		scriptPath := filepath.Join(tmpDir, "with_params.sh")
+		scriptContent := `#!/bin/bash
+# Description: Script with parameters
+# Param: input string required "Input file path"
+# Param: format string optional "Output format"
+echo "Processing"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		tools, err := discoverTools(tmpDir)
+		if err != nil {
+			t.Fatalf("discoverTools failed: %v", err)
+		}
+
+		if len(tools) != 1 {
+			t.Errorf("Expected 1 tool, got %d", len(tools))
+		}
+
+		if len(tools) > 0 {
+			tool := tools[0]
+			if len(tool.Params) != 2 {
+				t.Errorf("Expected 2 params, got %d: %#v", len(tool.Params), tool.Params)
+			}
+			if len(tool.Params) > 0 && tool.Params[0].Name != "input" {
+				t.Errorf("Expected first param name 'input', got '%s'", tool.Params[0].Name)
+			}
+			if len(tool.Params) > 1 && tool.Params[1].Name != "format" {
+				t.Errorf("Expected second param name 'format', got '%s'", tool.Params[1].Name)
+			}
+		}
+	})
 }
 
 func TestWatchTools(t *testing.T) {
@@ -206,7 +246,7 @@ func TestWatchTools(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "")
-	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -271,7 +311,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "")
-	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha"}})
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -472,7 +512,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, mustJSONMarshal(map[string]any{"1flag": "value"}), 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -498,7 +538,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, scriptPath, nil, 5*time.Second, workDir)
+	result, err := executeTool(ctx, scriptPath, map[string]any{}, 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -617,5 +657,516 @@ func TestCombineToolOutput(t *testing.T) {
 				t.Errorf("expected %q, got %q", tt.expectedOutput, got)
 			}
 		})
+	}
+}
+
+func TestExtractParams(t *testing.T) {
+	t.Run("happy_path_all_types", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Description: Test script
+# Param: path string required "Path to the input file"
+# Param: dpi number optional "DPI for rasterisation (default 150)"
+# Param: verbose boolean optional "Print progress"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 3 {
+			t.Errorf("Expected 3 params, got %d", len(params))
+		}
+
+		if len(params) > 0 {
+			if params[0].Name != "path" || params[0].Type != "string" || !params[0].Required || params[0].Description != "Path to the input file" {
+				t.Errorf("First param mismatch: %#v", params[0])
+			}
+		}
+
+		if len(params) > 1 {
+			if params[1].Name != "dpi" || params[1].Type != "number" || params[1].Required || params[1].Description != "DPI for rasterisation (default 150)" {
+				t.Errorf("Second param mismatch: %#v", params[1])
+			}
+		}
+
+		if len(params) > 2 {
+			if params[2].Name != "verbose" || params[2].Type != "boolean" || params[2].Required || params[2].Description != "Print progress" {
+				t.Errorf("Third param mismatch: %#v", params[2])
+			}
+		}
+	})
+
+	t.Run("no_params", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Description: Test script with no params
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 0 {
+			t.Errorf("Expected 0 params, got %d", len(params))
+		}
+	})
+
+	t.Run("malformed_line_wrong_field_count", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: path string "missing required/optional"
+# Param: valid string required "Description"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		// Only the valid param should be extracted
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("unknown_type", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: invalid unknowntype required "Bad type"
+# Param: valid string required "Good type"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("bad_param_name_digit_leading", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: 1invalid string required "Digit leading name"
+# Param: valid string required "Good name"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("description_with_internal_spaces", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: path string required "This is a long description with many spaces"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Description != "This is a long description with many spaces" {
+			t.Errorf("Expected description preserved, got %q", params[0].Description)
+		}
+	})
+
+	t.Run("unquoted_description_is_malformed", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		scriptContent := `#!/bin/bash
+# Param: invalid string required No quotes here
+# Param: valid string required "Quoted description"
+echo "Hello"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 valid param, got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+
+	t.Run("ignores_param_lines_beyond_scan_window", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		scriptPath := filepath.Join(tmpDir, "test.sh")
+		// Create a script with 35 lines (scanHeaderLines is 30)
+		lines := []string{"#!/bin/bash"}
+		lines = append(lines, "# Param: valid string required \"Within window\"")
+		// Add 32 more lines (total 34, so line 35 is outside)
+		for i := 0; i < 32; i++ {
+			lines = append(lines, fmt.Sprintf("# Line %d", i))
+		}
+		lines = append(lines, "# Param: ignored string required \"Beyond window\"")
+		lines = append(lines, "echo done")
+
+		scriptContent := strings.Join(lines, "\n")
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to create test script: %v", err)
+		}
+
+		params := extractParams(scriptPath)
+
+		if len(params) != 1 {
+			t.Errorf("Expected 1 param (beyond window ignored), got %d", len(params))
+		}
+		if len(params) > 0 && params[0].Name != "valid" {
+			t.Errorf("Expected param name 'valid', got %q", params[0].Name)
+		}
+	})
+}
+
+func TestBuildInputSchema(t *testing.T) {
+	t.Run("zero_params", func(t *testing.T) {
+		schema := buildInputSchema([]paramSpec{})
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		if decoded["type"] != "object" {
+			t.Errorf("expected type 'object', got %q", decoded["type"])
+		}
+
+		props := decoded["properties"].(map[string]any)
+		if len(props) != 0 {
+			t.Errorf("expected empty properties, got %d", len(props))
+		}
+
+		if _, hasRequired := decoded["required"]; hasRequired {
+			t.Error("expected 'required' key to be absent, but it was present")
+		}
+	})
+
+	t.Run("one_required_string_param", func(t *testing.T) {
+		params := []paramSpec{
+			{
+				Name:        "path",
+				Type:        "string",
+				Required:    true,
+				Description: "Path to the input file",
+			},
+		}
+		schema := buildInputSchema(params)
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		if decoded["type"] != "object" {
+			t.Errorf("expected type 'object', got %q", decoded["type"])
+		}
+
+		props := decoded["properties"].(map[string]any)
+		if len(props) != 1 {
+			t.Errorf("expected 1 property, got %d", len(props))
+		}
+
+		pathProp := props["path"].(map[string]any)
+		if pathProp["type"] != "string" {
+			t.Errorf("expected type 'string', got %q", pathProp["type"])
+		}
+		if pathProp["description"] != "Path to the input file" {
+			t.Errorf("expected description 'Path to the input file', got %q", pathProp["description"])
+		}
+
+		required := decoded["required"].([]any)
+		if len(required) != 1 || required[0] != "path" {
+			t.Errorf("expected required=['path'], got %v", required)
+		}
+	})
+
+	t.Run("mix_required_and_optional", func(t *testing.T) {
+		params := []paramSpec{
+			{
+				Name:        "path",
+				Type:        "string",
+				Required:    true,
+				Description: "Path to the input file",
+			},
+			{
+				Name:        "verbose",
+				Type:        "boolean",
+				Required:    false,
+				Description: "Print progress",
+			},
+		}
+		schema := buildInputSchema(params)
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		props := decoded["properties"].(map[string]any)
+		if len(props) != 2 {
+			t.Errorf("expected 2 properties, got %d", len(props))
+		}
+
+		required := decoded["required"].([]any)
+		if len(required) != 1 || required[0] != "path" {
+			t.Errorf("expected required=['path'], got %v", required)
+		}
+	})
+
+	t.Run("duplicate_param_names_last_wins", func(t *testing.T) {
+		params := []paramSpec{
+			{
+				Name:        "flag",
+				Type:        "string",
+				Required:    true,
+				Description: "First declaration",
+			},
+			{
+				Name:        "flag",
+				Type:        "boolean",
+				Required:    false,
+				Description: "Last declaration",
+			},
+		}
+		schema := buildInputSchema(params)
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		props := decoded["properties"].(map[string]any)
+		if len(props) != 1 {
+			t.Errorf("expected 1 property (last wins), got %d", len(props))
+		}
+
+		flagProp := props["flag"].(map[string]any)
+		if flagProp["type"] != "boolean" {
+			t.Errorf("expected type 'boolean' (last declaration), got %q", flagProp["type"])
+		}
+		if flagProp["description"] != "Last declaration" {
+			t.Errorf("expected description 'Last declaration', got %q", flagProp["description"])
+		}
+
+		// Required should reflect the last declaration (false)
+		if _, hasRequired := decoded["required"]; hasRequired {
+			t.Error("expected 'required' key to be absent (last declaration is optional)")
+		}
+	})
+
+	t.Run("all_three_types", func(t *testing.T) {
+		params := []paramSpec{
+			{
+				Name:        "path",
+				Type:        "string",
+				Required:    true,
+				Description: "Input path",
+			},
+			{
+				Name:        "dpi",
+				Type:        "number",
+				Required:    false,
+				Description: "DPI value",
+			},
+			{
+				Name:        "verbose",
+				Type:        "boolean",
+				Required:    true,
+				Description: "Verbose mode",
+			},
+		}
+		schema := buildInputSchema(params)
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		props := decoded["properties"].(map[string]any)
+		if len(props) != 3 {
+			t.Errorf("expected 3 properties, got %d", len(props))
+		}
+
+		// Check types
+		if props["path"].(map[string]any)["type"] != "string" {
+			t.Error("path type mismatch")
+		}
+		if props["dpi"].(map[string]any)["type"] != "number" {
+			t.Error("dpi type mismatch")
+		}
+		if props["verbose"].(map[string]any)["type"] != "boolean" {
+			t.Error("verbose type mismatch")
+		}
+
+		// Check required
+		required := decoded["required"].([]any)
+		requiredSet := make(map[string]bool)
+		for _, r := range required {
+			requiredSet[r.(string)] = true
+		}
+		if !requiredSet["path"] {
+			t.Error("path should be required")
+		}
+		if requiredSet["dpi"] {
+			t.Error("dpi should not be required")
+		}
+		if !requiredSet["verbose"] {
+			t.Error("verbose should be required")
+		}
+	})
+}
+
+func TestValidateRequiredParams(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      map[string]any
+		params    []paramSpec
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "all_required_present",
+			args: map[string]any{"path": "/tmp/file", "dpi": 150.0},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+				{Name: "dpi", Type: "number", Required: true},
+			},
+			wantErr: false,
+		},
+		{
+			name: "one_missing_required",
+			args: map[string]any{},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+			},
+			wantErr:   true,
+			errSubstr: "missing required parameter: path",
+		},
+		{
+			name: "no_required_params",
+			args: map[string]any{},
+			params: []paramSpec{
+				{Name: "verbose", Type: "boolean", Required: false},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty_params",
+			args:    map[string]any{},
+			params:  []paramSpec{},
+			wantErr: false,
+		},
+		{
+			name: "optional_absent_no_error",
+			args: map[string]any{"path": "x"},
+			params: []paramSpec{
+				{Name: "path", Type: "string", Required: true},
+				{Name: "format", Type: "string", Required: false},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRequiredParams(tt.args, tt.params)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("expected error containing %q, got %q", tt.errSubstr, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRequiredParamValidationViaRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "convert.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho done\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir)
+
+	registry.replace([]discoveredTool{
+		{
+			Name:        "convert",
+			Path:        scriptPath,
+			Description: "Convert a file",
+			Params: []paramSpec{
+				{Name: "path", Type: "string", Required: true, Description: "Input path"},
+			},
+		},
+	})
+
+	handler := registry.lastHandler
+	if handler == nil {
+		t.Fatal("lastHandler is nil after replace")
+	}
+
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "convert",
+			Arguments: json.RawMessage(`{}`),
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned unexpected error: %v", err)
+	}
+	if result == nil || !result.IsError {
+		t.Fatalf("expected IsError result, got %#v", result)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "missing required parameter: path") {
+		t.Fatalf("expected error message containing 'missing required parameter: path', got %q", text)
 	}
 }

@@ -1,7 +1,7 @@
 ---
 description: "Software developer implementing a PLAN.md"
 mode: primary
-model: manifest/medium
+model: manifest/complex
 permission:
   read: allow
   edit: allow

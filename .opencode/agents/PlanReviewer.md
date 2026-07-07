@@ -1,7 +1,7 @@
 ---
 description: "Reviews the work of Planner"
 mode: subagent
-model: manifest/complex
+model: manifest/ultra
 permission:
   read: allow
   edit:

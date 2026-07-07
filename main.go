@@ -28,25 +28,34 @@ import (
 const (
 	defaultToolTimeout    = 5 * time.Minute
 	maxToolOutputBytes    = 1 << 20
-	scanDescriptionLines  = 10
+	scanHeaderLines       = 30
 	scanDescriptionPrefix = "Description:"
+	scanParamPrefix       = "Param:"
 	watchToolsInterval    = 2 * time.Second
 	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
 )
 
-var serverVersion = "0.2.0"
+var serverVersion = "0.3.0"
+
+type paramSpec struct {
+	Name        string // validated against argumentKeyPattern
+	Type        string // "string" | "number" | "boolean"
+	Required    bool
+	Description string
+}
 
 type discoveredTool struct {
 	Name        string
 	Path        string
 	Description string
+	Params      []paramSpec
 }
 
 // discoverTools scans the given directory for executable files and symlinks
 // resolving to executables. It skips subdirectories and non-executable files.
-// For each valid executable, it extracts the description and constructs a
-// discoveredTool record, which is later registered with the MCP server.
+// For each valid executable, it extracts the description and parameters, then
+// constructs a discoveredTool record for later registration with the MCP server.
 func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	entries, err := os.ReadDir(scriptsDir)
 	if err != nil {
@@ -77,19 +86,21 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 		}
 
 		description := extractDescription(resolvedPath)
+		params := extractParams(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
 			Name:        name,
 			Path:        resolvedPath,
 			Description: description,
+			Params:      params,
 		})
 	}
 
 	return tools, nil
 }
 
-// extractDescription reads the first scanDescriptionLines of a file and
+// extractDescription reads the first scanHeaderLines of a file and
 // looks for a line containing scanDescriptionPrefix ("Description:").
 // If found, it returns the string following the prefix. This is used
 // to populate the description field of the MCP Tool, providing LLMs
@@ -103,7 +114,7 @@ func extractDescription(filePath string) string {
 
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
-	for scanner.Scan() && lineCount < scanDescriptionLines {
+	for scanner.Scan() && lineCount < scanHeaderLines {
 		lineCount++
 		line := scanner.Text()
 
@@ -120,6 +131,135 @@ func extractDescription(filePath string) string {
 	}
 
 	return ""
+}
+
+// extractParams reads the first scanHeaderLines of a file and parses
+// any Param: annotations. It returns a slice of paramSpec with all valid
+// parameters. Invalid or malformed annotations produce a stderr warning and
+// are skipped without panicking.
+//
+// The annotation syntax is:
+//
+//	# Param: <name> <type> <required|optional> "<description>"
+//
+// Validation includes:
+// - name must match argumentKeyPattern
+// - type must be one of "string", "number", "boolean"
+// - required token must be "required" or "optional"
+// - description must be quoted
+func extractParams(filePath string) []paramSpec {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return []paramSpec{}
+	}
+	defer file.Close()
+
+	var params []paramSpec
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+
+	for scanner.Scan() && lineCount < scanHeaderLines {
+		lineCount++
+		line := scanner.Text()
+
+		if !strings.Contains(line, scanParamPrefix) {
+			continue
+		}
+
+		// Split on the first occurrence of "Param:"
+		parts := strings.SplitN(line, scanParamPrefix, 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		rawAnnotation := strings.TrimSpace(parts[1])
+
+		// Parse the annotation: <name> <type> <required|optional> "<description>"
+		param, err := parseParamAnnotation(rawAnnotation, filePath, line)
+		if err != nil {
+			// Warning already logged in parseParamAnnotation
+			continue
+		}
+
+		params = append(params, param)
+	}
+
+	return params
+}
+
+// parseParamAnnotation parses a single parameter annotation string.
+// It expects format: <name> <type> <required|optional> "<description>"
+// Returns error if validation fails (warning already logged to stderr).
+func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, error) {
+	// Find the quoted description (everything after the last quote-wrapped string)
+	// The description is the last field, wrapped in quotes
+	lastQuoteIdx := strings.LastIndex(annotation, "\"")
+	firstQuoteIdx := strings.Index(annotation, "\"")
+
+	if firstQuoteIdx < 0 || lastQuoteIdx < 0 || firstQuoteIdx == lastQuoteIdx {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, "description must be quoted", fullLine)
+		return paramSpec{}, fmt.Errorf("malformed param annotation")
+	}
+
+	// Extract description (strip quotes)
+	description := annotation[firstQuoteIdx+1 : lastQuoteIdx]
+
+	// Extract the prefix (before the first quote)
+	prefix := strings.TrimSpace(annotation[:firstQuoteIdx])
+
+	// Split prefix into name, type, and required/optional token
+	tokens := strings.Fields(prefix)
+	if len(tokens) != 3 {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, "expected 3 fields (name, type, required|optional)", fullLine)
+		return paramSpec{}, fmt.Errorf("wrong field count")
+	}
+
+	name := tokens[0]
+	paramType := tokens[1]
+	requiredToken := tokens[2]
+
+	// Validate name against argumentKeyPattern
+	if !argumentKeyPattern.MatchString(name) {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid parameter name")
+	}
+
+	// Validate type
+	var typeOk bool
+	switch paramType {
+	case "string", "number", "boolean":
+		typeOk = true
+	default:
+		typeOk = false
+	}
+	if !typeOk {
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid type")
+	}
+
+	// Validate required/optional token
+	var required bool
+	switch requiredToken {
+	case "required":
+		required = true
+	case "optional":
+		required = false
+	default:
+		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
+			filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine)
+		return paramSpec{}, fmt.Errorf("invalid required token")
+	}
+
+	return paramSpec{
+		Name:        name,
+		Type:        paramType,
+		Required:    required,
+		Description: description,
+	}, nil
 }
 
 // parseToolArguments unmarshals the JSON arguments provided by the MCP client
@@ -140,6 +280,53 @@ func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 }
 
 var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// buildInputSchema constructs a JSON Schema for a tool's input parameters.
+// It takes a slice of paramSpec and builds a schema with a "properties" object
+// and a "required" array (omitted if empty). Duplicate param names are deduplicated:
+// the last declaration wins for both properties and required status.
+//
+// Returns a json.RawMessage containing:
+//
+//	{"type":"object","properties":{...},"required":[...]}
+//
+// The "required" key is omitted entirely if no params are required.
+func buildInputSchema(params []paramSpec) json.RawMessage {
+	properties := make(map[string]any)
+	lastRequired := make(map[string]bool)
+
+	// First pass: build properties map and track last-seen required status
+	for _, param := range params {
+		properties[param.Name] = map[string]any{
+			"type":        param.Type,
+			"description": param.Description,
+		}
+		lastRequired[param.Name] = param.Required
+	}
+
+	// Build the schema object
+	schema := map[string]any{
+		"type":       "object",
+		"properties": properties,
+	}
+
+	// Second pass: collect required names (using last-seen required status)
+	var requiredNames []string
+	seen := make(map[string]bool)
+	for _, param := range params {
+		if !seen[param.Name] && lastRequired[param.Name] {
+			requiredNames = append(requiredNames, param.Name)
+			seen[param.Name] = true
+		}
+	}
+
+	// Only add "required" key if there are required params
+	if len(requiredNames) > 0 {
+		schema["required"] = requiredNames
+	}
+
+	return mustJSONMarshal(schema)
+}
 
 // argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
 // formatted for execution. It enforces strict naming rules for keys to prevent
@@ -239,10 +426,11 @@ func combineToolOutput(stdout, stderr []byte) string {
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing
 // tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
-	server *mcp.Server
-	dirAbs string
-	mu     sync.Mutex
-	names  []string
+	server      *mcp.Server
+	dirAbs      string
+	mu          sync.Mutex
+	names       []string
+	lastHandler mcp.ToolHandler
 }
 
 func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
@@ -250,8 +438,8 @@ func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
 }
 
 // replace unregisters all currently tracked tools and registers a new set of tools.
-// It defines the InputSchema dynamically, allowing tools to accept arbitrary
-// string key-value arguments, which are then passed to the execution wrapper.
+// It defines the InputSchema dynamically based on each tool's Param declarations,
+// allowing tools to accept typed parameters with proper schema validation.
 func (r *toolRegistry) replace(tools []discoveredTool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -265,20 +453,29 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
 		toolDescription := discoveredTool.Description
+		toolParams := discoveredTool.Params
+
+		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			parsedArgs, err := parseToolArguments(req.Params.Arguments)
+			if err != nil {
+				return nil, err
+			}
+			if err := validateRequiredParams(parsedArgs, toolParams); err != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+					IsError: true,
+				}, nil
+			}
+			return executeTool(ctx, toolPath, parsedArgs, defaultToolTimeout, r.dirAbs)
+		})
 
 		r.server.AddTool(&mcp.Tool{
 			Name:        toolName,
 			Description: toolDescription,
-			InputSchema: mustJSONMarshal(map[string]any{
-				"type": "object",
-				"additionalProperties": map[string]any{
-					"type": "string",
-				},
-			}),
-		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return executeTool(ctx, toolPath, req.Params.Arguments, defaultToolTimeout, r.dirAbs)
-		})
+			InputSchema: buildInputSchema(toolParams),
+		}, handlerFunc)
 
+		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
 }
@@ -362,17 +559,23 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 }
 
-// executeTool runs the script at scriptPath as a subprocess in the specified
-// working directory. It parses the JSON arguments from the MCP request, converts
-// them to CLI flags, and binds the context to a timeout to prevent hanging tools.
-// The output is captured, combined, and returned as an MCP CallToolResult.
-func executeTool(ctx context.Context, scriptPath string, rawArgs json.RawMessage, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
-	parsedArgs, err := parseToolArguments(rawArgs)
-	if err != nil {
-		return nil, err
+func validateRequiredParams(args map[string]any, params []paramSpec) error {
+	for _, p := range params {
+		if p.Required {
+			if _, ok := args[p.Name]; !ok {
+				return fmt.Errorf("missing required parameter: %s", p.Name)
+			}
+		}
 	}
+	return nil
+}
 
-	cliArgs, err := argumentsToCLIArgs(parsedArgs)
+// executeTool runs the script at scriptPath as a subprocess in the specified
+// working directory. It accepts pre-parsed arguments as a map, converts them to
+// CLI flags, and binds the context to a timeout to prevent hanging tools.
+// The output is captured, combined, and returned as an MCP CallToolResult.
+func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
+	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},

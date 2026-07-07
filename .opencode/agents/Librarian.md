@@ -1,7 +1,7 @@
 ---
 description: "Retrieves required information from external resources"
 mode: subagent
-model: manifest/small
+model: manifest/medium
 permission:
   read: deny
   edit: deny

@@ -1,7 +1,7 @@
 ---
 description: "Strategic software architect creating a PLAN.md"
 mode: primary
-model: manifest/complex
+model: manifest/ultra
 permission:
   read:
     "*": deny

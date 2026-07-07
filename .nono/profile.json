@@ -6,7 +6,7 @@
     "name": "opencode-mcp-commands"
   },
   "groups": {
-    "include": []
+    "include": ["go_runtime", "go_runtime_macos"]
   },
   "workdir": {
     "access": "readwrite"
@@ -25,7 +25,8 @@
       "~/.gitignore",
       "~/.path",
       "~/.tigrc",
-      "~/.vimrc"
+      "~/.vimrc",
+      "/opt/homebrew/bin/go"
     ],
     "read": [
       "~/.cache",
@@ -34,7 +35,12 @@
       "~/private",
       "~/private/dev"
     ],
-    "allow": ["~/.npm/_cacache/tmp", "~/.go", "~/private/dev/mcp-commands"],
+    "allow": [
+      "~/.npm/_cacache/tmp",
+      "~/.go",
+      "~/private/dev/mcp-commands",
+      "/opt/homebrew/bin"
+    ],
     "deny": ["~/.gitconfig"]
   },
   "network": {
@@ -42,7 +48,7 @@
     "allow_port": [11438, 12010]
   },
   "environment": {
-    "allow_vars": ["HOME"],
+    "allow_vars": ["HOME", "SHELL"],
     "set_vars": {
       "GIT_CONFIG_GLOBAL": "~/.gitconfig-agents",
       "GOPATH": "~/.go"

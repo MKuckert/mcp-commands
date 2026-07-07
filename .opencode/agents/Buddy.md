@@ -1,7 +1,7 @@
 ---
 description: "Use this agent as your technical assistant for talking about coding, debugging and development tasks."
 mode: primary
-model: manifest/medium
+model: manifest/ultra
 permission:
   read: allow
   edit: allow
