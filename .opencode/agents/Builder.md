@@ -13,13 +13,11 @@ permission:
     go *: allow
     make *: allow
     mcp-commands *: allow
-  android_*: allow
   question: allow
   task: allow
   web_*: deny
   skill:
     "*": allow
-    supabase-postgres-best-practices: deny
   todowrite: deny
   doom_loop: allow
   external_directory:

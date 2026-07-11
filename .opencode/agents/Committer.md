@@ -13,13 +13,11 @@ permission:
     "git status": allow
     "git add *": allow
     "git commit *": allow
-  android_*: deny
   question: deny
   task: deny
   web_*: deny
   skill:
     "*": allow
-    supabase-postgres-best-practices: deny
   todowrite: deny
   doom_loop: allow
 steps: 100

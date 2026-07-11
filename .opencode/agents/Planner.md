@@ -13,13 +13,11 @@ permission:
   glob: deny
   list: deny
   bash: deny
-  android_*: deny
   question: allow
   task: allow
   web_*: deny
   skill:
     "*": allow
-    supabase-postgres-best-practices: deny
   todowrite: deny
   doom_loop: allow
 color: "#DD0000"

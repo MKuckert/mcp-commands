@@ -14,10 +14,8 @@ permission:
   question: allow
   task: allow
   web_*: deny
-  android_*: allow
   skill:
     "*": allow
-    supabase-postgres-best-practices: deny
   todowrite: deny
   doom_loop: allow
 color: "#00AA00"

@@ -11,7 +11,6 @@ permission:
   glob: allow
   list: allow
   bash: deny
-  android_*: deny
   question: deny
   task: deny
   web_*: deny
