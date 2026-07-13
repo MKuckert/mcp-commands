@@ -1,0 +1,4 @@
+main=/Users/mkuckert/env/agent-harness
+name=mcp-commands
+base=b658517b59cb709748ff0d56b479b5cf1adefedb
+paths=.opencode/ opencode.jsonc tui.jsonc
