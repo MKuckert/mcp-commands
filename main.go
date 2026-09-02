@@ -38,6 +38,8 @@ const (
 
 var serverVersion = "0.3.0"
 
+const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
+
 type paramSpec struct {
 	Name        string // validated against argumentKeyPattern
 	Type        string // "string" | "number" | "boolean"
@@ -626,6 +628,15 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
 	}, nil
+}
+
+// resolveAPIKey returns the token from the flag value if non-empty,
+// otherwise from MCP_COMMANDS_API_KEY. Returns "" if neither is set.
+func resolveAPIKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	return os.Getenv(apiKeyEnvVar)
 }
 
 func main() {
