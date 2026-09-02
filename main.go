@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -639,12 +640,51 @@ func resolveAPIKey(flagValue string) string {
 	return os.Getenv(apiKeyEnvVar)
 }
 
+// newBearerAuthHandler wraps next, requiring an
+// "Authorization: Bearer <token>" header that matches token.
+// Mismatches get 401 with a WWW-Authenticate: Bearer header.
+func newBearerAuthHandler(next http.Handler, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") || got == "" {
+			reject(w)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			reject(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// reject writes a 401 with the WWW-Authenticate header per RFC 6750.
+func reject(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte("unauthorized"))
+}
+
+// buildHTTPHandler returns the streamable MCP handler. When token is
+// non-empty it is wrapped in bearer-token auth middleware; otherwise
+// the handler serves requests unauthenticated.
+func buildHTTPHandler(server *mcp.Server, token string) http.Handler {
+	inner := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return server
+	}, nil)
+	if token == "" {
+		return inner
+	}
+	return newBearerAuthHandler(inner, token)
+}
+
 func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
 	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
+	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -655,19 +695,21 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>]\n")
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag); err != nil {
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	apiKey = resolveAPIKey(apiKey)
 
 	scriptsAbs, err := filepath.Abs(scriptsDir)
 	if err != nil {
@@ -712,9 +754,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 
 	if port > 0 {
 		addr := fmt.Sprintf("%s:%d", host, port)
-		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-			return server
-		}, nil)
+		handler := buildHTTPHandler(server, apiKey)
 		serverHTTP := &http.Server{Addr: addr, Handler: handler}
 
 		go func() {
@@ -724,7 +764,11 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 			_ = serverHTTP.Shutdown(shutdownCtx)
 		}()
 
-		fmt.Fprintf(os.Stderr, "Starting HTTP server on %s\n", addr)
+		if apiKey != "" {
+			fmt.Fprintf(os.Stderr, "Starting HTTP server on %s (API key auth enabled)\n", addr)
+		} else {
+			fmt.Fprintf(os.Stderr, "Starting HTTP server on %s\n", addr)
+		}
 		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
