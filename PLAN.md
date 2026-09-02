@@ -53,7 +53,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Token resolution (`resolveAPIKey`)**
+- [x] **Task 1: Token resolution (`resolveAPIKey`)**
   - **Description:** Add to `main.go`:
     ```go
     const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
@@ -72,7 +72,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
     - Flag empty, env set → env value returned.
     - Neither set → `""`.
 
-- [ ] **Task 2: Bearer-auth middleware (`newBearerAuthHandler`)**
+- [x] **Task 2: Bearer-auth middleware (`newBearerAuthHandler`)**
   - **Description:** Add to `main.go`:
     ```go
     // newBearerAuthHandler wraps next, requiring an
@@ -111,7 +111,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
     - `WWW-Authenticate: Bearer` present on every 401.
     - Comparison uses `subtle.ConstantTimeCompare`.
 
-- [ ] **Task 3: Wire into `run()` / `main()`**
+- [x] **Task 3: Wire into `run()` / `main()`**
   - **Description:**
     - `main()`: add `apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")`;
       update the usage string; pass `*apiKeyFlag` into `run(...)` (new last
@@ -147,7 +147,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
     - stdio mode: identical behavior to before with or without a key set.
     - Token never appears in any log output.
 
-- [ ] **Task 4: Tests**
+- [x] **Task 4: Tests**
   - **Description:** Add to `main_test.go` (table-driven, matching existing style):
     1. `TestResolveAPIKey` — table: flag-only, env-only (set/clear
        `t.Setenv(apiKeyEnvVar, ...)`), both (flag wins), neither.
@@ -172,7 +172,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
       in any log output" and "stdio mode identical behavior" have no automated
       test here — verify them manually during code review.
 
-- [ ] **Task 5: Documentation & release**
+- [x] **Task 5: Documentation & release**
   - **Description:**
     - `README.md`: extend the **HTTP Server Mode** section: authentication is
       optional; when enabled via `--api-key` or `MCP_COMMANDS_API_KEY`
@@ -187,7 +187,7 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
       names in code.
     - Version string updated in exactly one place (`serverVersion` const).
 
-- [ ] **Task 6: Commits**
+- [x] **Task 6: Commits**
   - **Description:** Conventional commits, one per task unit; `PLAN.md` is
     included in each related commit (per AGENTS.md Committer convention):
     1. `feat: resolve API key from --api-key flag or MCP_COMMANDS_API_KEY`
@@ -276,6 +276,8 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
 
 ## Final Status (Code Review)
 
-- **Round 1:** PENDING
+- **Round 1:** **APPROVED**
+
+  The implementation in `main.go`, `main_test.go`, and `README.md` matches the approved plan exactly. Task 1: `resolveAPIKey` is implemented verbatim with the `apiKeyEnvVar` constant, and all three precedence criteria are covered by a four-case table in `TestResolveAPIKey` (flag-only, env-only, both/flag-wins, neither). Task 2: `newBearerAuthHandler` and `reject` match the plan's code; header-shape rejection via `strings.Cut`, case-insensitive scheme via `strings.EqualFold`, `subtle.ConstantTimeCompare` for the token, and `WWW-Authenticate: Bearer` on every 401 path were verified in code and exercised by the seven-case table in `TestBearerAuthMiddleware` (including lowercase-scheme acceptance, wrong scheme, empty token, and downstream pass-through). Task 3: the `--api-key` flag, usage string, `run(...)` signature with `apiKey` as last parameter, resolution before server setup, the `buildHTTPHandler` extraction, and the conditional startup log are all in place; stdio mode is byte-identical to before (the `port == 0` branch never touches `apiKey`). Task 4: all four specified tests exist, are table-driven where noted, use no sleeps/polling, and the existing tests are unmodified (the `main_test.go` diff is purely additive). Task 5: the README gains an optional-authentication subsection with flag/env precedence, a copy-paste `curl` example, a JSON client-config example, the single-space rule, and the stdio note; `serverVersion` is bumped to `0.4.0` in exactly one place. Task 6: the four commits (`21b00f1`, `7ee04d9`, `f47d936`, `4041b71`) have the plan's (advisory-corrected) subjects, sensible file membership, and no real tokens — only placeholders (`tok`, `s3cret`, `my-secret-token`). Stability: `gofmt -l .` clean, `go build ./...` OK, `TMPDIR=/root/gotmp go test -count=1 ./...` green (17/17 top-level tests pass). Plan Reviewer advisory items were resolved: (a) "token never appears in any log output" verified by reading all 17 print statements in `main.go` — none reference the key value; (b) "stdio mode identical behavior" verified as above. Non-blocking notes: `go test -race` is infeasible in this environment (Go race runtime FATALs with "Found 39 - Supported 48" identically on the base commit `41b426b`, so it is environmental, not a regression); `serverVersion` is declared as `var` though the plan text said "const" (pre-existing declaration, single location, no functional difference); PLAN.md appears in commit 1 only because it was unmodified by commits 2–4 (checkboxes are ticked post-review), which is consistent with the Committer convention; the multi-space header edge (`"Bearer  x"`) has no dedicated test case, but the plan's Task 4 spec did not require one and its behavior is documented in the README.
 - **Round 2:** N/A
 - **Round 3:** N/A
