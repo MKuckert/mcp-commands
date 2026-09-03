@@ -62,7 +62,7 @@ Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0
 
 #### Authentication (optional)
 
-By default the HTTP server is **open** — no token required, exactly as before. You can optionally protect it with a static API token:
+The HTTP server accepts requests without authentication by default. You can optionally protect it with a static API token:
 
 ```bash
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key my-secret-token
