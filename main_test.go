@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1122,6 +1125,138 @@ func TestValidateRequiredParams(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResolveAPIKey(t *testing.T) {
+	tests := []struct {
+		name string
+		flag string
+		env  string
+		want string
+	}{
+		{name: "flag_only", flag: "from-flag", env: "", want: "from-flag"},
+		{name: "env_only", flag: "", env: "from-env", want: "from-env"},
+		{name: "both_set_flag_wins", flag: "from-flag", env: "from-env", want: "from-flag"},
+		{name: "neither_set", flag: "", env: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// t.Setenv to "" counts as empty for resolveAPIKey.
+			t.Setenv(apiKeyEnvVar, tt.env)
+
+			if got := resolveAPIKey(tt.flag); got != tt.want {
+				t.Errorf("resolveAPIKey(%q) = %q, want %q", tt.flag, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBearerAuthMiddleware(t *testing.T) {
+	const token = "tok"
+
+	tests := []struct {
+		name        string
+		header      string
+		wantStatus  int
+		wantReached bool
+	}{
+		{name: "no_header", header: "", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "scheme_only", header: "Bearer", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "empty_token", header: "Bearer ", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "wrong_scheme", header: "Basic abc", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "lowercase_scheme_accepted", header: "bearer " + token, wantStatus: http.StatusOK, wantReached: true},
+		{name: "wrong_token", header: "Bearer wrong", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "correct_token", header: "Bearer " + token, wantStatus: http.StatusOK, wantReached: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
+			rec := httptest.NewRecorder()
+
+			newBearerAuthHandler(next, token).ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if reached != tt.wantReached {
+				t.Errorf("downstream reached = %v, want %v", reached, tt.wantReached)
+			}
+			if rec.Code == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") != "Bearer" {
+				t.Errorf("401 without WWW-Authenticate: Bearer, got %q", rec.Header().Get("WWW-Authenticate"))
+			}
+		})
+	}
+}
+
+// newTestMCPServer builds an mcp.Server with one trivial tool.
+func newTestMCPServer(t *testing.T) *mcp.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "noop", Description: "no-op", InputSchema: buildInputSchema([]paramSpec{})}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	})
+	return server
+}
+
+// postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
+// the response status code. An empty auth value omits the Authorization header.
+func postInitializeStatus(t *testing.T, url, auth string) int {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
+	req, err := http.NewRequest(http.MethodPost, url+"/", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, ""))
+	defer httpServer.Close()
+
+	status := postInitializeStatus(t, httpServer.URL, "")
+	if status == http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated server to serve request, got 401")
+	}
+}
+
+func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret"))
+	defer httpServer.Close()
+
+	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusUnauthorized {
+		t.Errorf("unauthenticated request: status = %d, want 401", status)
+	}
+
+	status := postInitializeStatus(t, httpServer.URL, "Bearer s3cret")
+	if status == http.StatusUnauthorized {
+		t.Errorf("authenticated request: status = %d, want non-401", status)
 	}
 }
 

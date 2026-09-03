@@ -60,6 +60,50 @@ _Exposes the MCP server over HTTP for remote or web-based clients._
 
 Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0.0.0` to bind to all interfaces and make MCP accessible from other devices).
 
+#### Authentication (optional)
+
+The HTTP server accepts requests without authentication by default. You can optionally protect it with a static API token:
+
+```bash
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key my-secret-token
+```
+
+or via the `MCP_COMMANDS_API_KEY` environment variable:
+
+```bash
+MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
+```
+
+The `--api-key` flag takes precedence over the environment variable. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
+
+```bash
+curl -s http://localhost:8080 \
+  -H "Authorization: Bearer my-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+```
+
+MCP clients that support custom headers can be configured the same way, e.g. a generic JSON client config:
+
+```json
+{
+  "mcpServers": {
+    "mcp-commands": {
+      "url": "http://localhost:8080",
+      "headers": {
+        "Authorization": "Bearer my-secret-token"
+      }
+    }
+  }
+}
+```
+
+Notes:
+- The scheme is compared case-insensitively (`bearer` works), but the header must be exactly `Bearer <token>` separated by a single space.
+- The token is never logged by the server.
+- Enabling auth is a breaking change for existing HTTP clients — they must start sending the token.
+- **Stdio mode needs no token.** `--api-key` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
+
 ### Creating Tools
 
 Simply create an executable file in your `--scripts` directory.
