@@ -774,6 +774,42 @@ func reject(w http.ResponseWriter) {
 	_, _ = w.Write([]byte("unauthorized"))
 }
 
+const (
+	corsAllowMaxAge    = "900" // 15 min; browsers cap at 7200s
+	corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
+	// The transport is always stateless; the SDK 405s GET/DELETE.
+	corsAllowedMethods = "POST, OPTIONS"
+)
+
+// newCORSHandler allows cross-origin browser requests from allowed
+// origins. Requests without an Origin header, and origins not on the
+// allowlist (and not covered by allowAll), pass through with no CORS
+// headers — the browser then blocks the response itself.
+func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
+	allowed := cfg.originSet()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" || (!cfg.allowAll && !allowed[origin]) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
+		h.Add("Vary", "Origin")
+		h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
+		if r.Method == http.MethodOptions { // preflight
+			h.Set("Access-Control-Allow-Methods", corsAllowedMethods)
+			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
+				h.Set("Access-Control-Allow-Headers", achr)
+			}
+			h.Set("Access-Control-Max-Age", corsAllowMaxAge)
+			w.WriteHeader(http.StatusNoContent)
+			return // never call next for preflight
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // buildHTTPHandler returns the streamable MCP handler. When token is
 // non-empty it is wrapped in bearer-token auth middleware; otherwise
 // the handler serves requests unauthenticated.
