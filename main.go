@@ -38,7 +38,7 @@ const (
 	serverName            = "mcp-commands"
 )
 
-var serverVersion = "0.4.0"
+var serverVersion = "0.5.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
