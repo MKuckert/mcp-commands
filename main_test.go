@@ -1234,9 +1234,34 @@ func postInitializeStatus(t *testing.T, url, auth string) int {
 	return resp.StatusCode
 }
 
+// doInitialize POSTs a JSON-RPC initialize request and returns the response.
+// Empty auth/origin values omit the corresponding headers.
+func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
+	req, err := http.NewRequest(http.MethodPost, url+"/", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	return resp
+}
+
 func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, ""))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
 	defer httpServer.Close()
 
 	status := postInitializeStatus(t, httpServer.URL, "")
@@ -1247,7 +1272,7 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 
 func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret"))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", corsConfig{}))
 	defer httpServer.Close()
 
 	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusUnauthorized {

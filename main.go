@@ -810,17 +810,27 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 	})
 }
 
-// buildHTTPHandler returns the streamable MCP handler. When token is
-// non-empty it is wrapped in bearer-token auth middleware; otherwise
-// the handler serves requests unauthenticated.
-func buildHTTPHandler(server *mcp.Server, token string) http.Handler {
-	inner := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+// buildHTTPHandler returns the streamable MCP handler, always constructed
+// stateless (the app keeps no per-session state, so protocol sessions are
+// vestigial). When token is non-empty it is wrapped in bearer-token auth
+// middleware; when CORS is enabled it is wrapped (outermost) in the CORS
+// middleware, so preflights bypass auth and 401s carry CORS headers.
+func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
+	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
-	}, nil)
-	if token == "" {
-		return inner
+	}, &mcp.StreamableHTTPOptions{
+		// Always stateless (user decision): the app keeps no
+		// per-session state, so protocol sessions are vestigial.
+		Stateless:                  true,
+		DisableLocalhostProtection: cors.disableLocalhostProtection,
+	})
+	if token != "" {
+		h = newBearerAuthHandler(h, token)
 	}
-	return newBearerAuthHandler(inner, token)
+	if !cors.disabled() {
+		h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
+	}
+	return h
 }
 
 func main() {
@@ -830,6 +840,9 @@ func main() {
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
+	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
+	allowAllOriginsFlag := flag.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
+	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -840,17 +853,24 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>] [--allow-all-origins] [--disable-localhost-protection]\n")
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag); err != nil {
+	// Resolved and validated here (all modes, fail-fast); run only consumes it.
+	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, *disableLocalhostProtectionFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -899,7 +919,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 
 	if port > 0 {
 		addr := fmt.Sprintf("%s:%d", host, port)
-		handler := buildHTTPHandler(server, apiKey)
+		handler := buildHTTPHandler(server, apiKey, cors)
 		serverHTTP := &http.Server{Addr: addr, Handler: handler}
 
 		go func() {
@@ -909,11 +929,18 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 			_ = serverHTTP.Shutdown(shutdownCtx)
 		}()
 
+		var notes []string
 		if apiKey != "" {
-			fmt.Fprintf(os.Stderr, "Starting HTTP server on %s (API key auth enabled)\n", addr)
-		} else {
-			fmt.Fprintf(os.Stderr, "Starting HTTP server on %s\n", addr)
+			notes = append(notes, "API key auth enabled")
 		}
+		if !cors.disabled() {
+			notes = append(notes, cors.summary())
+		}
+		line := fmt.Sprintf("Starting HTTP server on %s", addr)
+		if len(notes) > 0 {
+			line += " (" + strings.Join(notes, ", ") + ")"
+		}
+		fmt.Fprintf(os.Stderr, "%s\n", line)
 		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
