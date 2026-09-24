@@ -4,13 +4,16 @@
 
 Let browser-based MCP clients (web chat UIs, in-browser agents) talk to the
 streamable HTTP transport, which the Go SDK's `NewStreamableHTTPHandler` does
-not CORS-enable on its own. Support is **opt-in**: new flags
+not CORS-enable on its own. CORS support is **opt-in**: new flags
 `--allowed-origins` / `--allow-all-origins` configure a CORS middleware that
-wraps the handler, plus `--stateless` and `--disable-localhost-protection`
-SDK options that browser setups frequently need. With none of the flags set,
-behavior is byte-identical to today (zero CORS headers, no OPTIONS handling
-change) — existing non-browser clients are unaffected. The stdio transport is
-untouched.
+wraps the handler, and `--disable-localhost-protection` opts out of the
+SDK's default DNS-rebinding 403. In addition, the streamable handler is
+**always constructed with `Stateless: true`** (user decision 2026-09-24):
+this app keeps no per-session state — the tool registry is process-global —
+so protocol sessions are vestigial. With no CORS flags set, the CORS surface
+is byte-identical to today (zero CORS headers, no OPTIONS change); the
+stateless switch is a user-visible 0.5.0 change and is documented (see
+Requirements). The stdio transport is untouched.
 
 Research: `/workspace/research/mcp-commands-cors.md` (verified against
 `modelcontextprotocol/go-sdk v1.6.1` — the exact version in `go.mod`).
@@ -35,12 +38,26 @@ path is fetch-based (e.g. the official MCP TS SDK).
   |---|---|---|---|
   | `--allowed-origins` | `MCP_COMMANDS_ALLOWED_ORIGINS` | comma-separated string | Exact origin allowlist (`https://app.example.com`) |
   | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | bool (`1`/`true`/`yes`, case-insensitive) | Echo any `Origin` (dev convenience) |
-  | `--stateless` | *(none, deliberate)* | bool | `StreamableHTTPOptions{Stateless: true}` — no session validation, for non-session browser fetch clients / server-side webhooks. **Not** an `EventSource` fix. |
   | `--disable-localhost-protection` | *(none, deliberate)* | bool | `StreamableHTTPOptions{DisableLocalhostProtection: true}` — disables the SDK's default DNS-rebinding 403 on loopback servers; needed when a page on a tunnel/LAN hostname talks to a `127.0.0.1` server. |
 
-  The two mode flags deliberately have **no** env fallback (a mode choice,
-  not a secret) — the departure from the api-key pattern is documented in the
-  README.
+  `--disable-localhost-protection` deliberately has **no** env fallback (a
+  mode choice, not a secret) — the departure from the api-key pattern is
+  documented in the README.
+- **Always stateless (behavior change, user decision):** `buildHTTPHandler`
+  always passes `Stateless: true` to `NewStreamableHTTPHandler`. Rationale:
+  the app keeps no per-session state, so the SDK's session ID is issued,
+  validated, and then ignored by us — pure overhead. Consequences, all
+  documented in the README as 0.5.0 changes:
+  - `initialize` responses no longer contain `Mcp-Session-Id`; clients that
+    store and resend it keep working (the SDK ignores it in stateless mode).
+  - Per spec `2025-11-25`, stateless servers should receive
+    `Mcp-Protocol-Version` per request. **Builder: verify what go-sdk v1.6.1
+    does when the header is absent in stateless mode** (expected: defaults to
+    the latest supported version) and record the actual behavior in the
+    README; if it 400s, that is a spec-conformance gap for the SDK, not a
+    bug in this feature — clients conforming to the spec are unaffected.
+  - GET is 405 in stateless mode (it already required a session before); the
+    browser path remains fetch-POST based.
 - **Origin matching:** exact, case-sensitive string match. No wildcard /
   pattern matching in v1 (YAGNI). Origins are validated at startup and
   garbage fails fast (`net/url` parse + require non-empty scheme, `http` or
@@ -62,11 +79,11 @@ path is fetch-based (e.g. the official MCP TS SDK).
      streams: `Access-Control-Allow-Origin: <echoed origin>` (never `*` —
      echo + `Vary: Origin` keeps shared caches and the credentials gotcha
      safe) and `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`
-     (clients must read the session ID; exposing `Last-Event-ID` is harmless
-     until an `EventStore` exists).
+     (the session ID is never issued in stateless mode, so exposing it is a
+     no-op; `Last-Event-ID` is harmless until an `EventStore` exists).
   4. Preflight `OPTIONS` (allowed origin) → add
-     `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS` (sessioned)
-     / `POST, OPTIONS` (stateless — the SDK 405s GETs in stateless mode),
+     `Access-Control-Allow-Methods: POST, OPTIONS` (the transport is always
+     stateless; the SDK 405s GET/DELETE),
      `Access-Control-Allow-Headers: <echo of Access-Control-Request-Headers>`
      (echo beats hardcoding: the MCP header set evolves; still fully
      controlled because only allowed origins see it — set only when the
@@ -95,7 +112,7 @@ path is fetch-based (e.g. the official MCP TS SDK).
   features: `Starting HTTP server on <addr> (API key auth enabled, CORS:
   3 origin(s))`, `(..., CORS: any origin — dev mode)`; parens omitted when
   neither is enabled (today's line).
-- **Usage string** in `main()` gains the four flags.
+- **Usage string** in `main()` gains the three new flags.
 - **Version:** `serverVersion` bumps `0.4.0` → `0.5.0` (new feature release).
 
 ---
@@ -119,7 +136,6 @@ live plan. The archive move is committed with Task 1.
     type corsConfig struct {
         origins                  []string // exact origin allowlist
         allowAll                 bool     // echo any Origin (dev)
-        stateless                bool     // StreamableHTTPOptions.Stateless
         disableLocalhostProtection bool   // StreamableHTTPOptions.DisableLocalhostProtection
     }
 
@@ -128,14 +144,6 @@ live plan. The archive move is committed with Task 1.
 
     // originSet returns the allowlist as a set for O(1) lookup.
     func (c corsConfig) originSet() map[string]bool { ... }
-
-    // allowedMethods is the Access-Control-Allow-Methods value for preflight.
-    func (c corsConfig) allowedMethods() string {
-        if c.stateless {
-            return "POST, OPTIONS" // SDK 405s GETs in stateless mode
-        }
-        return "GET, POST, DELETE, OPTIONS"
-    }
 
     // summary is the startup-log fragment for enabled CORS.
     func (c corsConfig) summary() string {
@@ -146,7 +154,7 @@ live plan. The archive move is committed with Task 1.
     // resolveCORS resolves flags (win) over env and validates origins.
     // Returns an error for malformed origins or a contradictory
     // --allowed-origins + --allow-all-origins combination.
-    func resolveCORS(allowedOriginsFlag string, allowAllFlag bool, stateless, disableLocalhostProtection bool) (corsConfig, error) { ... }
+    func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtection bool) (corsConfig, error) { ... }
     ```
     - Origins: split on comma, `strings.TrimSpace` each, drop empties.
     - Bool env: `parseBoolEnv` helper — `""` → false; `1`/`true`/`yes`
@@ -167,9 +175,12 @@ live plan. The archive move is committed with Task 1.
 - [ ] **Task 2: CORS middleware (`newCORSHandler`)**
   - **Description:** Add to `main.go`:
     ```go
-    const corsAllowMaxAge = "900" // 15 min; browsers cap at 7200s
-
-    var corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
+    const (
+        corsAllowMaxAge    = "900" // 15 min; browsers cap at 7200s
+        corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
+        // The transport is always stateless; the SDK 405s GET/DELETE.
+        corsAllowedMethods = "POST, OPTIONS"
+    )
 
     // newCORSHandler allows cross-origin browser requests from allowed
     // origins. Requests without an Origin header, and origins not on the
@@ -188,7 +199,7 @@ live plan. The archive move is committed with Task 1.
             h.Add("Vary", "Origin")
             h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
             if r.Method == http.MethodOptions { // preflight
-                h.Set("Access-Control-Allow-Methods", cfg.allowedMethods())
+                h.Set("Access-Control-Allow-Methods", corsAllowedMethods)
                 if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
                     h.Set("Access-Control-Allow-Headers", achr)
                 }
@@ -205,8 +216,8 @@ live plan. The archive move is committed with Task 1.
     - Disallowed `Origin` → no CORS headers, forwarded (status unchanged).
     - Allowed `Origin` → ACAO echoes it, `Vary` includes `Origin`, expose
       headers set, on every downstream response including 401s.
-    - Preflight → 204, methods list mode-dependent, echoed request headers,
-      max-age 900, empty body, `next` not invoked.
+    - Preflight → 204, `Access-Control-Allow-Methods: POST, OPTIONS`,
+      echoed request headers, max-age 900, empty body, `next` not invoked.
 
 - [ ] **Task 3: Wire into `main()` / `run()` / `buildHTTPHandler`**
   - **Description:**
@@ -218,7 +229,9 @@ live plan. The archive move is committed with Task 1.
           h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
               return server
           }, &mcp.StreamableHTTPOptions{
-              Stateless:                  cors.stateless,
+              // Always stateless (user decision): the app keeps no
+              // per-session state, so protocol sessions are vestigial.
+              Stateless:                  true,
               DisableLocalhostProtection: cors.disableLocalhostProtection,
           })
           if token != "" {
@@ -232,7 +245,9 @@ live plan. The archive move is committed with Task 1.
       ```
       (Builder: confirm the two `StreamableHTTPOptions` field names exist in
       go-sdk v1.6.1 — the research verified them; compile is the final proof.)
-    - `main()`: add the four flags; update the usage string; call
+    - `main()`: add the three flags (`--allowed-origins`,
+      `--allow-all-origins`, `--disable-localhost-protection`); update the
+      usage string; call
       `resolveCORS(...)` and exit on error via the existing
       `fmt.Fprintf(os.Stderr, "Error: %v\n")` + `os.Exit(1)` pattern
       (matching the `--dir`/`--scripts` validation); pass the resolved
@@ -250,8 +265,12 @@ live plan. The archive move is committed with Task 1.
     - `--port` + `--allowed-origins` → log mentions origin count;
       `--allow-all-origins` → "any origin — dev mode".
     - stdio mode: byte-identical behavior, flags ignored (like api-key).
-    - `--stateless` / `--disable-localhost-protection` take effect only via
-      `StreamableHTTPOptions`; no other code paths touched.
+    - `Stateless: true` and `DisableLocalhostProtection` take effect only
+      via `StreamableHTTPOptions`; no other code paths touched.
+    - An `initialize` round-trip returns no `Mcp-Session-Id` (stateless).
+    - Builder: verify the SDK v1.6.1 behavior for a stateless request
+      lacking `Mcp-Protocol-Version` (expected: defaults to latest supported
+      version; record in README per Requirements).
 
 - [ ] **Task 4: Tests**
   - **Description:** Add to `main_test.go` (table-driven where noted, matching
@@ -262,8 +281,8 @@ live plan. The archive move is committed with Task 1.
        (set/clear `t.Setenv(allowAllOriginsEnvVar, ...)`); contradictory
        flags → error; malformed origins → error; bool env `"banana"` →
        error.
-    2. `TestCORSHandlerPreflight` — table: sessioned vs stateless method
-       lists; asserts 204, ACAO echo, `Vary: Origin`,
+    2. `TestCORSHandlerPreflight` — asserts 204, ACAO echo,
+       `Access-Control-Allow-Methods: POST, OPTIONS`, `Vary: Origin`,
        `Access-Control-Allow-Headers` echo (and absent when the request
        sent none), `Access-Control-Max-Age: 900`, empty body, and a
        sentinel `next` proves the request was **not** forwarded.
@@ -277,10 +296,10 @@ live plan. The archive move is committed with Task 1.
     5. `TestBuildHTTPHandler401CarriesCORS` — POST with a bad token +
        allowed `Origin` → 401 **with** `Access-Control-Allow-Origin` and
        `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`.
-    6. `TestBuildHTTPHandlerInitializeExposesSessionID` — full
-       `initialize` round-trip (mirror `TestBuildHTTPHandlerEndToEnd`) with
-       an allowed `Origin` → non-401, `Mcp-Session-Id` present and listed in
-       `Access-Control-Expose-Headers`.
+    6. `TestBuildHTTPHandlerInitializeCORS` — full `initialize` round-trip
+       (mirror `TestBuildHTTPHandlerEndToEnd`) with an allowed `Origin` →
+       non-401, CORS headers present, and **no** `Mcp-Session-Id` in the
+       response (always-stateless guarantee).
     7. `TestBuildHTTPHandlerCORSDisabled` — zero `corsConfig`, request
        without Origin → no CORS headers at all (regression guard for the
        default-off promise).
@@ -299,17 +318,18 @@ live plan. The archive move is committed with Task 1.
       recommendation); `--allow-all-origins` is a dev convenience — safe
       only with `--api-key` + TLS, because the server executes local scripts
       CORS gates only response *readability*, not reachability;
-      `--stateless` for non-session browser fetch clients / webhooks (not
-      for `EventSource` — raw `EventSource` cannot send the required
-      headers in any mode; use a fetch-based client such as the MCP TS SDK);
-      fetch-based clients must send
-      `Accept: application/json, text/event-stream` on POST (the SDK 400s
-      otherwise; the TS SDK does this automatically);
+      **0.5.0 behavior change — the transport is always stateless:** no
+      `Mcp-Session-Id` is issued on `initialize` and each request stands on
+      its own; clients that stored and send a session ID keep working (the
+      SDK ignores it); this is also why raw `EventSource` remains unusable
+      in any mode — use a fetch-based client such as the MCP TS SDK; stateless
+      clients per spec send `Mcp-Protocol-Version` per request, and fetch
+      clients must send `Accept: application/json, text/event-stream` on POST
+      (the SDK 400s otherwise; the TS SDK does both automatically);
       `--disable-localhost-protection` for dev setups where the page is
       served from a tunnel/LAN hostname and the server binds 127.0.0.1, with
-      the DNS-rebinding trade-off warning; the `--stateless` /
-      `--disable-localhost-protection` flags intentionally have no env
-      fallbacks; `MCPGODEBUG=enableoriginverification=1` (go-sdk v1.6.1)
+      the DNS-rebinding trade-off warning; the flag intentionally has no env
+      fallback; `MCPGODEBUG=enableoriginverification=1` (go-sdk v1.6.1)
       makes the SDK 403 *all* cross-origin requests internally and conflicts
       with this feature — do not set it to "fix" CORS failures; a short ops
       note that a TLS-terminating proxy (Caddy/nginx) is required for
@@ -329,7 +349,7 @@ live plan. The archive move is committed with Task 1.
        (Task 1 + archive move)
     2. `feat: CORS middleware for browser clients on the HTTP transport`
        (Task 2)
-    3. `feat: wire CORS into HTTP handler with stateless and localhost-protection modes`
+    3. `feat: run the streamable HTTP transport stateless and wire in CORS`
        (Task 3)
     4. `test: cover CORS middleware, preflight ordering, and origin resolution`
        (Task 4)
@@ -343,12 +363,18 @@ live plan. The archive move is committed with Task 1.
 ## Edge Case & Safety Checklist
 
 - **CORS disabled (default):** no middleware, no `Vary: Origin`, no OPTIONS
-  change — existing curl/desktop clients see byte-identical behavior.
+  change — existing curl/desktop clients see byte-identical CORS behavior.
   Deliberate opt-in; Task 4, test 7 (`TestBuildHTTPHandlerCORSDisabled`)
   guards it.
-- **`--stateless` + sessioned-only client:** the client's follow-up
-  `Mcp-Session-Id` headers are ignored by the SDK; each request gets a fresh
-  session. Documented; not an error.
+- **Always stateless (0.5.0 behavior change):** `initialize` no longer
+  returns `Mcp-Session-Id`. Existing clients that store it and send it on
+  later requests keep working — the SDK ignores the header in stateless
+  mode; nothing breaks, the header is simply vestigial. Documented as a
+  0.5.0 change in the README. (GET was already unusable without a session;
+  in stateless mode it is a clean 405.)
+- **Stateless + missing `Mcp-Protocol-Version` header:** Builder verifies
+  the SDK v1.6.1 default (expected: latest supported version) and records it
+  in the README; spec-conforming clients send the header per request.
 - **Preflight without `Origin`:** treated as non-browser, passed to `next`
   (SDK answers 400/405-ish) — mirrors curl behavior; no header injection.
 - **`Origin: null`** (sandboxed iframes, `file://` pages): matched like any
@@ -430,7 +456,25 @@ live plan. The archive move is committed with Task 1.
      never via the exact list; do not special-case).
   No issue link applies (no GitHub issue for this feature); the prior
   plan's "Resolves:" line has no analog — accepted as-is.
-- **Round 2:** N/A
+- **Round 2:** **APPROVED (revised per user decision)**
+
+  User decision 2026-09-24: **drop the `--stateless` flag and hardcode
+  `Stateless: true`** in `buildHTTPHandler` (the app keeps no per-session
+  state — the registry is process-global — so protocol sessions are
+  vestigial; making it the only mode is a deliberate 0.5.0 behavior change,
+  documented). `--disable-localhost-protection` stays as designed (opt-out;
+  the DNS-rebinding protection remains the one real security boundary for a
+  script-executing local server and must not be off by default). Plan text
+  updated consistently: Objective, Requirements (config table, always-
+  stateless decision with `Mcp-Session-Id` and `Mcp-Protocol-Version`
+  consequences + Builder verification item), middleware rule 4 (constant
+  `POST, OPTIONS`), Tasks 1–6 (struct, sketch, flags, usage string, test 2
+  and 6, README bullets, commit 3 subject), and the Edge Case checklist
+  (always-stateless bullet + protocol-version bullet; the `--stateless`
+  bullet replaced). The always-stateless choice is defensible: it loses no
+  app functionality, matches the spec's stateless-server expectations, and
+  simplifies the CORS surface; the client-visible delta (no session ID
+  issued) is called out for the README. No further correction required.
 - **Round 3:** N/A
 
 ## Final Status (Code Review)
