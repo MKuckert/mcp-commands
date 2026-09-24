@@ -1214,21 +1214,7 @@ func newTestMCPServer(t *testing.T) *mcp.Server {
 // the response status code. An empty auth value omits the Authorization header.
 func postInitializeStatus(t *testing.T, url, auth string) int {
 	t.Helper()
-	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
-	req, err := http.NewRequest(http.MethodPost, url+"/", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("failed to build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST failed: %v", err)
-	}
+	resp := doInitialize(t, url, auth, "")
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode
@@ -1282,6 +1268,325 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	status := postInitializeStatus(t, httpServer.URL, "Bearer s3cret")
 	if status == http.StatusUnauthorized {
 		t.Errorf("authenticated request: status = %d, want non-401", status)
+	}
+}
+
+func TestResolveCORS(t *testing.T) {
+	tests := []struct {
+		name           string
+		flag           string
+		originsEnv     string
+		allowAllEnv    string
+		allowAllFlag   bool
+		disableLocalhp bool
+		wantOrigins    []string
+		wantAllowAll   bool
+		wantDisableLHP bool
+		wantErr        bool
+	}{
+		{name: "flag_only", flag: "https://a.example", wantOrigins: []string{"https://a.example"}},
+		{name: "env_only", originsEnv: "https://a.example, https://b.example",
+			wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "both_set_flag_wins", flag: "https://flag.example", originsEnv: "https://env.example",
+			wantOrigins: []string{"https://flag.example"}},
+		{name: "neither_set", wantOrigins: []string{}},
+		{name: "comma_space_parsing", flag: "https://a.example, https://b.example",
+			wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "port_accepted", flag: "https://x.example:8443", wantOrigins: []string{"https://x.example:8443"}},
+		{name: "allow_all_flag", allowAllFlag: true, wantOrigins: []string{}, wantAllowAll: true},
+		{name: "allow_all_env_true", allowAllEnv: "TRUE", wantOrigins: []string{}, wantAllowAll: true},
+		{name: "allow_all_env_yes", allowAllEnv: "yes", wantOrigins: []string{}, wantAllowAll: true},
+		// "0" is not in the recognized set (1/true/yes) → fail loud, per spec.
+		{name: "allow_all_env_zero_rejected", allowAllEnv: "0", wantErr: true},
+		{name: "flag_wins_over_env_allow_all", allowAllFlag: true, allowAllEnv: "0", wantOrigins: []string{}, wantAllowAll: true},
+		{name: "disable_localhost_protection", flag: "https://a.example", disableLocalhp: true,
+			wantOrigins: []string{"https://a.example"}, wantDisableLHP: true},
+		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true, wantErr: true},
+		{name: "env_origins_and_env_allow_all", originsEnv: "https://a.example", allowAllEnv: "1", wantErr: true},
+		{name: "malformed_not_a_url", flag: "notaurl", wantErr: true},
+		{name: "malformed_missing_host", flag: "https://", wantErr: true},
+		{name: "malformed_scheme", flag: "ftp://x.example", wantErr: true},
+		{name: "malformed_userinfo", flag: "https://user@x.example", wantErr: true},
+		{name: "malformed_path", flag: "https://x.example/path", wantErr: true},
+		{name: "malformed_env_origin", originsEnv: "https://a.example, not-a-url", wantErr: true},
+		{name: "allow_all_env_banana", allowAllEnv: "banana", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(allowedOriginsEnvVar, tt.originsEnv)
+			t.Setenv(allowAllOriginsEnvVar, tt.allowAllEnv)
+
+			got, err := resolveCORS(tt.flag, tt.allowAllFlag, tt.disableLocalhp)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (%+v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got.origins) != len(tt.wantOrigins) {
+				t.Fatalf("origins = %v, want %v", got.origins, tt.wantOrigins)
+			}
+			for i, want := range tt.wantOrigins {
+				if got.origins[i] != want {
+					t.Errorf("origin[%d] = %q, want %q", i, got.origins[i], want)
+				}
+			}
+			if got.allowAll != tt.wantAllowAll {
+				t.Errorf("allowAll = %v, want %v", got.allowAll, tt.wantAllowAll)
+			}
+			if got.disableLocalhostProtection != tt.wantDisableLHP {
+				t.Errorf("disableLocalhostProtection = %v, want %v", got.disableLocalhostProtection, tt.wantDisableLHP)
+			}
+			if !tt.wantAllowAll && len(tt.wantOrigins) == 0 && !got.disabled() {
+				t.Errorf("disabled() = false, want true for empty config")
+			}
+		})
+	}
+}
+
+func TestCORSHandlerPreflight(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestHdr string // Access-Control-Request-Headers; "-" means omit
+		wantACRHdr string
+	}{
+		{name: "echoes_requested_headers", requestHdr: "content-type, authorization", wantACRHdr: "content-type, authorization"},
+		{name: "omits_when_not_requested", requestHdr: "-", wantACRHdr: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := corsConfig{origins: []string{"https://app.example.com"}}
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusTeapot)
+			})
+
+			req := httptest.NewRequest(http.MethodOptions, "/", nil)
+			req.Header.Set("Origin", "https://app.example.com")
+			if tt.requestHdr != "-" {
+				req.Header.Set("Access-Control-Request-Headers", tt.requestHdr)
+			}
+			rec := httptest.NewRecorder()
+
+			newCORSHandler(next, cfg).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("status = %d, want 204", rec.Code)
+			}
+			if reached {
+				t.Error("preflight was forwarded to next")
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("body = %q, want empty", rec.Body.String())
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "POST, OPTIONS" {
+				t.Errorf("Access-Control-Allow-Methods = %q, want %q", got, "POST, OPTIONS")
+			}
+			if got := rec.Header().Get("Access-Control-Max-Age"); got != "900" {
+				t.Errorf("Access-Control-Max-Age = %q, want 900", got)
+			}
+			if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+				t.Errorf("Vary = %q, want to include Origin", rec.Header().Get("Vary"))
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Headers"); got != tt.wantACRHdr {
+				t.Errorf("Access-Control-Allow-Headers = %q, want %q", got, tt.wantACRHdr)
+			}
+		})
+	}
+}
+
+func TestCORSHandlerNonPreflight(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         corsConfig
+		origin      string // "-" means omit the header
+		wantAllowed bool   // CORS headers present?
+		wantReached bool
+	}{
+		{name: "no_origin_passthrough", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "-",
+			wantAllowed: false, wantReached: true},
+		{name: "disallowed_origin_passthrough", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "https://evil.example",
+			wantAllowed: false, wantReached: true},
+		{name: "allowed_origin", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "https://app.example.com",
+			wantAllowed: true, wantReached: true},
+		{name: "allow_all", cfg: corsConfig{allowAll: true}, origin: "https://any.example",
+			wantAllowed: true, wantReached: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tt.origin != "-" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+
+			newCORSHandler(next, tt.cfg).ServeHTTP(rec, req)
+
+			if reached != tt.wantReached {
+				t.Fatalf("downstream reached = %v, want %v", reached, tt.wantReached)
+			}
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200 (unchanged)", rec.Code)
+			}
+			acAO := rec.Header().Get("Access-Control-Allow-Origin")
+			if tt.wantAllowed {
+				if acAO != tt.origin {
+					t.Errorf("Access-Control-Allow-Origin = %q, want %q", acAO, tt.origin)
+				}
+				if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+					t.Errorf("Vary = %q, want to include Origin", rec.Header().Get("Vary"))
+				}
+				if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id, Last-Event-ID" {
+					t.Errorf("Access-Control-Expose-Headers = %q, want %q", got, "Mcp-Session-Id, Last-Event-ID")
+				}
+			} else if acAO != "" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want absent", acAO)
+			}
+		})
+	}
+}
+
+func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, httpServer.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Origin", "https://app.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204 (not 401)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+}
+
+func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer wrong")
+	req.Header.Set("Origin", "https://app.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("401 Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+	if got := resp.Header.Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id, Last-Event-ID" {
+		t.Errorf("401 Access-Control-Expose-Headers = %q, want %q", got, "Mcp-Session-Id, Last-Event-ID")
+	}
+}
+
+func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	resp := doInitialize(t, httpServer.URL, "Bearer s3cret", "https://app.example.com")
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("authenticated request: status = %d, want non-401", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	// Always stateless: a stored/re-sent session ID must keep working
+	// (the SDK ignores it) — even if it is a made-up value.
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Origin", "https://app.example.com")
+	if sessionID == "" {
+		sessionID = "some-stale-id"
+	}
+	req.Header.Set("Mcp-Session-Id", sessionID)
+
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tools/list failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusNotFound {
+		t.Errorf("request with session ID %q: status = %d, want served (stateless ignores session IDs)", sessionID, resp2.StatusCode)
+	}
+	if got := resp2.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+}
+
+func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	resp := doInitialize(t, httpServer.URL, "", "")
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("unauthenticated server: status = %d, want non-401", resp.StatusCode)
+	}
+	headers := resp.Header
+	if got := headers.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want absent (CORS disabled)", got)
+	}
+	if got := headers.Get("Access-Control-Expose-Headers"); got != "" {
+		t.Errorf("Access-Control-Expose-Headers = %q, want absent (CORS disabled)", got)
+	}
+	if got := headers.Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want absent (CORS disabled)", got)
 	}
 }
 

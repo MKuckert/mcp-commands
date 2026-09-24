@@ -48,8 +48,10 @@ path is fetch-based (e.g. the official MCP TS SDK).
   the app keeps no per-session state, so the SDK's session ID is issued,
   validated, and then ignored by us — pure overhead. Consequences, all
   documented in the README as 0.5.0 changes:
-  - `initialize` responses no longer contain `Mcp-Session-Id`; clients that
-    store and resend it keep working (the SDK ignores it in stateless mode).
+  - `Mcp-Session-Id` is vestigial. **Verified (Builder, 2026-09-24):**
+    go-sdk v1.6.1 still *issues* the header in `initialize` responses even in
+    stateless mode (streamable.go sets it unconditionally), but ignores it on
+    all later requests — clients that store and resend it keep working.
   - Per spec `2025-11-25`, stateless servers should receive
     `Mcp-Protocol-Version` per request. **Builder: verify what go-sdk v1.6.1
     does when the header is absent in stateless mode** (expected: defaults to
@@ -267,10 +269,12 @@ live plan. The archive move is committed with Task 1.
     - stdio mode: byte-identical behavior, flags ignored (like api-key).
     - `Stateless: true` and `DisableLocalhostProtection` take effect only
       via `StreamableHTTPOptions`; no other code paths touched.
-    - An `initialize` round-trip returns no `Mcp-Session-Id` (stateless).
-    - Builder: verify the SDK v1.6.1 behavior for a stateless request
-      lacking `Mcp-Protocol-Version` (expected: defaults to latest supported
-      version; record in README per Requirements).
+    - A re-sent `Mcp-Session-Id` (issued or made-up) keeps being served
+      (stateless ignores it) — no 401/404.
+    - **Verified (Builder):** a stateless request lacking
+      `Mcp-Protocol-Version` defaults to `2025-03-26` (the oldest supported
+      version, streamable.go:391–393), not the latest; it never 400s on a
+      missing header. Recorded in README per Requirements.
 
 - [ ] **Task 4: Tests**
   - **Description:** Add to `main_test.go` (table-driven where noted, matching
@@ -298,8 +302,11 @@ live plan. The archive move is committed with Task 1.
        `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`.
     6. `TestBuildHTTPHandlerInitializeCORS` — full `initialize` round-trip
        (mirror `TestBuildHTTPHandlerEndToEnd`) with an allowed `Origin` →
-       non-401, CORS headers present, and **no** `Mcp-Session-Id` in the
-       response (always-stateless guarantee).
+       non-401, CORS headers present; then a follow-up request re-sending the
+       session ID (or a made-up one) is still served — the always-stateless
+       guarantee (verified: v1.6.1 *does* issue a vestigial
+       `Mcp-Session-Id` header, so the test asserts it is *ignored*, not
+       absent).
     7. `TestBuildHTTPHandlerCORSDisabled` — zero `corsConfig`, request
        without Origin → no CORS headers at all (regression guard for the
        default-off promise).
@@ -318,10 +325,12 @@ live plan. The archive move is committed with Task 1.
       recommendation); `--allow-all-origins` is a dev convenience — safe
       only with `--api-key` + TLS, because the server executes local scripts
       CORS gates only response *readability*, not reachability;
-      **0.5.0 behavior change — the transport is always stateless:** no
-      `Mcp-Session-Id` is issued on `initialize` and each request stands on
-      its own; clients that stored and send a session ID keep working (the
-      SDK ignores it); this is also why raw `EventSource` remains unusable
+      **0.5.0 behavior change — the transport is always stateless:** each
+      request stands on its own; go-sdk v1.6.1 still issues a vestigial
+      `Mcp-Session-Id` header on `initialize` but ignores it on later
+      requests, so clients that stored and send a session ID keep working;
+      the SDK defaults a missing `Mcp-Protocol-Version` header to 2025-03-26
+      (oldest supported); this is also why raw `EventSource` remains unusable
       in any mode — use a fetch-based client such as the MCP TS SDK; stateless
       clients per spec send `Mcp-Protocol-Version` per request, and fetch
       clients must send `Accept: application/json, text/event-stream` on POST
@@ -366,15 +375,17 @@ live plan. The archive move is committed with Task 1.
   change — existing curl/desktop clients see byte-identical CORS behavior.
   Deliberate opt-in; Task 4, test 7 (`TestBuildHTTPHandlerCORSDisabled`)
   guards it.
-- **Always stateless (0.5.0 behavior change):** `initialize` no longer
-  returns `Mcp-Session-Id`. Existing clients that store it and send it on
-  later requests keep working — the SDK ignores the header in stateless
-  mode; nothing breaks, the header is simply vestigial. Documented as a
-  0.5.0 change in the README. (GET was already unusable without a session;
-  in stateless mode it is a clean 405.)
-- **Stateless + missing `Mcp-Protocol-Version` header:** Builder verifies
-  the SDK v1.6.1 default (expected: latest supported version) and records it
-  in the README; spec-conforming clients send the header per request.
+- **Always stateless (0.5.0 behavior change, verified):** the SDK v1.6.1
+  still issues a `Mcp-Session-Id` header on `initialize` even in stateless
+  mode, but ignores it on all later requests. Existing clients that store
+  it and send it on later requests keep working — nothing breaks, the
+  header is simply vestigial. Documented as a 0.5.0 change in the README.
+  (GET was already unusable without a session; in stateless mode it is a
+  clean 405.)
+- **Stateless + missing `Mcp-Protocol-Version` header (verified):** the SDK
+  v1.6.1 defaults to `2025-03-26` (the oldest supported version) and never
+  400s on a missing header; recorded in the README. Spec-conforming clients
+  send the header per request.
 - **Preflight without `Origin`:** treated as non-browser, passed to `next`
   (SDK answers 400/405-ish) — mirrors curl behavior; no header injection.
 - **`Origin: null`** (sandboxed iframes, `file://` pages): matched like any
