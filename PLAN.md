@@ -1,51 +1,102 @@
-# Plan: API Token Authentication for the HTTP Transport (Issue #3)
+# Plan: Optional CORS Support for the HTTP Transport (Browser Clients)
 
 ## Objective
 
-Protect the HTTP transport with an **optional** static API token. If the
-operator supplies a token — via a new `--api-key` flag or the
-`MCP_COMMANDS_API_KEY` environment variable (predefined key) — every request
-to the HTTP server must carry it in an `Authorization: Bearer <token>`
-header; anything else is rejected with `401 Unauthorized`. If no token is
-supplied, the server starts unauthenticated, exactly as it does today. The
-stdio transport is untouched — it is local and has no network surface.
+Let browser-based MCP clients (web chat UIs, in-browser agents) talk to the
+streamable HTTP transport, which the Go SDK's `NewStreamableHTTPHandler` does
+not CORS-enable on its own. Support is **opt-in**: new flags
+`--allowed-origins` / `--allow-all-origins` configure a CORS middleware that
+wraps the handler, plus `--stateless` and `--disable-localhost-protection`
+SDK options that browser setups frequently need. With none of the flags set,
+behavior is byte-identical to today (zero CORS headers, no OPTIONS handling
+change) — existing non-browser clients are unaffected. The stdio transport is
+untouched.
 
-Resolves: https://github.com/mkuckert/mcp-commands/issues/3
+Research: `/workspace/research/mcp-commands-cors.md` (verified against
+`modelcontextprotocol/go-sdk v1.6.1` — the exact version in `go.mod`).
+Key findings relied on: the SDK has no CORS/OPTIONS handling (its only origin
+machinery is the deopted `CrossOriginProtection` and the default-on DNS-rebinding
+localhost protection); JSON POSTs are non-simple, so browsers always preflight;
+`Mcp-Session-Id` is unreadable in JS without `Access-Control-Expose-Headers`;
+raw `EventSource` cannot work in *either* SDK mode, so the supported browser
+path is fetch-based (e.g. the official MCP TS SDK).
 
 ---
 
 ## Requirements & Decisions
 
-- **Frameworks:** Go standard library only (`net/http`, `crypto/subtle`,
-  `strings`). No new dependencies.
-- **Token sources (in precedence order):**
-  1. `--api-key <token>` CLI flag
-  2. `MCP_COMMANDS_API_KEY` environment variable
-- **Scope:** Applies **only** in HTTP mode (`--port > 0`). Stdio mode ignores
-  the token entirely (no warning, no behavior change).
-- **Optional feature:** HTTP mode with **no** token from either source starts
-  the server **without authentication** — identical behavior to today. No
-  error, no warning, no auto-generated token (the issue allows "either
-  predefined or generated"; we implement the predefined path per scope).
-- **Auth check (only when a token is configured):** Middleware wrapping the
-  SDK's `*mcp.StreamableHTTPHandler` (which implements `http.Handler`, so no
-  SDK changes are needed):
-  - Header must be exactly `Bearer <token>`: scheme compared
-    case-insensitively per RFC 7235, separated by a single space, non-empty
-    token. Anything else (missing header, `Basic`, extra spaces, empty token)
-    → reject.
-  - Token compared with `crypto/subtle.ConstantTimeCompare` (timing-attack
-    safe). Length mismatch is also a constant-time failure path.
-  - Rejection response: `401 Unauthorized` with body
-    `unauthorized` and header `WWW-Authenticate: Bearer` (RFC 6750).
-  - Enforced for **all** HTTP methods (GET, POST, DELETE, others) — the
-    middleware runs before the SDK handler's own method dispatch.
-- **Logging:** When a token is configured, log
-  `Starting HTTP server on <addr> (API key auth enabled)`; otherwise keep the
-  existing `Starting HTTP server on <addr>` line. The token value is **never**
-  logged, in any log line or error.
-- **Usage string:** `main()` usage/help output gains `[--api-key <token>]`.
-- **Version:** `serverVersion` bumps `0.3.0` → `0.4.0` (new feature release).
+- **Frameworks:** Go standard library only (`net/http`, `strings`, `os`,
+  `net/url`). No new dependencies — the app stays single-file with one direct
+  dep beyond the SDK. (Third-party middleware like `rs/cors` explicitly
+  rejected: ~50 lines of stdlib suffice.)
+- **Configuration surface** (flag wins over env, like `--api-key`):
+
+  | Flag | Env | Type | Meaning |
+  |---|---|---|---|
+  | `--allowed-origins` | `MCP_COMMANDS_ALLOWED_ORIGINS` | comma-separated string | Exact origin allowlist (`https://app.example.com`) |
+  | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | bool (`1`/`true`/`yes`, case-insensitive) | Echo any `Origin` (dev convenience) |
+  | `--stateless` | *(none, deliberate)* | bool | `StreamableHTTPOptions{Stateless: true}` — no session validation, for non-session browser fetch clients / server-side webhooks. **Not** an `EventSource` fix. |
+  | `--disable-localhost-protection` | *(none, deliberate)* | bool | `StreamableHTTPOptions{DisableLocalhostProtection: true}` — disables the SDK's default DNS-rebinding 403 on loopback servers; needed when a page on a tunnel/LAN hostname talks to a `127.0.0.1` server. |
+
+  The two mode flags deliberately have **no** env fallback (a mode choice,
+  not a secret) — the departure from the api-key pattern is documented in the
+  README.
+- **Origin matching:** exact, case-sensitive string match. No wildcard /
+  pattern matching in v1 (YAGNI). Origins are validated at startup and
+  garbage fails fast (`net/url` parse + require non-empty scheme, `http` or
+  `https` scheme, non-empty host, no userinfo/query/fragment) — consistent
+  with the existing fail-fast flag handling. Validation runs in **all**
+  modes (a bad flag is an error even in stdio mode); only *application* of
+  CORS is HTTP-mode-only, exactly like `--api-key`.
+- **`--allowed-origins` + `--allow-all-origins` together:** startup error
+  (contradictory configuration) — fail loud, never silently pick one.
+- **CORS disabled** = neither origins nor allow-all set → no middleware
+  attached, no `Vary: Origin`, no OPTIONS change. Default: off.
+- **Middleware behavior** (`newCORSHandler`):
+  1. No `Origin` header → non-browser caller; pass through untouched, add
+     nothing.
+  2. `Origin` not allowed (not in list, and not allow-all) → pass through
+     **without** CORS headers; no status change (auth/MCP answer for itself).
+  3. `Origin` allowed → set *before* `next.ServeHTTP` so the headers ride
+     along on every downstream response, including 401s, SDK JSON, and SSE
+     streams: `Access-Control-Allow-Origin: <echoed origin>` (never `*` —
+     echo + `Vary: Origin` keeps shared caches and the credentials gotcha
+     safe) and `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`
+     (clients must read the session ID; exposing `Last-Event-ID` is harmless
+     until an `EventStore` exists).
+  4. Preflight `OPTIONS` (allowed origin) → add
+     `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS` (sessioned)
+     / `POST, OPTIONS` (stateless — the SDK 405s GETs in stateless mode),
+     `Access-Control-Allow-Headers: <echo of Access-Control-Request-Headers>`
+     (echo beats hardcoding: the MCP header set evolves; still fully
+     controlled because only allowed origins see it — set only when the
+     request carried a non-empty value), `Access-Control-Max-Age: 900`;
+     respond **204** and never call `next`.
+  5. No `Access-Control-Allow-Credentials` — there is no cookie auth (token
+     is a header).
+- **Middleware ordering (critical):** CORS is **outermost**:
+  `http.Server → CORS → bearer auth (if token) → mcp.NewStreamableHTTPHandler`.
+  - Browsers never send `Authorization` on preflight → preflight must not be
+    authenticated; outermost placement guarantees the 204.
+  - Headers set before `next.ServeHTTP` guarantee 401s from the auth wrapper
+    carry CORS (else the browser masks the 401 as a CORS error — the most
+    confusing failure mode).
+- **Stdlib `http.NewCrossOriginProtection()` is deliberately not added**
+  (Go 1.24+ is available in `go 1.25.0`): it would 403 the legitimate
+  external-page → loopback-server setup and conflicts with the allowlist;
+  the SDK's own DNS-rebinding/localhost protection (on by default) already
+  covers the public-host threat and its 403s inherit CORS headers from the
+  outer middleware.
+- **Security posture (documented in README):** this server executes local
+  scripts, so CORS is not a security boundary (it gates only which page's JS
+  *reads* responses). Default off; `--allow-all-origins` is safe only with
+  `--api-key` + TLS; explicit origin list is the production recommendation.
+- **Logging:** the startup line composes its parenthetical from enabled
+  features: `Starting HTTP server on <addr> (API key auth enabled, CORS:
+  3 origin(s))`, `(..., CORS: any origin — dev mode)`; parens omitted when
+  neither is enabled (today's line).
+- **Usage string** in `main()` gains the four flags.
+- **Version:** `serverVersion` bumps `0.4.0` → `0.5.0` (new feature release).
 
 ---
 
@@ -53,179 +104,285 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [x] **Task 1: Token resolution (`resolveAPIKey`)**
+Housekeeping (already done by the Planner): the completed api-token-auth
+plan was archived to `plans/2026-09-03-api-token-auth.md`; this file is the
+live plan. The archive move is committed with Task 1.
+
+- [ ] **Task 1: CORS configuration (`corsConfig` + `resolveCORS`)**
   - **Description:** Add to `main.go`:
     ```go
-    const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
+    const (
+        allowedOriginsEnvVar = "MCP_COMMANDS_ALLOWED_ORIGINS"
+        allowAllOriginsEnvVar = "MCP_COMMANDS_ALLOW_ALL_ORIGINS"
+    )
 
-    // resolveAPIKey returns the token from the flag value if non-empty,
-    // otherwise from MCP_COMMANDS_API_KEY. Returns "" if neither is set.
-    func resolveAPIKey(flagValue string) string {
-        if flagValue != "" {
-            return flagValue
-        }
-        return os.Getenv(apiKeyEnvVar)
+    type corsConfig struct {
+        origins                  []string // exact origin allowlist
+        allowAll                 bool     // echo any Origin (dev)
+        stateless                bool     // StreamableHTTPOptions.Stateless
+        disableLocalhostProtection bool   // StreamableHTTPOptions.DisableLocalhostProtection
     }
-    ```
-  - **Review Criteria:**
-    - Flag non-empty → flag wins, env var ignored (even if set).
-    - Flag empty, env set → env value returned.
-    - Neither set → `""`.
 
-- [x] **Task 2: Bearer-auth middleware (`newBearerAuthHandler`)**
+    // disabled reports whether no CORS behavior is requested.
+    func (c corsConfig) disabled() bool { return len(c.origins) == 0 && !c.allowAll }
+
+    // originSet returns the allowlist as a set for O(1) lookup.
+    func (c corsConfig) originSet() map[string]bool { ... }
+
+    // allowedMethods is the Access-Control-Allow-Methods value for preflight.
+    func (c corsConfig) allowedMethods() string {
+        if c.stateless {
+            return "POST, OPTIONS" // SDK 405s GETs in stateless mode
+        }
+        return "GET, POST, DELETE, OPTIONS"
+    }
+
+    // summary is the startup-log fragment for enabled CORS.
+    func (c corsConfig) summary() string {
+        if c.allowAll { return "CORS: any origin — dev mode" }
+        return fmt.Sprintf("CORS: %d origin(s)", len(c.origins))
+    }
+
+    // resolveCORS resolves flags (win) over env and validates origins.
+    // Returns an error for malformed origins or a contradictory
+    // --allowed-origins + --allow-all-origins combination.
+    func resolveCORS(allowedOriginsFlag string, allowAllFlag bool, stateless, disableLocalhostProtection bool) (corsConfig, error) { ... }
+    ```
+    - Origins: split on comma, `strings.TrimSpace` each, drop empties.
+    - Bool env: `parseBoolEnv` helper — `""` → false; `1`/`true`/`yes`
+      (case-insensitive) → true; anything else → error (fail loud, no
+      silent misparse).
+    - Origin validation: `url.Parse`, reject parse errors, require scheme
+      `http`/`https`, non-empty `u.Host`, no `u.User`/`u.RawQuery`/`u.Fragment`.
+  - **Review Criteria:**
+    - Flag non-empty → flag wins, env ignored; env only → env used; neither
+      → empty.
+    - `"https://a.example, https://b.example"` (spaces) → two clean origins.
+    - `--allowed-origins x --allow-all-origins` → error.
+    - `notaurl`, `https://`, `ftp://x.example`, `https://user@x.example`,
+      `https://x.example/path` → startup errors; `https://x.example:8443`
+      → accepted.
+    - Bool env `"TRUE"`, `"0"`, `"yes"` handled; `"banana"` → error.
+
+- [ ] **Task 2: CORS middleware (`newCORSHandler`)**
   - **Description:** Add to `main.go`:
     ```go
-    // newBearerAuthHandler wraps next, requiring an
-    // "Authorization: Bearer <token>" header that matches token.
-    // Mismatches get 401 with a WWW-Authenticate: Bearer header.
-    func newBearerAuthHandler(next http.Handler, token string) http.Handler {
+    const corsAllowMaxAge = "900" // 15 min; browsers cap at 7200s
+
+    var corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
+
+    // newCORSHandler allows cross-origin browser requests from allowed
+    // origins. Requests without an Origin header, and origins not on the
+    // allowlist (and not covered by allowAll), pass through with no CORS
+    // headers — the browser then blocks the response itself.
+    func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
+        allowed := cfg.originSet()
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            scheme, got, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-            if !ok || !strings.EqualFold(scheme, "Bearer") || got == "" {
-                reject(w)
+            origin := r.Header.Get("Origin")
+            if origin == "" || (!cfg.allowAll && !allowed[origin]) {
+                next.ServeHTTP(w, r)
                 return
             }
-            if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-                reject(w)
-                return
+            h := w.Header()
+            h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
+            h.Add("Vary", "Origin")
+            h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
+            if r.Method == http.MethodOptions { // preflight
+                h.Set("Access-Control-Allow-Methods", cfg.allowedMethods())
+                if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
+                    h.Set("Access-Control-Allow-Headers", achr)
+                }
+                h.Set("Access-Control-Max-Age", corsAllowMaxAge)
+                w.WriteHeader(http.StatusNoContent)
+                return // never call next for preflight
             }
             next.ServeHTTP(w, r)
         })
     }
-
-    // reject writes a 401 with the WWW-Authenticate header per RFC 6750.
-    func reject(w http.ResponseWriter) {
-        w.Header().Set("WWW-Authenticate", "Bearer")
-        w.WriteHeader(http.StatusUnauthorized)
-        _, _ = w.Write([]byte("unauthorized"))
-    }
     ```
-    `strings.Cut` splits on the **first** single space: no space (or header
-    shorter than scheme) → `ok == false` → 401; multiple spaces leave them in
-    `got`, which then fails the token comparison.
   - **Review Criteria:**
-    - No header → 401. Header without space / empty token (`"Bearer"`,
-      `"Bearer "`) → 401. Wrong scheme (`"Basic xyz"`) → 401.
-    - `"bearer <token>"` (lowercase scheme) → 200 (RFC 7235 case-insensitivity).
-    - Wrong token → 401; correct token → request reaches `next`.
-    - `WWW-Authenticate: Bearer` present on every 401.
-    - Comparison uses `subtle.ConstantTimeCompare`.
+    - No `Origin` → zero header changes, request forwarded.
+    - Disallowed `Origin` → no CORS headers, forwarded (status unchanged).
+    - Allowed `Origin` → ACAO echoes it, `Vary` includes `Origin`, expose
+      headers set, on every downstream response including 401s.
+    - Preflight → 204, methods list mode-dependent, echoed request headers,
+      max-age 900, empty body, `next` not invoked.
 
-- [x] **Task 3: Wire into `run()` / `main()`**
+- [ ] **Task 3: Wire into `main()` / `run()` / `buildHTTPHandler`**
   - **Description:**
-    - `main()`: add `apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")`;
-      update the usage string; pass `*apiKeyFlag` into `run(...)` (new last
-      parameter).
-    - `run(ctx, dir, scriptsDir, watch, host string, port int, apiKey string)`:
-      resolve via `resolveAPIKey(apiKey)` **before** any server setup.
-      The key is optional: `port > 0` with an empty key starts the server
-      unauthenticated (today's behavior).
-    - Extract handler construction so it is testable:
+    - `buildHTTPHandler(server *mcp.Server, token string, cors corsConfig)` —
+      new `cors` parameter (breaks the two existing test call sites; updated
+      in Task 4):
       ```go
-      // buildHTTPHandler returns the streamable MCP handler. When token is
-      // non-empty it is wrapped in bearer-token auth middleware; otherwise
-      // the handler serves requests unauthenticated.
-      func buildHTTPHandler(server *mcp.Server, token string) http.Handler {
-          inner := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+      func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
+          h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
               return server
-          }, nil)
-          if token == "" {
-              return inner
+          }, &mcp.StreamableHTTPOptions{
+              Stateless:                  cors.stateless,
+              DisableLocalhostProtection: cors.disableLocalhostProtection,
+          })
+          if token != "" {
+              h = newBearerAuthHandler(h, token)
           }
-          return newBearerAuthHandler(inner, token)
+          if !cors.disabled() {
+              h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
+          }
+          return h
       }
       ```
-      `run()` uses `buildHTTPHandler(server, apiKey)` as the `http.Server`
-      handler. Startup log becomes
-      `Starting HTTP server on <addr> (API key auth enabled)` **only** when a
-      token is configured; the existing log line is kept otherwise.
+      (Builder: confirm the two `StreamableHTTPOptions` field names exist in
+      go-sdk v1.6.1 — the research verified them; compile is the final proof.)
+    - `main()`: add the four flags; update the usage string; call
+      `resolveCORS(...)` and exit on error via the existing
+      `fmt.Fprintf(os.Stderr, "Error: %v\n")` + `os.Exit(1)` pattern
+      (matching the `--dir`/`--scripts` validation); pass the resolved
+      `corsConfig` into `run` (validation therefore runs in all modes,
+      before `run`).
+    - `run(ctx, dir, scriptsDir string, watch bool, host string, port int,
+      apiKey string, cors corsConfig)`: consumes the passed `corsConfig`
+      (already resolved/validated in `main`) — no re-resolution here;
+      `buildHTTPHandler(server, apiKey, cors)` in the HTTP branch; startup
+      log composes its parenthetical from `apiKey != ""` and
+      `!cors.disabled()` (see Requirements).
   - **Review Criteria:**
-    - `--port` without any key → server starts, requests are served
-      unauthenticated (no behavior change).
-    - `--port` + key → server starts; unauthenticated request gets 401;
-      authenticated request is served.
-    - stdio mode: identical behavior to before with or without a key set.
-    - Token never appears in any log output.
+    - No flags → server starts, zero CORS behavior, log line identical to
+      today.
+    - `--port` + `--allowed-origins` → log mentions origin count;
+      `--allow-all-origins` → "any origin — dev mode".
+    - stdio mode: byte-identical behavior, flags ignored (like api-key).
+    - `--stateless` / `--disable-localhost-protection` take effect only via
+      `StreamableHTTPOptions`; no other code paths touched.
 
-- [x] **Task 4: Tests**
-  - **Description:** Add to `main_test.go` (table-driven, matching existing style):
-    1. `TestResolveAPIKey` — table: flag-only, env-only (set/clear
-       `t.Setenv(apiKeyEnvVar, ...)`), both (flag wins), neither.
-    2. `TestBearerAuthMiddleware` — table over header values: `""`, `"Bearer"`,
-       `"Bearer "`, `"Basic abc"`, `"bearer <token>"` (accepted),
-       `"Bearer <wrong>"`, `"Bearer <token>"`; assert status code and that an
-       `httptest.ResponseRecorder`-captured `WWW-Authenticate` header is
-       `Bearer` on 401; a downstream recorder handler proves pass-through.
-    3. `TestBuildHTTPHandlerAuthDisabled` — serve
-       `buildHTTPHandler(server, "")` via `httptest.NewServer`; assert a POST
-       `/` initialize request **without** any Authorization header is served
-       (non-401), i.e. an empty token leaves the handler unauthenticated.
-    4. `TestBuildHTTPHandlerEndToEnd` — build a real `mcp.Server` with one
-       trivial tool (reuse the registry or `AddTool` directly), serve it via
-       `httptest.NewServer(buildHTTPHandler(server, "s3cret"))`; assert:
-       POST `/` initialize request without header → 401; with
-       `Authorization: Bearer s3cret` → non-401 (200/202).
+- [ ] **Task 4: Tests**
+  - **Description:** Add to `main_test.go` (table-driven where noted, matching
+    existing style; the two existing `buildHTTPHandler(server, ...)` call
+    sites at the end of the file gain a zero `corsConfig` argument):
+    1. `TestResolveCORS` — table: flag-only, env-only, both (flag wins),
+       neither; origins comma+space parsing; allow-all env
+       (set/clear `t.Setenv(allowAllOriginsEnvVar, ...)`); contradictory
+       flags → error; malformed origins → error; bool env `"banana"` →
+       error.
+    2. `TestCORSHandlerPreflight` — table: sessioned vs stateless method
+       lists; asserts 204, ACAO echo, `Vary: Origin`,
+       `Access-Control-Allow-Headers` echo (and absent when the request
+       sent none), `Access-Control-Max-Age: 900`, empty body, and a
+       sentinel `next` proves the request was **not** forwarded.
+    3. `TestCORSHandlerNonPreflight` — table: no Origin / disallowed Origin /
+       allowed Origin / allowAll mode → assert header presence/absence and
+       pass-through to a recorder `next` on a normal (non-204) response.
+    4. `TestBuildHTTPHandlerPreflightUnauthenticated` — serve
+       `buildHTTPHandler(server, "s3cret", cors)` via `httptest.NewServer`;
+       `OPTIONS` with an allowed `Origin` **and no Authorization header** →
+       204 with CORS headers, not 401 (ordering guarantee).
+    5. `TestBuildHTTPHandler401CarriesCORS` — POST with a bad token +
+       allowed `Origin` → 401 **with** `Access-Control-Allow-Origin` and
+       `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`.
+    6. `TestBuildHTTPHandlerInitializeExposesSessionID` — full
+       `initialize` round-trip (mirror `TestBuildHTTPHandlerEndToEnd`) with
+       an allowed `Origin` → non-401, `Mcp-Session-Id` present and listed in
+       `Access-Control-Expose-Headers`.
+    7. `TestBuildHTTPHandlerCORSDisabled` — zero `corsConfig`, request
+       without Origin → no CORS headers at all (regression guard for the
+       default-off promise).
   - **Review Criteria:**
-    - All four tests present, table-driven where noted, no sleeps/polling.
-    - `go test ./...` green; existing tests unmodified and passing.
-    - Note (Plan Reviewer, Round 1): the Task 3 criteria "token never appears
-      in any log output" and "stdio mode identical behavior" have no automated
-      test here — verify them manually during code review.
+    - All seven tests present; `go test ./...` green; no sleeps/polling.
+    - The pre-existing tests are unmodified except the two `buildHTTPHandler`
+      call sites gaining the zero-value `corsConfig` argument.
 
-- [x] **Task 5: Documentation & release**
+- [ ] **Task 5: Documentation & release**
   - **Description:**
-    - `README.md`: extend the **HTTP Server Mode** section: authentication is
-      optional; when enabled via `--api-key` or `MCP_COMMANDS_API_KEY`
-      (flag precedence), all requests need the
-      `Authorization: Bearer <token>` header or get 401; without a token the
-      server is open as before. Include a client-side example (e.g. MCP client
-      config with an `Authorization` header / `curl -H "Authorization: Bearer <token>" ...`).
-      Note that stdio mode needs no token.
-    - `serverVersion` → `"0.4.0"`.
+    - `README.md`: new `#### Browser Clients (CORS)` subsection after
+      `#### Authentication (optional)`, under `### Starting the Server`
+      (mirroring the auth subsection shape: env vars + flag precedence +
+      client example), covering: CORS is off by default and opt-in;
+      `--allowed-origins` (comma-separated, exact match, production
+      recommendation); `--allow-all-origins` is a dev convenience — safe
+      only with `--api-key` + TLS, because the server executes local scripts
+      CORS gates only response *readability*, not reachability;
+      `--stateless` for non-session browser fetch clients / webhooks (not
+      for `EventSource` — raw `EventSource` cannot send the required
+      headers in any mode; use a fetch-based client such as the MCP TS SDK);
+      fetch-based clients must send
+      `Accept: application/json, text/event-stream` on POST (the SDK 400s
+      otherwise; the TS SDK does this automatically);
+      `--disable-localhost-protection` for dev setups where the page is
+      served from a tunnel/LAN hostname and the server binds 127.0.0.1, with
+      the DNS-rebinding trade-off warning; the `--stateless` /
+      `--disable-localhost-protection` flags intentionally have no env
+      fallbacks; `MCPGODEBUG=enableoriginverification=1` (go-sdk v1.6.1)
+      makes the SDK 403 *all* cross-origin requests internally and conflicts
+      with this feature — do not set it to "fix" CORS failures; a short ops
+      note that a TLS-terminating proxy (Caddy/nginx) is required for
+      browser production use and is the alternative way to add CORS.
+    - `serverVersion` → `"0.5.0"` (single location).
   - **Review Criteria:**
-    - README examples are copy-paste runnable and consistent with the flag/env
-      names in code.
-    - Version string updated in exactly one place (`serverVersion` const).
+    - README examples copy-paste runnable; flag/env names match the code
+      exactly.
+    - Version string updated in exactly one place.
 
-- [x] **Task 6: Commits**
+- [ ] **Task 6: Commits**
   - **Description:** Conventional commits, one per task unit; `PLAN.md` is
-    included in each related commit (per AGENTS.md Committer convention):
-    1. `feat: resolve API key from --api-key flag or MCP_COMMANDS_API_KEY`
-    2. `feat: optional Authorization Bearer auth for HTTP transport`
-    3. `test: cover bearer auth middleware and API key resolution`
-    4. `docs: document API token auth; bump version to 0.4.0`
-  - **Review Criteria:** `git log` matches; no token values or secrets in any
-    commit (tests use placeholder tokens only).
+    included in each related commit (per AGENTS.md Committer convention).
+    The first commit also carries the `plans/2026-09-03-api-token-auth.md`
+    archive move:
+    1. `feat: add CORS and streamable-HTTP mode configuration flags`
+       (Task 1 + archive move)
+    2. `feat: CORS middleware for browser clients on the HTTP transport`
+       (Task 2)
+    3. `feat: wire CORS into HTTP handler with stateless and localhost-protection modes`
+       (Task 3)
+    4. `test: cover CORS middleware, preflight ordering, and origin resolution`
+       (Task 4)
+    5. `docs: document browser client (CORS) support; bump version to 0.5.0`
+       (Task 5)
+  - **Review Criteria:** `git log` matches; no secrets in any commit (tests
+    use placeholder tokens only).
 
 ---
 
 ## Edge Case & Safety Checklist
 
-- **No token set:** authentication is disabled; the server behaves exactly
-  as it does today (open HTTP endpoint). This is a deliberate, documented
-  choice — the feature is opt-in.
-- **Empty token via flag (`--api-key ""`):** treated as unset → env var
-  consulted; if that is empty too, auth stays disabled.
-- **Token with spaces:** allowed; the client must send it verbatim after
-  `Bearer `. We do not trim the token value (only validate header shape).
-- **Header with multiple spaces (`"Bearer  x"`):** the single-space split
-  yields token `" x"` (leading space) which will not match a stored token —
-  rejected unless the token itself starts with a space. Acceptable; documented
-  by the one-space rule in README.
-- **Timing attacks:** `subtle.ConstantTimeCompare` on both sides; no early
-  return on length mismatch that leaks token length (length equality is
-  checked, which leaks only the *length* — standard and acceptable for static
-  tokens).
-- **CORS/OPTIONS:** no CORS is configured today; the middleware rejects
-  unauthenticated preflights with 401. Consistent with "all requests require
-  the token"; no special-casing (YAGNI).
-- **Stdio mode:** zero behavior change; `resolveAPIKey` is simply not called
-  in a way that affects execution.
-- **Token leakage:** never logged, never in error messages, never in usage
-  output. `--version` and help output unaffected.
-- **Existing clients:** when the operator enables auth, current HTTP clients
-  break until they send the token — intentional (that is the point of the
-  feature); documented in README. When auth stays disabled, nothing changes.
+- **CORS disabled (default):** no middleware, no `Vary: Origin`, no OPTIONS
+  change — existing curl/desktop clients see byte-identical behavior.
+  Deliberate opt-in; Task 4, test 7 (`TestBuildHTTPHandlerCORSDisabled`)
+  guards it.
+- **`--stateless` + sessioned-only client:** the client's follow-up
+  `Mcp-Session-Id` headers are ignored by the SDK; each request gets a fresh
+  session. Documented; not an error.
+- **Preflight without `Origin`:** treated as non-browser, passed to `next`
+  (SDK answers 400/405-ish) — mirrors curl behavior; no header injection.
+- **`Origin: null`** (sandboxed iframes, `file://` pages): matched like any
+  other string — echoed under `--allow-all-origins` only, never via the
+  exact list. Do not special-case it.
+- **Empty `Access-Control-Request-Headers` on preflight:** the
+  `Allow-Headers` response header is simply omitted (never set empty).
+- **Duplicate `Vary` values:** `h.Add("Vary", "Origin")` appends a second
+  header line if downstream code also sets `Vary`; both lines are legal and
+  clients combine them. Acceptable.
+- **`--allow-all-origins` without `--api-key` on a non-loopback host:** any
+  site on the internet can both invoke tools *and read* responses; the README
+  requires the explicit origin list for production. The flag is accepted
+  (operator choice) — README warning, not a startup error, matching the
+  app's existing open-by-default posture when no token is set.
+- **DNS rebinding / localhost protection:** on by default (`go-sdk`
+  v1.6.1, spec `2025-11-25`); its 403 responses carry CORS headers because
+  the middleware sets headers before `next`. `--disable-localhost-protection`
+  is the escape hatch, documented with the trade-off.
+- **`MCPGODEBUG=enableoriginverification=1` (v1.6.1 compat knob):** the SDK
+  403s cross-origin requests *inside* the handler where the CORS middleware
+  cannot recover — documented in the README as a non-fix.
+- **Credentials:** `Access-Control-Allow-Credentials` is never emitted; the
+  only auth mechanism is the `Authorization` header, which is not a
+  credentialed request under the CORS spec.
+- **Origin wildcard patterns (`https://*.example.com`):** out of scope for
+  v1; exact list covers the realistic cases. Follow-up candidate.
+- **SSE streams:** headers are written once at stream start (before the
+  first SSE byte), which is exactly when the browser evaluates CORS — no
+  `Flusher` special-casing needed.
+- **Stdio mode:** zero behavior change; the CORS flags are parsed and
+  validated (fail-fast) but never applied.
+- **TLS:** the server is HTTP-only; browser production use requires a
+  TLS-terminating proxy (documented).
 
 ---
 
@@ -233,51 +390,51 @@ Resolves: https://github.com/mkuckert/mcp-commands/issues/3
 
 - **Round 1:** **APPROVED**
 
-  The plan is complete, feasible against the actual code in `main.go`, and
-  internally consistent. Every task maps to verifiable code changes: the
-  `run(ctx, dir, scriptsDir, watch, host string, port int)` signature and the
-  `mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server, nil)`
-  construction in Task 3 match the current implementation exactly, so
-  `buildHTTPHandler` is a drop-in extraction; `resolveAPIKey` and the
-  middleware use only stdlib imports (`os`, `strings`, `crypto/subtle`,
-  `net/http`) already or easily added to `main.go`. The optional-token
-  behavior the user mandated (no token → unauthenticated, today's behavior;
-  token set → Bearer enforced) is reflected consistently in Objective,
-  Requirements & Decisions, Tasks 1–3, and the Edge Case checklist — no
-  contradiction found. Security edge cases (timing-safe comparison with the
-  length-leak explicitly acknowledged, empty token, header shape via
-  `strings.Cut`, multi-space headers, CORS preflight rejection, stdio
-  untouched, no token leakage in logs) are all covered. The README has an
-  "HTTP Server Mode" section (line 53) for Task 5 to extend, and
-  `serverVersion` is currently `0.3.0`, matching the planned bump. The four
-  specified tests are implementable with `httptest` and the existing SDK API
-  (`mcp.NewServer`, `AddTool`), matching the table-driven style of
-  `main_test.go`. Three non-blocking advisory items follow; none require a
-  correction loop.
+  Every plan claim was verified against `main.go`, `main_test.go`, and the
+  go-sdk v1.6.1 source: the current `buildHTTPHandler(server, token)`
+  signature and its two test call sites, the `run(...)` signature, the
+  `apiKey`-based startup-log if/else, `reject()` (never clears pre-set
+  headers, so CORS headers ride along on 401s), `serverVersion` at a single
+  `var` location, and the existence of
+  `StreamableHTTPOptions{Stateless, DisableLocalhostProtection}` in v1.6.1
+  (a non-nil zero-value struct is behaviorally identical to today's `nil`).
+  The SDK sets no CORS headers and no `Vary` today, so the default-off
+  promise holds. Security design sound: echo-origin + `Vary: Origin` +
+  never `*` is cache- and credentials-safe; echoing
+  `Access-Control-Request-Headers` is acceptable because only allowed
+  origins see the response; skipping stdlib
+  `http.NewCrossOriginProtection()` is defensible and arguably required —
+  its default-deny policy would 403 the exact external-page → loopback
+  setups the feature exists to serve, while the SDK's default-on
+  DNS-rebinding protection remains the real boundary (its 403s inherit CORS
+  headers from the outer middleware) and the
+  `MCPGODEBUG=enableoriginverification=1` conflict is documented.
+  Completeness vs the research report: config table, all five middleware
+  rules, ordering, security notes, and all eight research tests are covered
+  (research test 8 folded into Task 4's preamble; tests 4–6 merged into
+  plan tests 3/7; the `corsConfig` struct refines the research's four
+  scalar parameters). House style matches
+  `plans/2026-09-03-api-token-auth.md`.
 
-  **Advisory (non-blocking):**
-
-  1. *Task 6, commit 3:* message says "HTTP startup validation", but no task
-     covers startup validation — Task 4's tests cover key resolution,
-     middleware, and auth-disabled/with-token handler behavior. Align the
-     commit subject with what is actually tested (e.g. "test: cover bearer
-     auth middleware and API key resolution").
-  2. *Task 3 vs Task 4:* two review criteria — "token never appears in any
-     log output" and "stdio mode: identical behavior" — have no corresponding
-     automated test in Task 4 (both are hard to assert without refactoring
-     `run()`'s stderr output capture). Acceptable for code-review verification,
-     but the Builder should be aware these criteria are checked manually.
-  3. *Edge Case checklist, stdio:* `--api-key` set in stdio mode is silently
-     ignored ("no warning"). This matches the user's explicit scope decision,
-     so it stands; noted only because AGENTS.md's fail-loud philosophy would
-     otherwise favor a one-line stderr note. No change required.
+  **Advisory (non-blocking), all folded into the plan text:**
+  1. Edge Case checklist said "Task 7 regression test" — corrected to Task
+     4, test 7 (`TestBuildHTTPHandlerCORSDisabled`).
+  2. Task 3 implied double resolution of CORS (in `main()` *and* `run()`) —
+     now explicit: `main()` resolves/validates, `run()` only consumes.
+  3. Task 5's README anchor "HTTP Server Mode" is not a section heading —
+     now pinned to `#### Browser Clients (CORS)` after
+     `#### Authentication (optional)` under `### Starting the Server`.
+  4. README bullet list gains the research's `Accept:
+     application/json, text/event-stream` note for fetch-based clients.
+  5. Edge Case checklist gains an `Origin: null` note (allow-all only,
+     never via the exact list; do not special-case).
+  No issue link applies (no GitHub issue for this feature); the prior
+  plan's "Resolves:" line has no analog — accepted as-is.
 - **Round 2:** N/A
 - **Round 3:** N/A
 
 ## Final Status (Code Review)
 
-- **Round 1:** **APPROVED**
-
-  The implementation in `main.go`, `main_test.go`, and `README.md` matches the approved plan exactly. Task 1: `resolveAPIKey` is implemented verbatim with the `apiKeyEnvVar` constant, and all three precedence criteria are covered by a four-case table in `TestResolveAPIKey` (flag-only, env-only, both/flag-wins, neither). Task 2: `newBearerAuthHandler` and `reject` match the plan's code; header-shape rejection via `strings.Cut`, case-insensitive scheme via `strings.EqualFold`, `subtle.ConstantTimeCompare` for the token, and `WWW-Authenticate: Bearer` on every 401 path were verified in code and exercised by the seven-case table in `TestBearerAuthMiddleware` (including lowercase-scheme acceptance, wrong scheme, empty token, and downstream pass-through). Task 3: the `--api-key` flag, usage string, `run(...)` signature with `apiKey` as last parameter, resolution before server setup, the `buildHTTPHandler` extraction, and the conditional startup log are all in place; stdio mode is byte-identical to before (the `port == 0` branch never touches `apiKey`). Task 4: all four specified tests exist, are table-driven where noted, use no sleeps/polling, and the existing tests are unmodified (the `main_test.go` diff is purely additive). Task 5: the README gains an optional-authentication subsection with flag/env precedence, a copy-paste `curl` example, a JSON client-config example, the single-space rule, and the stdio note; `serverVersion` is bumped to `0.4.0` in exactly one place. Task 6: the four commits (`21b00f1`, `7ee04d9`, `f47d936`, `4041b71`) have the plan's (advisory-corrected) subjects, sensible file membership, and no real tokens — only placeholders (`tok`, `s3cret`, `my-secret-token`). Stability: `gofmt -l .` clean, `go build ./...` OK, `TMPDIR=/root/gotmp go test -count=1 ./...` green (17/17 top-level tests pass). Plan Reviewer advisory items were resolved: (a) "token never appears in any log output" verified by reading all 17 print statements in `main.go` — none reference the key value; (b) "stdio mode identical behavior" verified as above. Non-blocking notes: `go test -race` is infeasible in this environment (Go race runtime FATALs with "Found 39 - Supported 48" identically on the base commit `41b426b`, so it is environmental, not a regression); `serverVersion` is declared as `var` though the plan text said "const" (pre-existing declaration, single location, no functional difference); PLAN.md appears in commit 1 only because it was unmodified by commits 2–4 (checkboxes are ticked post-review), which is consistent with the Committer convention; the multi-space header edge (`"Bearer  x"`) has no dedicated test case, but the plan's Task 4 spec did not require one and its behavior is documented in the README.
+- **Round 1:** (pending)
 - **Round 2:** N/A
 - **Round 3:** N/A
