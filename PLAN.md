@@ -127,7 +127,7 @@ Housekeeping (already done by the Planner): the completed api-token-auth
 plan was archived to `plans/2026-09-03-api-token-auth.md`; this file is the
 live plan. The archive move is committed with Task 1.
 
-- [ ] **Task 1: CORS configuration (`corsConfig` + `resolveCORS`)**
+- [x] **Task 1: CORS configuration (`corsConfig` + `resolveCORS`)**
   - **Description:** Add to `main.go`:
     ```go
     const (
@@ -174,7 +174,7 @@ live plan. The archive move is committed with Task 1.
       → accepted.
     - Bool env `"TRUE"`, `"0"`, `"yes"` handled; `"banana"` → error.
 
-- [ ] **Task 2: CORS middleware (`newCORSHandler`)**
+- [x] **Task 2: CORS middleware (`newCORSHandler`)**
   - **Description:** Add to `main.go`:
     ```go
     const (
@@ -221,7 +221,7 @@ live plan. The archive move is committed with Task 1.
     - Preflight → 204, `Access-Control-Allow-Methods: POST, OPTIONS`,
       echoed request headers, max-age 900, empty body, `next` not invoked.
 
-- [ ] **Task 3: Wire into `main()` / `run()` / `buildHTTPHandler`**
+- [x] **Task 3: Wire into `main()` / `run()` / `buildHTTPHandler`**
   - **Description:**
     - `buildHTTPHandler(server *mcp.Server, token string, cors corsConfig)` —
       new `cors` parameter (breaks the two existing test call sites; updated
@@ -276,7 +276,7 @@ live plan. The archive move is committed with Task 1.
       version, streamable.go:391–393), not the latest; it never 400s on a
       missing header. Recorded in README per Requirements.
 
-- [ ] **Task 4: Tests**
+- [x] **Task 4: Tests**
   - **Description:** Add to `main_test.go` (table-driven where noted, matching
     existing style; the two existing `buildHTTPHandler(server, ...)` call
     sites at the end of the file gain a zero `corsConfig` argument):
@@ -315,7 +315,7 @@ live plan. The archive move is committed with Task 1.
     - The pre-existing tests are unmodified except the two `buildHTTPHandler`
       call sites gaining the zero-value `corsConfig` argument.
 
-- [ ] **Task 5: Documentation & release**
+- [x] **Task 5: Documentation & release**
   - **Description:**
     - `README.md`: new `#### Browser Clients (CORS)` subsection after
       `#### Authentication (optional)`, under `### Starting the Server`
@@ -349,7 +349,7 @@ live plan. The archive move is committed with Task 1.
       exactly.
     - Version string updated in exactly one place.
 
-- [ ] **Task 6: Commits**
+- [x] **Task 6: Commits**
   - **Description:** Conventional commits, one per task unit; `PLAN.md` is
     included in each related commit (per AGENTS.md Committer convention).
     The first commit also carries the `plans/2026-09-03-api-token-auth.md`
@@ -364,6 +364,9 @@ live plan. The archive move is committed with Task 1.
        (Task 4)
     5. `docs: document browser client (CORS) support; bump version to 0.5.0`
        (Task 5)
+    6. `fix: report contradictory CORS flags before origin validation; annotate
+       client example` (quality-pass follow-up: contradiction error no longer
+       masked by a bad origin value; README TS SDK URL annotated)
   - **Review Criteria:** `git log` matches; no secrets in any commit (tests
     use placeholder tokens only).
 
