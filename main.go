@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,6 +41,11 @@ const (
 var serverVersion = "0.4.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
+
+const (
+	allowedOriginsEnvVar  = "MCP_COMMANDS_ALLOWED_ORIGINS"
+	allowAllOriginsEnvVar = "MCP_COMMANDS_ALLOW_ALL_ORIGINS"
+)
 
 type paramSpec struct {
 	Name        string // validated against argumentKeyPattern
@@ -638,6 +644,109 @@ func resolveAPIKey(flagValue string) string {
 		return flagValue
 	}
 	return os.Getenv(apiKeyEnvVar)
+}
+
+// corsConfig holds the resolved CORS and streamable-HTTP mode options for the
+// HTTP transport.
+type corsConfig struct {
+	origins                    []string // exact origin allowlist
+	allowAll                   bool     // echo any Origin (dev)
+	disableLocalhostProtection bool     // StreamableHTTPOptions.DisableLocalhostProtection
+}
+
+// disabled reports whether no CORS behavior is requested.
+func (c corsConfig) disabled() bool { return len(c.origins) == 0 && !c.allowAll }
+
+// originSet returns the allowlist as a set for O(1) lookup.
+func (c corsConfig) originSet() map[string]bool {
+	set := make(map[string]bool, len(c.origins))
+	for _, origin := range c.origins {
+		set[origin] = true
+	}
+	return set
+}
+
+// summary is the startup-log fragment for enabled CORS.
+func (c corsConfig) summary() string {
+	if c.allowAll {
+		return "CORS: any origin — dev mode"
+	}
+	return fmt.Sprintf("CORS: %d origin(s)", len(c.origins))
+}
+
+// parseBoolEnv parses a boolean environment variable value: "" → false;
+// "1"/"true"/"yes" (case-insensitive) → true; anything else → error (fail
+// loud, no silent misparse).
+func parseBoolEnv(name, value string) (bool, error) {
+	switch strings.ToLower(value) {
+	case "":
+		return false, nil
+	case "1", "true", "yes":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be 1, true, or yes (case-insensitive), got %q", name, value)
+	}
+}
+
+// validateOrigin requires an exact http/https origin: a parsable URL with an
+// http or https scheme, a non-empty host, and no path, userinfo, query, or
+// fragment (https://host[:port] only).
+func validateOrigin(origin string) error {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return fmt.Errorf("invalid origin %q: %v", origin, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid origin %q: scheme must be http or https", origin)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid origin %q: missing host", origin)
+	}
+	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("invalid origin %q: must be exactly scheme://host[:port]", origin)
+	}
+	return nil
+}
+
+// resolveCORS resolves flags (win) over env and validates origins. Returns an
+// error for malformed origins or a contradictory --allowed-origins +
+// --allow-all-origins combination.
+func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtection bool) (corsConfig, error) {
+	originsRaw := allowedOriginsFlag
+	if originsRaw == "" {
+		originsRaw = os.Getenv(allowedOriginsEnvVar)
+	}
+
+	allowAll := allowAllFlag
+	if !allowAll {
+		parsed, err := parseBoolEnv(allowAllOriginsEnvVar, os.Getenv(allowAllOriginsEnvVar))
+		if err != nil {
+			return corsConfig{}, err
+		}
+		allowAll = parsed
+	}
+
+	var origins []string
+	for _, part := range strings.Split(originsRaw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if err := validateOrigin(part); err != nil {
+			return corsConfig{}, err
+		}
+		origins = append(origins, part)
+	}
+
+	if len(origins) > 0 && allowAll {
+		return corsConfig{}, fmt.Errorf("--allowed-origins and --allow-all-origins are mutually exclusive")
+	}
+
+	return corsConfig{
+		origins:                    origins,
+		allowAll:                   allowAll,
+		disableLocalhostProtection: disableLocalhostProtection,
+	}, nil
 }
 
 // newBearerAuthHandler wraps next, requiring an
