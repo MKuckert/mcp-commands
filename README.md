@@ -129,6 +129,7 @@ Notes:
 - A client example with the MCP TS SDK:
 
 ```js
+// The URL must be the full transport endpoint (the mcp-commands HTTP root).
 const transport = new StreamableHTTPClientTransport(new URL("https://app.example.com"), {
   requestInit: { headers: { Authorization: `Bearer ${token}` } },
 });

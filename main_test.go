@@ -1283,6 +1283,7 @@ func TestResolveCORS(t *testing.T) {
 		wantAllowAll   bool
 		wantDisableLHP bool
 		wantErr        bool
+		errSubstr      string
 	}{
 		{name: "flag_only", flag: "https://a.example", wantOrigins: []string{"https://a.example"}},
 		{name: "env_only", originsEnv: "https://a.example, https://b.example",
@@ -1301,8 +1302,12 @@ func TestResolveCORS(t *testing.T) {
 		{name: "flag_wins_over_env_allow_all", allowAllFlag: true, allowAllEnv: "0", wantOrigins: []string{}, wantAllowAll: true},
 		{name: "disable_localhost_protection", flag: "https://a.example", disableLocalhp: true,
 			wantOrigins: []string{"https://a.example"}, wantDisableLHP: true},
-		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true, wantErr: true},
-		{name: "env_origins_and_env_allow_all", originsEnv: "https://a.example", allowAllEnv: "1", wantErr: true},
+		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true,
+			wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "contradiction_reported_before_bad_origin", flag: "notaurl", allowAllFlag: true,
+			wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "env_origins_and_env_allow_all", originsEnv: "https://a.example", allowAllEnv: "1", wantErr: true,
+			errSubstr: "mutually exclusive"},
 		{name: "malformed_not_a_url", flag: "notaurl", wantErr: true},
 		{name: "malformed_missing_host", flag: "https://", wantErr: true},
 		{name: "malformed_scheme", flag: "ftp://x.example", wantErr: true},
@@ -1321,6 +1326,9 @@ func TestResolveCORS(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (%+v)", got)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tt.errSubstr)
 				}
 				return
 			}

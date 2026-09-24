@@ -726,6 +726,12 @@ func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtec
 		allowAll = parsed
 	}
 
+	// Check the contradiction before validating origins, so a bad origin
+	// string doesn't mask the more actionable error.
+	if len(strings.TrimSpace(originsRaw)) > 0 && allowAll {
+		return corsConfig{}, fmt.Errorf("--allowed-origins and --allow-all-origins are mutually exclusive")
+	}
+
 	var origins []string
 	for _, part := range strings.Split(originsRaw, ",") {
 		part = strings.TrimSpace(part)
@@ -736,10 +742,6 @@ func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtec
 			return corsConfig{}, err
 		}
 		origins = append(origins, part)
-	}
-
-	if len(origins) > 0 && allowAll {
-		return corsConfig{}, fmt.Errorf("--allowed-origins and --allow-all-origins are mutually exclusive")
 	}
 
 	return corsConfig{
