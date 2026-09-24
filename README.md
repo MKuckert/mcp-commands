@@ -104,7 +104,7 @@ Notes:
 - Enabling auth is a breaking change for existing HTTP clients — they must start sending the token.
 - **Stdio mode needs no token.** `--api-key` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
 
-#### Browser Clients (CORS)
+#### Browser Clients (Cross Origin Resource Sharing, CORS)
 
 CORS is **off by default** — with no flags set, the server sends no CORS headers at all, so existing curl/desktop clients see no change. To let browser-based MCP clients (web chat UIs, in-browser agents) talk to the streamable HTTP transport, opt in:
 
@@ -112,12 +112,12 @@ CORS is **off by default** — with no flags set, the server sends no CORS heade
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --allowed-origins https://app.example.com,https://chat.example.com
 ```
 
-Configuration (each flag wins over its env var, like `--api-key`):
+Configuration (each flag wins over its env var):
 
 | Flag | Env | Meaning |
 |---|---|---|
 | `--allowed-origins <o1,o2,...>` | `MCP_COMMANDS_ALLOWED_ORIGINS` | Comma-separated **exact** origin allowlist (`https://app.example.com`). Origins are validated at startup (must be `http`/`https` + host, no path/userinfo) and the flag fails fast even in stdio mode. |
-| `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (`1`/`true`/`yes`) | Echo any `Origin`. **Dev convenience only** — safe only with `--api-key` + TLS. |
+| `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (`1`/`true`/`yes`) | Echo any `Origin`. **Dev convenience only** — safe only with `--api-key` + TLS. The env var is consulted only when the flag is not set at all; an explicit `--allow-all-origins=false` suppresses it. |
 | `--disable-localhost-protection` | *(none, deliberate)* | Disables the SDK's DNS-rebinding 403 for servers on loopback. For dev setups where the page is served from a tunnel/LAN hostname that resolves to `127.0.0.1`. This flag intentionally has no env fallback — it is a mode choice, not a secret. |
 
 Notes:

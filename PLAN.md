@@ -32,12 +32,15 @@ path is fetch-based (e.g. the official MCP TS SDK).
   `net/url`). No new dependencies — the app stays single-file with one direct
   dep beyond the SDK. (Third-party middleware like `rs/cors` explicitly
   rejected: ~50 lines of stdlib suffice.)
-- **Configuration surface** (flag wins over env, like `--api-key`):
+- **Configuration surface** (flag wins over env, like `--api-key`; for the
+  bool `--allow-all-origins` the env var is consulted only when the flag was
+  **not set at all** — a `flag.Visit`-tracked `allowAllSet` — because a plain
+  default-false flag is indistinguishable from an explicit `=false`):
 
   | Flag | Env | Type | Meaning |
   |---|---|---|---|
   | `--allowed-origins` | `MCP_COMMANDS_ALLOWED_ORIGINS` | comma-separated string | Exact origin allowlist (`https://app.example.com`) |
-  | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | bool (`1`/`true`/`yes`, case-insensitive) | Echo any `Origin` (dev convenience) |
+  | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | bool (`1`/`true`/`yes`, case-insensitive) | Echo any `Origin` (dev convenience); env consulted only when the flag is unset |
   | `--disable-localhost-protection` | *(none, deliberate)* | bool | `StreamableHTTPOptions{DisableLocalhostProtection: true}` — disables the SDK's default DNS-rebinding 403 on loopback servers; needed when a page on a tunnel/LAN hostname talks to a `127.0.0.1` server. |
 
   `--disable-localhost-protection` deliberately has **no** env fallback (a
@@ -141,10 +144,12 @@ live plan. The archive move is committed with Task 1.
         disableLocalhostProtection bool   // StreamableHTTPOptions.DisableLocalhostProtection
     }
 
-    // disabled reports whether no CORS behavior is requested.
-    func (c corsConfig) disabled() bool { return len(c.origins) == 0 && !c.allowAll }
+    // enabled reports whether any CORS behavior is requested
+    // (review round: flipped meaning vs the original `disabled` to remove
+    // negations at call sites).
+    func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
 
-    // originSet returns the allowlist as a set for O(1) lookup.
+    // originSet returns the allowlist as a map for membership checks.
     func (c corsConfig) originSet() map[string]bool { ... }
 
     // summary is the startup-log fragment for enabled CORS.
@@ -153,17 +158,23 @@ live plan. The archive move is committed with Task 1.
         return fmt.Sprintf("CORS: %d origin(s)", len(c.origins))
     }
 
-    // resolveCORS resolves flags (win) over env and validates origins.
+    // resolveCORS resolves flags over env and validates origins.
     // Returns an error for malformed origins or a contradictory
     // --allowed-origins + --allow-all-origins combination.
-    func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtection bool) (corsConfig, error) { ... }
+    // allowAllSet (from flag.Visit in main) distinguishes an explicit
+    // --allow-all-origins[=false] from a plain default; the env var is
+    // consulted only when the flag was not set (review round: fixes the
+    // explicit-false-falls-through-to-env bug Copilot flagged).
+    func resolveCORS(allowedOriginsFlag string, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) { ... }
     ```
     - Origins: split on comma, `strings.TrimSpace` each, drop empties.
     - Bool env: `parseBoolEnv` helper — `""` → false; `1`/`true`/`yes`
       (case-insensitive) → true; anything else → error (fail loud, no
       silent misparse).
     - Origin validation: `url.Parse`, reject parse errors, require scheme
-      `http`/`https`, non-empty `u.Host`, no `u.User`/`u.RawQuery`/`u.Fragment`.
+      `http`/`https`, non-empty `u.Hostname()`, no `u.User`/`u.RawQuery`/`u.Fragment`
+      (review round: `Hostname()` rejects port-only authorities like
+      `https://:8443`, which `u.Host` accepted).
   - **Review Criteria:**
     - Flag non-empty → flag wins, env ignored; env only → env used; neither
       → empty.
@@ -239,7 +250,7 @@ live plan. The archive move is committed with Task 1.
           if token != "" {
               h = newBearerAuthHandler(h, token)
           }
-          if !cors.disabled() {
+          if cors.enabled() {
               h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
           }
           return h
@@ -260,7 +271,7 @@ live plan. The archive move is committed with Task 1.
       (already resolved/validated in `main`) — no re-resolution here;
       `buildHTTPHandler(server, apiKey, cors)` in the HTTP branch; startup
       log composes its parenthetical from `apiKey != ""` and
-      `!cors.disabled()` (see Requirements).
+      `cors.enabled()` (see Requirements).
   - **Review Criteria:**
     - No flags → server starts, zero CORS behavior, log line identical to
       today.
@@ -367,6 +378,9 @@ live plan. The archive move is committed with Task 1.
     6. `fix: report contradictory CORS flags before origin validation; annotate
        client example` (quality-pass follow-up: contradiction error no longer
        masked by a bad origin value; README TS SDK URL annotated)
+    7. `fix: address PR review comments: port-only origins, explicit-bool flag
+       precedence, http method constants, enabled() naming, usage/README
+       wording` (Copilot + MKuckert review round)
   - **Review Criteria:** `git log` matches; no secrets in any commit (tests
     use placeholder tokens only).
 

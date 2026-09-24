@@ -654,10 +654,10 @@ type corsConfig struct {
 	disableLocalhostProtection bool     // StreamableHTTPOptions.DisableLocalhostProtection
 }
 
-// disabled reports whether no CORS behavior is requested.
-func (c corsConfig) disabled() bool { return len(c.origins) == 0 && !c.allowAll }
+// enabled reports whether any CORS behavior is requested.
+func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
 
-// originSet returns the allowlist as a set for O(1) lookup.
+// originSet returns the allowlist as a map for membership checks.
 func (c corsConfig) originSet() map[string]bool {
 	set := make(map[string]bool, len(c.origins))
 	for _, origin := range c.origins {
@@ -699,7 +699,7 @@ func validateOrigin(origin string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("invalid origin %q: scheme must be http or https", origin)
 	}
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		return fmt.Errorf("invalid origin %q: missing host", origin)
 	}
 	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
@@ -708,17 +708,21 @@ func validateOrigin(origin string) error {
 	return nil
 }
 
-// resolveCORS resolves flags (win) over env and validates origins. Returns an
+// resolveCORS resolves flags over env and validates origins. Returns an
 // error for malformed origins or a contradictory --allowed-origins +
-// --allow-all-origins combination.
-func resolveCORS(allowedOriginsFlag string, allowAllFlag, disableLocalhostProtection bool) (corsConfig, error) {
+// --allow-all-origins combination. allowedOriginsFlag is empty when the flag
+// was not given (the flag's zero value is unset, so "flag wins" is
+// well-defined); for the bool allowAllFlag, allowAllSet distinguishes an
+// explicit --allow-all-origins[=false] from a plain default, and the env var
+// is consulted only when the flag was not set at all.
+func resolveCORS(allowedOriginsFlag string, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) {
 	originsRaw := allowedOriginsFlag
 	if originsRaw == "" {
 		originsRaw = os.Getenv(allowedOriginsEnvVar)
 	}
 
 	allowAll := allowAllFlag
-	if !allowAll {
+	if !allowAllSet {
 		parsed, err := parseBoolEnv(allowAllOriginsEnvVar, os.Getenv(allowAllOriginsEnvVar))
 		if err != nil {
 			return corsConfig{}, err
@@ -777,11 +781,15 @@ func reject(w http.ResponseWriter) {
 }
 
 const (
-	corsAllowMaxAge    = "900" // 15 min; browsers cap at 7200s
+	corsAllowMaxAge = "900" // 15 min; browsers cap at 7200s
+	// The go-sdk exposes no Last-Event-ID/Mcp-Session-Id constants, so the
+	// exposed header names stay local. (The method list has no CORS
+	// constants in net/http, but the methods do — see corsAllowedMethods.)
 	corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
-	// The transport is always stateless; the SDK 405s GET/DELETE.
-	corsAllowedMethods = "POST, OPTIONS"
 )
+
+// The transport is always stateless; the SDK 405s GET/DELETE.
+var corsAllowedMethods = []string{http.MethodPost, http.MethodOptions}
 
 // newCORSHandler allows cross-origin browser requests from allowed
 // origins. Requests without an Origin header, and origins not on the
@@ -800,7 +808,7 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 		h.Add("Vary", "Origin")
 		h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
 		if r.Method == http.MethodOptions { // preflight
-			h.Set("Access-Control-Allow-Methods", corsAllowedMethods)
+			h.Set("Access-Control-Allow-Methods", strings.Join(corsAllowedMethods, ", "))
 			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
 				h.Set("Access-Control-Allow-Headers", achr)
 			}
@@ -821,15 +829,15 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
-		// Always stateless (user decision): the app keeps no
-		// per-session state, so protocol sessions are vestigial.
+		// Always stateless: the app keeps no per-session state, so protocol
+		// sessions are vestigial.
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
 	})
 	if token != "" {
 		h = newBearerAuthHandler(h, token)
 	}
-	if !cors.disabled() {
+	if cors.enabled() {
 		h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
 	}
 	return h
@@ -855,12 +863,18 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>] [--allow-all-origins] [--disable-localhost-protection]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection]\n")
 		os.Exit(1)
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
-	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, *disableLocalhostProtectionFlag)
+	allowAllSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "allow-all-origins" {
+			allowAllSet = true
+		}
+	})
+	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -935,7 +949,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		if apiKey != "" {
 			notes = append(notes, "API key auth enabled")
 		}
-		if !cors.disabled() {
+		if cors.enabled() {
 			notes = append(notes, cors.summary())
 		}
 		line := fmt.Sprintf("Starting HTTP server on %s", addr)

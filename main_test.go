@@ -1278,6 +1278,7 @@ func TestResolveCORS(t *testing.T) {
 		originsEnv     string
 		allowAllEnv    string
 		allowAllFlag   bool
+		allowAllSet    bool
 		disableLocalhp bool
 		wantOrigins    []string
 		wantAllowAll   bool
@@ -1294,17 +1295,23 @@ func TestResolveCORS(t *testing.T) {
 		{name: "comma_space_parsing", flag: "https://a.example, https://b.example",
 			wantOrigins: []string{"https://a.example", "https://b.example"}},
 		{name: "port_accepted", flag: "https://x.example:8443", wantOrigins: []string{"https://x.example:8443"}},
-		{name: "allow_all_flag", allowAllFlag: true, wantOrigins: []string{}, wantAllowAll: true},
+		{name: "port_only_authority_rejected", flag: "https://:8443", wantErr: true},
+		{name: "allow_all_flag", allowAllFlag: true, allowAllSet: true, wantOrigins: []string{}, wantAllowAll: true},
 		{name: "allow_all_env_true", allowAllEnv: "TRUE", wantOrigins: []string{}, wantAllowAll: true},
 		{name: "allow_all_env_yes", allowAllEnv: "yes", wantOrigins: []string{}, wantAllowAll: true},
 		// "0" is not in the recognized set (1/true/yes) → fail loud, per spec.
 		{name: "allow_all_env_zero_rejected", allowAllEnv: "0", wantErr: true},
-		{name: "flag_wins_over_env_allow_all", allowAllFlag: true, allowAllEnv: "0", wantOrigins: []string{}, wantAllowAll: true},
+		// An explicit --allow-all-origins[=false] suppresses the env var, so
+		// only an unset flag consults it.
+		{name: "explicit_false_suppresses_env", allowAllFlag: false, allowAllSet: true, allowAllEnv: "1",
+			wantOrigins: []string{}, wantAllowAll: false},
+		{name: "unset_flag_reads_env", allowAllFlag: false, allowAllSet: false, allowAllEnv: "1",
+			wantOrigins: []string{}, wantAllowAll: true},
 		{name: "disable_localhost_protection", flag: "https://a.example", disableLocalhp: true,
 			wantOrigins: []string{"https://a.example"}, wantDisableLHP: true},
-		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true,
+		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true, allowAllSet: true,
 			wantErr: true, errSubstr: "mutually exclusive"},
-		{name: "contradiction_reported_before_bad_origin", flag: "notaurl", allowAllFlag: true,
+		{name: "contradiction_reported_before_bad_origin", flag: "notaurl", allowAllFlag: true, allowAllSet: true,
 			wantErr: true, errSubstr: "mutually exclusive"},
 		{name: "env_origins_and_env_allow_all", originsEnv: "https://a.example", allowAllEnv: "1", wantErr: true,
 			errSubstr: "mutually exclusive"},
@@ -1322,7 +1329,7 @@ func TestResolveCORS(t *testing.T) {
 			t.Setenv(allowedOriginsEnvVar, tt.originsEnv)
 			t.Setenv(allowAllOriginsEnvVar, tt.allowAllEnv)
 
-			got, err := resolveCORS(tt.flag, tt.allowAllFlag, tt.disableLocalhp)
+			got, err := resolveCORS(tt.flag, tt.allowAllFlag, tt.allowAllSet, tt.disableLocalhp)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (%+v)", got)
@@ -1349,8 +1356,8 @@ func TestResolveCORS(t *testing.T) {
 			if got.disableLocalhostProtection != tt.wantDisableLHP {
 				t.Errorf("disableLocalhostProtection = %v, want %v", got.disableLocalhostProtection, tt.wantDisableLHP)
 			}
-			if !tt.wantAllowAll && len(tt.wantOrigins) == 0 && !got.disabled() {
-				t.Errorf("disabled() = false, want true for empty config")
+			if !tt.wantAllowAll && len(tt.wantOrigins) == 0 && got.enabled() {
+				t.Errorf("enabled() = true, want false for empty config")
 			}
 		})
 	}
@@ -1396,8 +1403,8 @@ func TestCORSHandlerPreflight(t *testing.T) {
 			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
 				t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
 			}
-			if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "POST, OPTIONS" {
-				t.Errorf("Access-Control-Allow-Methods = %q, want %q", got, "POST, OPTIONS")
+			if got := rec.Header().Get("Access-Control-Allow-Methods"); got != http.MethodPost+", "+http.MethodOptions {
+				t.Errorf("Access-Control-Allow-Methods = %q, want %q", got, http.MethodPost+", "+http.MethodOptions)
 			}
 			if got := rec.Header().Get("Access-Control-Max-Age"); got != "900" {
 				t.Errorf("Access-Control-Max-Age = %q, want 900", got)
