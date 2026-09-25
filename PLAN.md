@@ -75,7 +75,9 @@ are equivalent (zero duration = no deadline).
     correctly), `NONE`/`none`/` NONE `, `0s` → 0; rejects `-5m`, `+5m`, `1.5h`,
     `m5`, `h`, `""`, `5m 5m` is accepted (10m). `--no-timeout` + `--timeout 5s`
     ⇒ 0. Startup with `--timeout bogus` exits 1 with a clear message. `go vet`
-    clean, no new deps in `go.mod`.
+    clean, no new deps in `go.mod`; the three existing `newToolRegistry(server, dir)`
+    call sites in main_test.go are updated to the new signature in the same commit
+    (reviewer advisory, round 1).
 - [ ] **Task 2: Per-tool `Timeout:` frontmatter**
   - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and
     `extractTimeout(filePath string) (time.Duration, bool)` mirroring
@@ -124,6 +126,11 @@ are equivalent (zero duration = no deadline).
     a `sleep 10` script under `Timeout: 1s` and under `--no-timeout`.
   - **Review Criteria:** `git log main..feat/timeout-handling` shows exactly the
     five commits, all building/testing green; PR ready to open.
+    Reviewer advisory (round 1): the `newToolRegistry` signature change breaks
+    three existing call sites in main_test.go, and the exact-equality assertion
+    `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges`
+    (line ~352) must be updated for the suffix — update them in the same commit
+    as Task 3 so every commit builds green.
 
 ## Edge Case & Safety Checklist
 
@@ -141,7 +148,7 @@ are equivalent (zero duration = no deadline).
 
 ## Review Log (Plan Review)
 
-- **Round 1:** [pending — Plan Reviewer dispatch]
+- **Round 1:** Verified every claim against the current code: `defaultToolTimeout = 5 * time.Minute` (~line 30), `replace` hardcoding `defaultToolTimeout` (~line 470), `executeTool`'s unconditional `context.WithTimeout(ctx, timeout)` (~line 594), the `resolveCORS` fail-fast pattern in `main()`, the `extractDescription`/`extractParams` mirror targets, and the registry/watch test patterns (`TestRequiredParamValidationViaRegistry`, `TestWatchToolsDetectsContentChanges`). Precedence rules are self-consistent (per-tool > global; `--no-timeout` > `--timeout`; first-match-wins matches `Description:` semantics), error strategy follows fail-loud-fail-fast, format spec is stdlib-achievable, edge checklist covers expiry-mid-output, hot-reload, symlinks, and cancellation-with-no-deadline. Advisory notes (non-blocking): (1) three existing `newToolRegistry(server, dir)` call sites in main_test.go plus the exact-equality assertion `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges` (line 352) will need updates for the new constructor param and the registered-description suffix — Task 5's all-green-at-every-commit gate catches this; (2) define the suffix for empty frontmatter descriptions explicitly (e.g. description becomes `(timeout: 30s)` alone). Status: Approved
 
 ## Final Status (Code Review)
 
