@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -248,7 +249,7 @@ func TestWatchTools(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "")
+	registry := newToolRegistry(server, "", defaultToolTimeout)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -313,7 +314,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "")
+	registry := newToolRegistry(server, "", defaultToolTimeout)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -349,7 +350,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTools failed: %v", err)
 		}
-		if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated" {
+		if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated (timeout: 5m0s)" {
 			cancel()
 			break
 		}
@@ -366,6 +367,106 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
+func TestParseTimeoutDuration(t *testing.T) {
+	tests := []struct {
+		name         string
+		raw          string
+		want         time.Duration
+		wantErr      bool
+		wantOverflow bool
+	}{
+		{name: "minutes", raw: "5m", want: 5 * time.Minute},
+		{name: "seconds", raw: "60s", want: 60 * time.Second},
+		{name: "compound", raw: "1h 30m 5s", want: time.Hour + 30*time.Minute + 5*time.Second},
+		{name: "compound_no_spaces", raw: "1h30m5s", want: time.Hour + 30*time.Minute + 5*time.Second},
+		{name: "duplicates_sum", raw: "5m 5m", want: 10 * time.Minute},
+		{name: "subsecond_ms_rejected", raw: "250ms", wantErr: true},
+		{name: "subsecond_us_rejected", raw: "250us", wantErr: true},
+		{name: "subsecond_µs_rejected", raw: "250µs", wantErr: true},
+		{name: "subsecond_ns_rejected", raw: "1000ns", wantErr: true},
+		{name: "compound_subsecond_rejected", raw: "5m 250ms", wantErr: true},
+		{name: "none_upper", raw: "NONE", want: 0},
+		{name: "none_lower", raw: "none", want: 0},
+		{name: "none_padded", raw: "  NONE ", want: 0},
+		{name: "zero_seconds", raw: "0s", want: 0},
+		{name: "zero_compound", raw: "0m 0s", want: 0},
+		{name: "negative_rejected", raw: "-5m", wantErr: true},
+		{name: "plus_rejected", raw: "+5m", wantErr: true},
+		{name: "decimal_rejected", raw: "1.5h", wantErr: true},
+		{name: "bare_unit_rejected", raw: "m5", wantErr: true},
+		{name: "digits_only_rejected", raw: "5", wantErr: true},
+		{name: "bare_unit_alone_rejected", raw: "h", wantErr: true},
+		{name: "empty_rejected", raw: "", wantErr: true},
+		{name: "whitespace_only_rejected", raw: "   ", wantErr: true},
+		{name: "unknown_unit_rejected", raw: "5x", wantErr: true},
+		{name: "compound_with_bad_token_rejected", raw: "5m bogus", wantErr: true},
+		// ~300 years total: each 876000h (100y) term fits, the sum does not.
+		{name: "sum_overflow_rejected", raw: "876000h 876000h 876000h", wantErr: true, wantOverflow: true},
+		// Fits in 63 bits, but seconds→nanoseconds multiplication overflows.
+		{name: "single_term_overflow_rejected", raw: "9223372037s", wantErr: true, wantOverflow: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTimeoutDuration(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseTimeoutDuration(%q) = %v, want error", tt.raw, got)
+				}
+				if tt.wantOverflow && !strings.Contains(err.Error(), "overflows") {
+					t.Errorf("parseTimeoutDuration(%q) error = %v, want \"overflows\"", tt.raw, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTimeoutDuration(%q) unexpected error: %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseTimeoutDuration(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeoutFlag string
+		timeoutSet  bool
+		noTimeout   bool
+		want        time.Duration
+		wantErr     bool
+	}{
+		{name: "default_when_unset", timeoutFlag: "", want: defaultToolTimeout},
+		{name: "flag_parsed", timeoutFlag: "5s", timeoutSet: true, want: 5 * time.Second},
+		{name: "flag_none", timeoutFlag: "NONE", timeoutSet: true, want: 0},
+		{name: "flag_zero", timeoutFlag: "0s", timeoutSet: true, want: 0},
+		{name: "no_timeout_alone", noTimeout: true, want: 0},
+		{name: "no_timeout_and_flag_exclusive", timeoutFlag: "5s", timeoutSet: true, noTimeout: true, wantErr: true},
+		{name: "no_timeout_and_invalid_flag_exclusive", timeoutFlag: "bogus", timeoutSet: true, noTimeout: true, wantErr: true},
+		{name: "invalid_flag_errors", timeoutFlag: "bogus", timeoutSet: true, wantErr: true},
+		{name: "explicit_empty_flag_errors", timeoutFlag: "", timeoutSet: true, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTimeout(tt.timeoutFlag, tt.timeoutSet, tt.noTimeout)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveTimeout(%q, %v) = %v, want error", tt.timeoutFlag, tt.noTimeout, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTimeout(%q, %v) unexpected error: %v", tt.timeoutFlag, tt.noTimeout, err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveTimeout(%q, %v) = %v, want %v", tt.timeoutFlag, tt.noTimeout, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -663,6 +764,150 @@ func TestCombineToolOutput(t *testing.T) {
 	}
 }
 
+func writeTimeoutScript(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+	return path
+}
+
+func TestExtractFrontmatterTimeout(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: no timeout\necho hi\n")
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout != nil {
+			t.Errorf("expected nil timeout for absent Timeout:, got %v", *timeout)
+		}
+	})
+
+	t.Run("valid_30s", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\necho hi\n")
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 30*time.Second {
+			t.Errorf("expected pointer to 30s, got %#v", timeout)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: NONE\necho hi\n")
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 0 {
+			t.Errorf("expected pointer to 0 for NONE, got %#v", timeout)
+		}
+	})
+
+	t.Run("zero_seconds", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 0s\necho hi\n")
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 0 {
+			t.Errorf("expected pointer to 0 for 0s, got %#v", timeout)
+		}
+	})
+
+	t.Run("invalid_falls_back", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\necho hi\n")
+
+		// Capture the stderr warning emitted for the invalid value.
+		oldStderr := os.Stderr
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("failed to create pipe: %v", err)
+		}
+		os.Stderr = w
+		_, _, timeout := extractFrontmatter(path)
+		os.Stderr = oldStderr
+		_ = w.Close()
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
+
+		if timeout != nil {
+			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
+		}
+		if !strings.Contains(buf.String(), filepath.Base(path)) {
+			t.Errorf("warning %q does not name the script file %q", buf.String(), filepath.Base(path))
+		}
+		if !strings.Contains(buf.String(), "bogus") {
+			t.Errorf("warning %q does not state the invalid value's reason", buf.String())
+		}
+	})
+
+	t.Run("invalid_does_not_drop_later_params", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\n# Param: name string required \"the name\"\necho hi\n")
+
+		// Suppress the warning; assert scan continuity, not the warning here.
+		discard, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("failed to open %s: %v", os.DevNull, err)
+		}
+		oldStderr := os.Stderr
+		os.Stderr = discard
+		desc, params, timeout := extractFrontmatter(path)
+		os.Stderr = oldStderr
+		_ = discard.Close()
+
+		if timeout != nil {
+			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
+		}
+		if desc != "" || len(params) != 1 || params[0].Name != "name" {
+			t.Errorf("scan stopped after invalid Timeout: desc=%q params=%#v", desc, params)
+		}
+	})
+
+	t.Run("first_occurrence_wins", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\n# Timeout: 5m\necho hi\n")
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 30*time.Second {
+			t.Errorf("expected first occurrence (30s), got %#v", timeout)
+		}
+	})
+
+	t.Run("beyond_scan_window_ignored", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		lines := []string{"#!/bin/bash"}
+		for i := 0; i < scanHeaderLines; i++ {
+			lines = append(lines, fmt.Sprintf("# Line %d", i))
+		}
+		lines = append(lines, "# Timeout: 30s", "echo done")
+		path := writeTimeoutScript(t, tmpDir, strings.Join(lines, "\n"))
+
+		_, _, timeout := extractFrontmatter(path)
+		if timeout != nil {
+			t.Errorf("expected nil timeout for line beyond scan window, got %v", *timeout)
+		}
+	})
+}
+
+func TestDiscoverToolsExtractsTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: sleeper\n# Timeout: 1m\necho hi\n")
+
+	tools, err := discoverTools(tmpDir)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].Timeout == nil || *tools[0].Timeout != time.Minute {
+		t.Errorf("expected pointer to 1m, got %#v", tools[0].Timeout)
+	}
+}
+
 func TestExtractParams(t *testing.T) {
 	t.Run("happy_path_all_types", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -678,7 +923,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 3 {
 			t.Errorf("Expected 3 params, got %d", len(params))
@@ -714,7 +959,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 0 {
 			t.Errorf("Expected 0 params, got %d", len(params))
@@ -733,7 +978,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		// Only the valid param should be extracted
 		if len(params) != 1 {
@@ -756,7 +1001,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -778,7 +1023,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -799,7 +1044,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param, got %d", len(params))
@@ -821,7 +1066,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -849,7 +1094,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param (beyond window ignored), got %d", len(params))
@@ -1605,6 +1850,201 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 }
 
+func TestResolvedTimeoutViaRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	sleepPath := filepath.Join(tmpDir, "sleep5.sh")
+	if err := os.WriteFile(sleepPath, []byte("#!/bin/bash\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatalf("failed to create sleep script: %v", err)
+	}
+	fastPath := filepath.Join(tmpDir, "fast.sh")
+	if err := os.WriteFile(fastPath, []byte("#!/bin/bash\necho fast\n"), 0o755); err != nil {
+		t.Fatalf("failed to create fast script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 2*time.Second)
+	oneSecond := time.Second
+	noTimeout := time.Duration(0)
+	registry.replace([]discoveredTool{
+		{Name: "pinned", Path: sleepPath, Description: "pinned tool", Timeout: &oneSecond},
+		{Name: "inherited", Path: sleepPath, Description: "inherited tool"}, // nil: inherits global
+		{Name: "none", Path: fastPath, Description: "none tool", Timeout: &noTimeout},
+		{Name: "bare", Path: fastPath, Timeout: &noTimeout}, // empty description: suffix alone
+		{Name: "canceller", Path: sleepPath, Timeout: &noTimeout},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	descs := make(map[string]string, len(res.Tools))
+	for _, tool := range res.Tools {
+		descs[tool.Name] = tool.Description
+	}
+	wantDescs := map[string]string{
+		"pinned":    "pinned tool (timeout: 1s)",
+		"inherited": "inherited tool (timeout: 2s)",
+		"none":      "none tool (timeout: none)",
+		"bare":      "(timeout: none)",
+		"canceller": "(timeout: none)",
+	}
+	for name, want := range wantDescs {
+		if got := descs[name]; got != want {
+			t.Errorf("description of %q = %q, want %q", name, got, want)
+		}
+	}
+
+	t.Run("per_tool_timeout_wins", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "pinned"})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected IsError result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "timed out after 1s") {
+			t.Fatalf("expected timeout message with 1s, got %q", got)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 5s script duration", elapsed)
+		}
+	})
+
+	t.Run("global_timeout_inherited", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "inherited"})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected IsError result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "timed out after 2s") {
+			t.Fatalf("expected timeout message with 2s, got %q", got)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 5s script duration", elapsed)
+		}
+	})
+
+	t.Run("none_under_short_global_completes", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "none"})
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || result.IsError {
+			t.Fatalf("expected success result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "fast") {
+			t.Fatalf("expected fast output, got %q", got)
+		}
+		if elapsed := time.Since(start); elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 2s global", elapsed)
+		}
+	})
+
+	t.Run("cancellation_kills_script_without_deadline", func(t *testing.T) {
+		callCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+		}()
+		start := time.Now()
+		result, err := clientSession.CallTool(callCtx, &mcp.CallToolParams{Name: "canceller"})
+		elapsed := time.Since(start)
+		if err == nil && (result == nil || !result.IsError) {
+			t.Fatalf("expected error or IsError result after cancellation, got %#v", result)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("canceled call took %v, want ~500ms (request ctx kills the script)", elapsed)
+		}
+	})
+}
+
+func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 2*time.Second)
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// Hot reload: editing only the Timeout: line re-registers the tool.
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Timeout: 30s\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to update script: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := clientSession.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools failed: %v", err)
+		}
+		if len(res.Tools) == 1 && res.Tools[0].Description == "(timeout: 30s)" {
+			cancel()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watchTools did not refresh updated Timeout: %+v", res.Tools)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
 func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "convert.sh")
@@ -1613,7 +2053,7 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir)
+	registry := newToolRegistry(server, tmpDir, defaultToolTimeout)
 
 	registry.replace([]discoveredTool{
 		{

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,12 +35,13 @@ const (
 	scanHeaderLines       = 30
 	scanDescriptionPrefix = "Description:"
 	scanParamPrefix       = "Param:"
+	scanTimeoutPrefix     = "Timeout:"
 	watchToolsInterval    = 2 * time.Second
 	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
 )
 
-var serverVersion = "0.5.0"
+var serverVersion = "0.6.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
@@ -59,6 +62,7 @@ type discoveredTool struct {
 	Path        string
 	Description string
 	Params      []paramSpec
+	Timeout     *time.Duration // valid per-tool Timeout: value; nil when undeclared (global applies), &0 for NONE/0
 }
 
 // discoverTools scans the given directory for executable files and symlinks
@@ -94,8 +98,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			continue
 		}
 
-		description := extractDescription(resolvedPath)
-		params := extractParams(resolvedPath)
+		description, params, timeout := extractFrontmatter(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
@@ -103,97 +106,165 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			Path:        resolvedPath,
 			Description: description,
 			Params:      params,
+			Timeout:     timeout,
 		})
 	}
 
 	return tools, nil
 }
 
-// extractDescription reads the first scanHeaderLines of a file and
-// looks for a line containing scanDescriptionPrefix ("Description:").
-// If found, it returns the string following the prefix. This is used
-// to populate the description field of the MCP Tool, providing LLMs
-// with context on what the tool does.
-func extractDescription(filePath string) string {
+// extractFrontmatter reads the first scanHeaderLines lines of a file in a
+// single pass and collects the tool's frontmatter: the first Description:
+// line (first occurrence wins; populates the MCP tool description), all
+// Param: annotations (invalid ones log a stderr warning and are skipped),
+// and the first Timeout: value (first occurrence wins; nil when undeclared
+// so the global applies, &0 for NONE/0; an invalid value logs a stderr
+// warning and yields nil so the global applies). An unreadable file yields
+// zero values.
+func extractFrontmatter(filePath string) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return ""
+		return "", []paramSpec{}, nil
 	}
 	defer file.Close()
 
+	params = []paramSpec{}
+	descriptionSeen := false
+	timeoutSeen := false
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
+
 	for scanner.Scan() && lineCount < scanHeaderLines {
 		lineCount++
 		line := scanner.Text()
 
-		if strings.Contains(line, scanDescriptionPrefix) {
+		if !descriptionSeen && strings.Contains(line, scanDescriptionPrefix) {
 			parts := strings.SplitN(line, scanDescriptionPrefix, 2)
 			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
+				description = strings.TrimSpace(parts[1])
+			}
+			descriptionSeen = true
+			continue
+		}
+
+		if !timeoutSeen && strings.Contains(line, scanTimeoutPrefix) {
+			parts := strings.SplitN(line, scanTimeoutPrefix, 2)
+			if len(parts) == 2 {
+				if duration, err := parseTimeoutDuration(parts[1]); err != nil {
+					// Warn and keep timeout nil (global applies) without
+					// interrupting the scan, so later Param: lines are still collected.
+					fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
+				} else {
+					timeout = &duration
+				}
+			}
+			timeoutSeen = true
+			continue
+		}
+
+		if strings.Contains(line, scanParamPrefix) {
+			parts := strings.SplitN(line, scanParamPrefix, 2)
+			if len(parts) == 2 {
+				// Invalid annotations log their own stderr warning.
+				if param, err := parseParamAnnotation(strings.TrimSpace(parts[1]), filePath, line); err == nil {
+					params = append(params, param)
+				}
 			}
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return ""
-	}
-
-	return ""
+	return description, params, timeout
 }
 
-// extractParams reads the first scanHeaderLines of a file and parses
-// any Param: annotations. It returns a slice of paramSpec with all valid
-// parameters. Invalid or malformed annotations produce a stderr warning and
-// are skipped without panicking.
-//
-// The annotation syntax is:
-//
-//	# Param: <name> <type> <required|optional> "<description>"
-//
-// Validation includes:
-// - name must match argumentKeyPattern
-// - type must be one of "string", "number", "boolean"
-// - required token must be "required" or "optional"
-// - description must be quoted
-func extractParams(filePath string) []paramSpec {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return []paramSpec{}
+// timeoutUnits maps the allowed duration units to their values. Sub-second
+// units are not meaningful for tool timeouts and are deliberately absent;
+// tokens are matched prefix-based, so "1h30m5s" and "1h 30m 5s" both parse.
+var timeoutUnits = map[string]time.Duration{
+	"s": time.Second,
+	"m": time.Minute,
+	"h": time.Hour,
+}
+
+// parseTimeoutDuration parses a formatted timeout duration string: a list of
+// <digits><unit> tokens (units s, m, h; e.g. "5m", "60s", "1h 30m 5s",
+// "1h30m5s"); whitespace between tokens is optional. Sub-second units,
+// decimals, signs, and bare units are rejected. The literal NONE
+// (case-insensitive, surrounding whitespace trimmed) and a result of 0 both
+// mean "no timeout" and yield 0.
+func parseTimeoutDuration(raw string) (time.Duration, error) {
+	if strings.EqualFold(strings.TrimSpace(raw), "NONE") {
+		return 0, nil
 	}
-	defer file.Close()
-
-	var params []paramSpec
-	scanner := bufio.NewScanner(file)
-	lineCount := 0
-
-	for scanner.Scan() && lineCount < scanHeaderLines {
-		lineCount++
-		line := scanner.Text()
-
-		if !strings.Contains(line, scanParamPrefix) {
-			continue
+	var total time.Duration
+	seen := false
+	const maxDuration = time.Duration(math.MaxInt64)
+	for rest := raw; len(rest) > 0; {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" {
+			break
 		}
-
-		// Split on the first occurrence of "Param:"
-		parts := strings.SplitN(line, scanParamPrefix, 2)
-		if len(parts) != 2 {
-			continue
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
 		}
-
-		rawAnnotation := strings.TrimSpace(parts[1])
-
-		// Parse the annotation: <name> <type> <required|optional> "<description>"
-		param, err := parseParamAnnotation(rawAnnotation, filePath, line)
+		if i == 0 {
+			return 0, fmt.Errorf("invalid timeout %q: expected <digits><unit> (units s, m, h) or NONE", rest)
+		}
+		multiplier, after, ok := matchTimeoutUnit(rest[i:])
+		if !ok {
+			return 0, fmt.Errorf("invalid timeout unit %q: allowed units are s, m, h", rest[i:])
+		}
+		n, err := strconv.ParseUint(rest[:i], 10, 63)
 		if err != nil {
-			// Warning already logged in parseParamAnnotation
-			continue
+			return 0, fmt.Errorf("invalid timeout amount %q: %v", rest[:i], err)
 		}
-
-		params = append(params, param)
+		// Overflow guards: individually-valid terms can still multiply or sum
+		// into int64 wraparound, which would silently yield a POSITIVE
+		// duration. Reject before the arithmetic happens.
+		if n > uint64(maxDuration)/uint64(multiplier) {
+			return 0, fmt.Errorf("timeout duration %q overflows", raw)
+		}
+		term := time.Duration(n) * multiplier
+		if total > maxDuration-term {
+			return 0, fmt.Errorf("timeout duration %q overflows", raw)
+		}
+		total += term
+		rest = after
+		seen = true
 	}
+	if !seen {
+		return 0, fmt.Errorf("timeout duration %q is empty, expected <digits><unit> (units s, m, h) or NONE", raw)
+	}
+	return total, nil
+}
 
-	return params
+// matchTimeoutUnit matches a unit at the start of s and returns its
+// multiplier plus the remainder of the string.
+func matchTimeoutUnit(s string) (time.Duration, string, bool) {
+	for _, unit := range []string{"s", "m", "h"} {
+		if strings.HasPrefix(s, unit) {
+			return timeoutUnits[unit], s[len(unit):], true
+		}
+	}
+	return 0, "", false
+}
+
+// resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
+// before the server starts. --timeout and --no-timeout are mutually exclusive
+// (passing both is a startup error); an explicitly-set --timeout must parse
+// (an explicit --timeout= is therefore rejected); an unset --timeout yields
+// defaultToolTimeout.
+func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Duration, error) {
+	if noTimeout && timeoutSet {
+		return 0, fmt.Errorf("--timeout and --no-timeout are mutually exclusive")
+	}
+	if noTimeout {
+		return 0, nil
+	}
+	if timeoutSet {
+		return parseTimeoutDuration(timeoutFlag)
+	}
+	return defaultToolTimeout, nil
 }
 
 // parseParamAnnotation parses a single parameter annotation string.
@@ -435,15 +506,16 @@ func combineToolOutput(stdout, stderr []byte) string {
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing
 // tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
-	server      *mcp.Server
-	dirAbs      string
-	mu          sync.Mutex
-	names       []string
-	lastHandler mcp.ToolHandler
+	server        *mcp.Server
+	dirAbs        string
+	globalTimeout time.Duration // applied to tools without a per-tool Timeout:
+	mu            sync.Mutex
+	names         []string
+	lastHandler   mcp.ToolHandler
 }
 
-func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
-	return &toolRegistry{server: server, dirAbs: dir}
+func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration) *toolRegistry {
+	return &toolRegistry{server: server, dirAbs: dir, globalTimeout: globalTimeout}
 }
 
 // replace unregisters all currently tracked tools and registers a new set of tools.
@@ -461,8 +533,21 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	for _, discoveredTool := range tools {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
-		toolDescription := discoveredTool.Description
 		toolParams := discoveredTool.Params
+
+		// A per-tool Timeout: always wins over the global, even --no-timeout.
+		toolTimeout := r.globalTimeout
+		if discoveredTool.Timeout != nil {
+			toolTimeout = *discoveredTool.Timeout
+		}
+
+		description := discoveredTool.Description
+		suffix := timeoutSuffix(toolTimeout)
+		if description == "" {
+			description = suffix
+		} else {
+			description += " " + suffix
+		}
 
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			parsedArgs, err := parseToolArguments(req.Params.Arguments)
@@ -475,18 +560,28 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 					IsError: true,
 				}, nil
 			}
-			return executeTool(ctx, toolPath, parsedArgs, defaultToolTimeout, r.dirAbs)
+			return executeTool(ctx, toolPath, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
 		r.server.AddTool(&mcp.Tool{
 			Name:        toolName,
-			Description: toolDescription,
+			Description: description,
 			InputSchema: buildInputSchema(toolParams),
 		}, handlerFunc)
 
 		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
+}
+
+// timeoutSuffix renders the resolved timeout for the registered tool
+// description so the LLM knows its budget: "(timeout: 30s)" or
+// "(timeout: none)" when no deadline applies.
+func timeoutSuffix(timeout time.Duration) string {
+	if timeout > 0 {
+		return fmt.Sprintf("(timeout: %s)", timeout)
+	}
+	return "(timeout: none)"
 }
 
 func mustJSONMarshal(v any) json.RawMessage {
@@ -592,8 +687,15 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 		}, nil
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	execCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	// With timeout == 0 the request context itself is used: client
+	// cancellation/abort still kills the script, so "no timeout" means
+	// "no deadline", never "uninterruptible".
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
@@ -854,6 +956,8 @@ func main() {
 	allowAllOriginsFlag := flag.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
 	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
+	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
+	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -863,15 +967,19 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
+	timeoutSet := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "allow-all-origins" {
+		switch f.Name {
+		case "allow-all-origins":
 			allowAllSet = true
+		case "timeout":
+			timeoutSet = true
 		}
 	})
 	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
@@ -880,13 +988,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors); err != nil {
+	// Resolved and validated here (all modes, fail-fast); run only consumes it.
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -922,7 +1037,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs)
+	registry := newToolRegistry(server, dirAbs, timeout)
 	registry.replace(tools)
 
 	if watch {

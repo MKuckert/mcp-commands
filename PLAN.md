@@ -1,512 +1,185 @@
-# Plan: Optional CORS Support for the HTTP Transport (Browser Clients)
+# Plan: Configurable & Per-Tool Timeout Handling
 
 ## Objective
 
-Let browser-based MCP clients (web chat UIs, in-browser agents) talk to the
-streamable HTTP transport, which the Go SDK's `NewStreamableHTTPHandler` does
-not CORS-enable on its own. CORS support is **opt-in**: new flags
-`--allowed-origins` / `--allow-all-origins` configure a CORS middleware that
-wraps the handler, and `--disable-localhost-protection` opts out of the
-SDK's default DNS-rebinding 403. In addition, the streamable handler is
-**always constructed with `Stateless: true`** (user decision 2026-09-24):
-this app keeps no per-session state — the tool registry is process-global —
-so protocol sessions are vestigial. With no CORS flags set, the CORS surface
-is byte-identical to today (zero CORS headers, no OPTIONS change); the
-stateless switch is a user-visible 0.5.0 change and is documented (see
-Requirements). The stdio transport is untouched.
+Make tool execution timeouts configurable at three levels, in precedence order
+(per-tool > CLI > default):
 
-Research: `/workspace/research/mcp-commands-cors.md` (verified against
-`modelcontextprotocol/go-sdk v1.6.1` — the exact version in `go.mod`).
-Key findings relied on: the SDK has no CORS/OPTIONS handling (its only origin
-machinery is the deopted `CrossOriginProtection` and the default-on DNS-rebinding
-localhost protection); JSON POSTs are non-simple, so browsers always preflight;
-`Mcp-Session-Id` is unreadable in JS without `Access-Control-Expose-Headers`;
-raw `EventSource` cannot work in *either* SDK mode, so the supported browser
-path is fetch-based (e.g. the official MCP TS SDK).
+1. **Default:** 5 minutes (current behavior, unchanged).
+2. **Global:** new `--timeout <duration>` CLI flag (formatted duration string)
+   and `--no-timeout` boolean to disable the global timeout.
+3. **Per-tool:** new `Timeout: <duration>` line in a script's frontmatter
+   (first `scanHeaderLines` = 30 lines), using the same format string as the
+   flag, with the literal `NONE` meaning no timeout.
 
----
+A script whose frontmatter declares `Timeout:` always wins over the global;
+a script without one inherits the global. `Timeout: 0s` and `Timeout: NONE`
+are equivalent (zero duration = no deadline).
 
 ## Requirements & Decisions
 
-- **Frameworks:** Go standard library only (`net/http`, `strings`, `os`,
-  `net/url`). No new dependencies — the app stays single-file with one direct
-  dep beyond the SDK. (Third-party middleware like `rs/cors` explicitly
-  rejected: ~50 lines of stdlib suffice.)
-- **Configuration surface** (flag wins over env, like `--api-key`; for the
-  bool `--allow-all-origins` the env var is consulted only when the flag was
-  **not set at all** — a `flag.Visit`-tracked `allowAllSet` — because a plain
-  default-false flag is indistinguishable from an explicit `=false`):
+- **Frameworks:** None new — single-file Go app (`main.go`), existing deps only
+  (`modelcontextprotocol/go-sdk`, `fsnotify`). No new libraries; duration
+  parsing is a small stdlib-only helper (stdlib `time.ParseDuration` is rejected:
+  it accepts negatives, decimals, and space-less compounds only — see parser spec).
+- **Chosen Libraries:** n/a (stdlib only).
+- **Error Handling Strategy:**
+  - `--timeout` is parsed **at startup, before the server starts** (same fail-fast
+    pattern as `resolveCORS`). Invalid value → stderr error, exit 1. The server
+    never boots with a broken config.
+  - An invalid per-tool `Timeout:` value **does not** fail discovery or
+    registration. It logs `Warning: ignoring invalid Timeout in <file>: <reason>`
+    to stderr and falls back to the global timeout (visible degradation, same
+    behavior as invalid `Param:` annotations today). This keeps hot-reload robust:
+    a user editing a script's timeout mid-flight never breaks the tool.
+  - Timeout expiry at execution: unchanged — kill via `exec.CommandContext`,
+    return `IsError: true` result `"tool timed out after <d>\n<partial output>"`.
 
-  | Flag | Env | Type | Meaning |
-  |---|---|---|---|
-  | `--allowed-origins` | `MCP_COMMANDS_ALLOWED_ORIGINS` | comma-separated string | Exact origin allowlist (`https://app.example.com`) |
-  | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | bool (`1`/`true`/`yes`, case-insensitive) | Echo any `Origin` (dev convenience); env consulted only when the flag is unset |
-  | `--disable-localhost-protection` | *(none, deliberate)* | bool | `StreamableHTTPOptions{DisableLocalhostProtection: true}` — disables the SDK's default DNS-rebinding 403 on loopback servers; needed when a page on a tunnel/LAN hostname talks to a `127.0.0.1` server. |
+**Format spec (shared by flag and frontmatter):**
 
-  `--disable-localhost-protection` deliberately has **no** env fallback (a
-  mode choice, not a secret) — the departure from the api-key pattern is
-  documented in the README.
-- **Always stateless (behavior change, user decision):** `buildHTTPHandler`
-  always passes `Stateless: true` to `NewStreamableHTTPHandler`. Rationale:
-  the app keeps no per-session state, so the SDK's session ID is issued,
-  validated, and then ignored by us — pure overhead. Consequences, all
-  documented in the README as 0.5.0 changes:
-  - `Mcp-Session-Id` is vestigial. **Verified (Builder, 2026-09-24):**
-    go-sdk v1.6.1 still *issues* the header in `initialize` responses even in
-    stateless mode (streamable.go sets it unconditionally), but ignores it on
-    all later requests — clients that store and resend it keep working.
-  - Per spec `2025-11-25`, stateless servers should receive
-    `Mcp-Protocol-Version` per request. **Builder: verify what go-sdk v1.6.1
-    does when the header is absent in stateless mode** (expected: defaults to
-    the latest supported version) and record the actual behavior in the
-    README; if it 400s, that is a spec-conformance gap for the SDK, not a
-    bug in this feature — clients conforming to the spec are unaffected.
-  - GET is 405 in stateless mode (it already required a session before); the
-    browser path remains fetch-POST based.
-- **Origin matching:** exact, case-sensitive string match. No wildcard /
-  pattern matching in v1 (YAGNI). Origins are validated at startup and
-  garbage fails fast (`net/url` parse + require non-empty scheme, `http` or
-  `https` scheme, non-empty host, no userinfo/query/fragment) — consistent
-  with the existing fail-fast flag handling. Validation runs in **all**
-  modes (a bad flag is an error even in stdio mode); only *application* of
-  CORS is HTTP-mode-only, exactly like `--api-key`.
-- **`--allowed-origins` + `--allow-all-origins` together:** startup error
-  (contradictory configuration) — fail loud, never silently pick one.
-- **CORS disabled** = neither origins nor allow-all set → no middleware
-  attached, no `Vary: Origin`, no OPTIONS change. Default: off.
-- **Middleware behavior** (`newCORSHandler`):
-  1. No `Origin` header → non-browser caller; pass through untouched, add
-     nothing.
-  2. `Origin` not allowed (not in list, and not allow-all) → pass through
-     **without** CORS headers; no status change (auth/MCP answer for itself).
-  3. `Origin` allowed → set *before* `next.ServeHTTP` so the headers ride
-     along on every downstream response, including 401s, SDK JSON, and SSE
-     streams: `Access-Control-Allow-Origin: <echoed origin>` (never `*` —
-     echo + `Vary: Origin` keeps shared caches and the credentials gotcha
-     safe) and `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`
-     (the session ID is never issued in stateless mode, so exposing it is a
-     no-op; `Last-Event-ID` is harmless until an `EventStore` exists).
-  4. Preflight `OPTIONS` (allowed origin) → add
-     `Access-Control-Allow-Methods: POST, OPTIONS` (the transport is always
-     stateless; the SDK 405s GET/DELETE),
-     `Access-Control-Allow-Headers: <echo of Access-Control-Request-Headers>`
-     (echo beats hardcoding: the MCP header set evolves; still fully
-     controlled because only allowed origins see it — set only when the
-     request carried a non-empty value), `Access-Control-Max-Age: 900`;
-     respond **204** and never call `next`.
-  5. No `Access-Control-Allow-Credentials` — there is no cookie auth (token
-     is a header).
-- **Middleware ordering (critical):** CORS is **outermost**:
-  `http.Server → CORS → bearer auth (if token) → mcp.NewStreamableHTTPHandler`.
-  - Browsers never send `Authorization` on preflight → preflight must not be
-    authenticated; outermost placement guarantees the 204.
-  - Headers set before `next.ServeHTTP` guarantee 401s from the auth wrapper
-    carry CORS (else the browser masks the 401 as a CORS error — the most
-    confusing failure mode).
-- **Stdlib `http.NewCrossOriginProtection()` is deliberately not added**
-  (Go 1.24+ is available in `go 1.25.0`): it would 403 the legitimate
-  external-page → loopback-server setup and conflicts with the allowlist;
-  the SDK's own DNS-rebinding/localhost protection (on by default) already
-  covers the public-host threat and its 403s inherit CORS headers from the
-  outer middleware.
-- **Security posture (documented in README):** this server executes local
-  scripts, so CORS is not a security boundary (it gates only which page's JS
-  *reads* responses). Default off; `--allow-all-origins` is safe only with
-  `--api-key` + TLS; explicit origin list is the production recommendation.
-- **Logging:** the startup line composes its parenthetical from enabled
-  features: `Starting HTTP server on <addr> (API key auth enabled, CORS:
-  3 origin(s))`, `(..., CORS: any origin — dev mode)`; parens omitted when
-  neither is enabled (today's line).
-- **Usage string** in `main()` gains the three new flags.
-- **Version:** `serverVersion` bumps `0.4.0` → `0.5.0` (new feature release).
+- Whitespace-separated list of tokens, each exactly `^<digits><unit>$` with unit
+  one of `s`, `m`, `h` (sub-second units are not meaningful for tool timeouts
+  and are rejected). At least one token required. Digits-only integers (no
+  decimals, no `+`/`-` signs, no bare unit). Examples: `5m`, `60s`,
+  `1h 30m 5s`. Whitespace between tokens is optional.
+- `NONE` (case-insensitive, leading/trailing whitespace trimmed) → no timeout.
+- Result of `0` (e.g. `0s`) → no timeout, identical to `NONE`.
+- Overflow guard: each term is checked for multiplication overflow
+  (`n > maxDuration/multiplier`) and the running sum for addition overflow
+  (`total > maxDuration-term`); a violating value is rejected with a clear
+  `overflows` error before any wraparound arithmetic can produce a positive
+  duration.
 
----
+**Precedence decisions (recorded):**
+
+- `--no-timeout` and `--timeout` are **mutually exclusive** (Round 2; the
+  earlier "no-timeout beats --timeout" decision is retired): passing both is a
+  startup error, mirroring the CORS `--allowed-origins` + `--allow-all-origins`
+  contradiction pattern. The `--timeout` flag visit is tracked via `flag.Visit`
+  so an explicitly empty `--timeout=` is distinguishable from the `""` default
+  and fails fast on parse (empty → error); the default 5m applies only when the
+  flag was omitted entirely.
+- Per-tool `Timeout:` **always** overrides the global, even if the global is
+  `--no-timeout`: an author who pinned `Timeout: 30s` gets 30s; authors get
+  predictable per-script behavior.
+- `Timeout:` uses **first occurrence wins** (same rule as `Description:`);
+  multiple lines are allowed, extras are silently ignored.
+- No env-var override for the global (YAGNI; flag + frontmatter cover the need).
+- When no timeout applies, the exec context is the request context *itself*
+  (client cancellation/abort still kills the script — "no timeout" means
+  "no deadline", never "uninterruptible").
 
 ## Implementation Steps
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-Housekeeping (already done by the Planner): the completed api-token-auth
-plan was archived to `plans/2026-09-03-api-token-auth.md`; this file is the
-live plan. The archive move is committed with Task 1.
+- [x] **Task 1: Duration parser + flag plumbing**
+  - **Description:** Add `parseTimeoutDuration(raw string) (time.Duration, error)`
+    in `main.go` implementing the format spec above (returns `0` for `NONE`;
+    rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI
+    flags `--timeout` (string, default `""` → `5 * time.Minute`) and `--no-timeout`
+    (bool). Resolve in `main()` before `run()` (fail-fast on parse error, like
+    CORS): `--timeout` + `--no-timeout` ⇒ mutual-exclusion error; `--no-timeout`
+    ⇒ 0; `--timeout` visited ⇒ parsed value (explicit empty ⇒ parse error);
+    else 5m. The `--timeout` visit is tracked with `flag.Visit` (pattern shared
+    with `--allow-all-origins`). The parser enforces the overflow guard above.
+    Thread the resolved `time.Duration` through `run(...)` into
+    `newToolRegistry(server, dir, globalTimeout)`
+    (new field on `toolRegistry`).
+  - **Review Criteria:** Table tests cover: `5m`, `60s`, `1h 30m 5s` (sums
+    correctly), `NONE`/`none`/` NONE `, `0s` → 0; accepts `5m 5m` (10m); rejects
+    sub-second `250ms`/`250us`/`250µs`/`1000ns`, `-5m`, `+5m`, `1.5h`, `m5`,
+    `h`, `""`, unknown units. Overflow: three ~max terms whose sum exceeds
+    `math.MaxInt64` (`876000h × 3`) and a single term whose seconds→nanoseconds
+    multiply overflows (`9223372037s`) are rejected with an `overflows` error.
+    `resolveTimeout`: `--no-timeout` + `--timeout` ⇒ mutual-exclusion error;
+    explicit empty `--timeout=` ⇒ parse error; `--no-timeout` alone ⇒ 0;
+    omitted ⇒ 5m. Startup with `--timeout bogus` exits 1 with a clear message.
+    `go vet` clean, no new deps in `go.mod`; the three existing
+    `newToolRegistry(server, dir)` call sites in main_test.go are updated to the
+    new signature in the same commit (reviewer advisory, round 1).
+- [x] **Task 2: Per-tool `Timeout:` frontmatter**
+  - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and timeout
+    extraction (first match within `scanHeaderLines`; `nil` when absent,
+    `&0` for `NONE`/`0`, `&d` when valid; invalid value → stderr warning,
+    `nil` so the global applies). Round 2: merged with `extractDescription`
+    and `extractParams` into a single-pass `extractFrontmatter(path)
+    (desc, params, timeout *time.Duration)` — one `os.Open` + scanner, first
+    `Description:`, all valid `Param:` lines, first `Timeout:`. `discoveredTool`
+    carries one `Timeout *time.Duration` (nil = undeclared, `&0` = NONE);
+    populated in `discoverTools`.
+  - **Review Criteria:** Tests assert via `extractFrontmatter`: present/absent
+    (pointer nil vs non-nil), `NONE` vs `0s` vs `30s`, value beyond line 30
+    ignored, first-of-multiple wins. The invalid-value case captures stderr via
+    a pipe (restoring `os.Stderr`) and asserts the warning names the script file
+    AND states the invalid value's reason. Hot reload of a script whose `Timeout:`
+    changed re-registers with the new value (covered by existing watch test
+    pattern).
+- [x] **Task 3: Apply resolved timeout at execution**
+  - **Description:** In `toolRegistry.replace`, handler resolves
+    `t := r.globalTimeout; if tool.Timeout != nil { t = *tool.Timeout }` and
+    passes `t` to `executeTool` (replacing the `defaultToolTimeout` argument).
+    In
+    `executeTool`, only call `context.WithTimeout(ctx, timeout)` when
+    `timeout > 0`; otherwise use `ctx` directly (cancellation preserved). Append
+    a short suffix to the registered tool description, e.g.
+    `(timeout: 30s)` / `(timeout: none)`, so the LLM knows the budget.
+  - **Review Criteria:** Registry-level test (pattern:
+    `TestRequiredParamValidationViaRegistry`): tool with `Timeout: &1s` running a
+    `sleep 5` script returns `IsError` + "timed out after 1s" within ~1–2s;
+    same script via a tool *without* `Timeout:` under `--timeout`-style global
+    of e.g. 2s gets the global; `Timeout: NONE` under a short global still
+    completes (short script). Zero/`NONE` path uses request ctx: cancelling the
+    caller ctx kills the script. Description suffix present and correct for
+    all three cases (set, none, inherited).
+- [x] **Task 4: Docs, usage text, README**
+  - **Description:** Update the `Usage:` line in `main.go` with `[--timeout <duration>] | [--no-timeout]`.
+    README: extend the Safety First bullet, the Usage section with both flags,
+    and add a frontmatter subsection documenting `Timeout: <duration>` / `NONE`
+    with the format spec, precedence rules, and a worked example script header.
+  - **Review Criteria:** README examples copy-pasteable; every documented
+    behavior matches implemented behavior (precedence, `NONE` case-insensitivity,
+    first-match rule, warning-on-invalid); usage text and `flag` help strings
+    consistent with README.
 
-- [x] **Task 1: CORS configuration (`corsConfig` + `resolveCORS`)**
-  - **Description:** Add to `main.go`:
-    ```go
-    const (
-        allowedOriginsEnvVar = "MCP_COMMANDS_ALLOWED_ORIGINS"
-        allowAllOriginsEnvVar = "MCP_COMMANDS_ALLOW_ALL_ORIGINS"
-    )
-
-    type corsConfig struct {
-        origins                  []string // exact origin allowlist
-        allowAll                 bool     // echo any Origin (dev)
-        disableLocalhostProtection bool   // StreamableHTTPOptions.DisableLocalhostProtection
-    }
-
-    // enabled reports whether any CORS behavior is requested
-    // (review round: flipped meaning vs the original `disabled` to remove
-    // negations at call sites).
-    func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
-
-    // originSet returns the allowlist as a map for membership checks.
-    func (c corsConfig) originSet() map[string]bool { ... }
-
-    // summary is the startup-log fragment for enabled CORS.
-    func (c corsConfig) summary() string {
-        if c.allowAll { return "CORS: any origin — dev mode" }
-        return fmt.Sprintf("CORS: %d origin(s)", len(c.origins))
-    }
-
-    // resolveCORS resolves flags over env and validates origins.
-    // Returns an error for malformed origins or a contradictory
-    // --allowed-origins + --allow-all-origins combination.
-    // allowAllSet (from flag.Visit in main) distinguishes an explicit
-    // --allow-all-origins[=false] from a plain default; the env var is
-    // consulted only when the flag was not set (review round: fixes the
-    // explicit-false-falls-through-to-env bug Copilot flagged).
-    func resolveCORS(allowedOriginsFlag string, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) { ... }
-    ```
-    - Origins: split on comma, `strings.TrimSpace` each, drop empties.
-    - Bool env: `parseBoolEnv` helper — `""` → false; `1`/`true`/`yes`
-      (case-insensitive) → true; anything else → error (fail loud, no
-      silent misparse).
-    - Origin validation: `url.Parse`, reject parse errors, require scheme
-      `http`/`https`, non-empty `u.Hostname()`, no `u.User`/`u.RawQuery`/`u.Fragment`
-      (review round: `Hostname()` rejects port-only authorities like
-      `https://:8443`, which `u.Host` accepted).
-  - **Review Criteria:**
-    - Flag non-empty → flag wins, env ignored; env only → env used; neither
-      → empty.
-    - `"https://a.example, https://b.example"` (spaces) → two clean origins.
-    - `--allowed-origins x --allow-all-origins` → error.
-    - `notaurl`, `https://`, `ftp://x.example`, `https://user@x.example`,
-      `https://x.example/path` → startup errors; `https://x.example:8443`
-      → accepted.
-    - Bool env `"TRUE"`, `"0"`, `"yes"` handled; `"banana"` → error.
-
-- [x] **Task 2: CORS middleware (`newCORSHandler`)**
-  - **Description:** Add to `main.go`:
-    ```go
-    const (
-        corsAllowMaxAge    = "900" // 15 min; browsers cap at 7200s
-        corsExposedHeaders = "Mcp-Session-Id, Last-Event-ID"
-        // The transport is always stateless; the SDK 405s GET/DELETE.
-        corsAllowedMethods = "POST, OPTIONS"
-    )
-
-    // newCORSHandler allows cross-origin browser requests from allowed
-    // origins. Requests without an Origin header, and origins not on the
-    // allowlist (and not covered by allowAll), pass through with no CORS
-    // headers — the browser then blocks the response itself.
-    func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
-        allowed := cfg.originSet()
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            origin := r.Header.Get("Origin")
-            if origin == "" || (!cfg.allowAll && !allowed[origin]) {
-                next.ServeHTTP(w, r)
-                return
-            }
-            h := w.Header()
-            h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
-            h.Add("Vary", "Origin")
-            h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
-            if r.Method == http.MethodOptions { // preflight
-                h.Set("Access-Control-Allow-Methods", corsAllowedMethods)
-                if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
-                    h.Set("Access-Control-Allow-Headers", achr)
-                }
-                h.Set("Access-Control-Max-Age", corsAllowMaxAge)
-                w.WriteHeader(http.StatusNoContent)
-                return // never call next for preflight
-            }
-            next.ServeHTTP(w, r)
-        })
-    }
-    ```
-  - **Review Criteria:**
-    - No `Origin` → zero header changes, request forwarded.
-    - Disallowed `Origin` → no CORS headers, forwarded (status unchanged).
-    - Allowed `Origin` → ACAO echoes it, `Vary` includes `Origin`, expose
-      headers set, on every downstream response including 401s.
-    - Preflight → 204, `Access-Control-Allow-Methods: POST, OPTIONS`,
-      echoed request headers, max-age 900, empty body, `next` not invoked.
-
-- [x] **Task 3: Wire into `main()` / `run()` / `buildHTTPHandler`**
-  - **Description:**
-    - `buildHTTPHandler(server *mcp.Server, token string, cors corsConfig)` —
-      new `cors` parameter (breaks the two existing test call sites; updated
-      in Task 4):
-      ```go
-      func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
-          h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-              return server
-          }, &mcp.StreamableHTTPOptions{
-              // Always stateless (user decision): the app keeps no
-              // per-session state, so protocol sessions are vestigial.
-              Stateless:                  true,
-              DisableLocalhostProtection: cors.disableLocalhostProtection,
-          })
-          if token != "" {
-              h = newBearerAuthHandler(h, token)
-          }
-          if cors.enabled() {
-              h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
-          }
-          return h
-      }
-      ```
-      (Builder: confirm the two `StreamableHTTPOptions` field names exist in
-      go-sdk v1.6.1 — the research verified them; compile is the final proof.)
-    - `main()`: add the three flags (`--allowed-origins`,
-      `--allow-all-origins`, `--disable-localhost-protection`); update the
-      usage string; call
-      `resolveCORS(...)` and exit on error via the existing
-      `fmt.Fprintf(os.Stderr, "Error: %v\n")` + `os.Exit(1)` pattern
-      (matching the `--dir`/`--scripts` validation); pass the resolved
-      `corsConfig` into `run` (validation therefore runs in all modes,
-      before `run`).
-    - `run(ctx, dir, scriptsDir string, watch bool, host string, port int,
-      apiKey string, cors corsConfig)`: consumes the passed `corsConfig`
-      (already resolved/validated in `main`) — no re-resolution here;
-      `buildHTTPHandler(server, apiKey, cors)` in the HTTP branch; startup
-      log composes its parenthetical from `apiKey != ""` and
-      `cors.enabled()` (see Requirements).
-  - **Review Criteria:**
-    - No flags → server starts, zero CORS behavior, log line identical to
-      today.
-    - `--port` + `--allowed-origins` → log mentions origin count;
-      `--allow-all-origins` → "any origin — dev mode".
-    - stdio mode: byte-identical behavior, flags ignored (like api-key).
-    - `Stateless: true` and `DisableLocalhostProtection` take effect only
-      via `StreamableHTTPOptions`; no other code paths touched.
-    - A re-sent `Mcp-Session-Id` (issued or made-up) keeps being served
-      (stateless ignores it) — no 401/404.
-    - **Verified (Builder):** a stateless request lacking
-      `Mcp-Protocol-Version` defaults to `2025-03-26` (the oldest supported
-      version, streamable.go:391–393), not the latest; it never 400s on a
-      missing header. Recorded in README per Requirements.
-
-- [x] **Task 4: Tests**
-  - **Description:** Add to `main_test.go` (table-driven where noted, matching
-    existing style; the two existing `buildHTTPHandler(server, ...)` call
-    sites at the end of the file gain a zero `corsConfig` argument):
-    1. `TestResolveCORS` — table: flag-only, env-only, both (flag wins),
-       neither; origins comma+space parsing; allow-all env
-       (set/clear `t.Setenv(allowAllOriginsEnvVar, ...)`); contradictory
-       flags → error; malformed origins → error; bool env `"banana"` →
-       error.
-    2. `TestCORSHandlerPreflight` — asserts 204, ACAO echo,
-       `Access-Control-Allow-Methods: POST, OPTIONS`, `Vary: Origin`,
-       `Access-Control-Allow-Headers` echo (and absent when the request
-       sent none), `Access-Control-Max-Age: 900`, empty body, and a
-       sentinel `next` proves the request was **not** forwarded.
-    3. `TestCORSHandlerNonPreflight` — table: no Origin / disallowed Origin /
-       allowed Origin / allowAll mode → assert header presence/absence and
-       pass-through to a recorder `next` on a normal (non-204) response.
-    4. `TestBuildHTTPHandlerPreflightUnauthenticated` — serve
-       `buildHTTPHandler(server, "s3cret", cors)` via `httptest.NewServer`;
-       `OPTIONS` with an allowed `Origin` **and no Authorization header** →
-       204 with CORS headers, not 401 (ordering guarantee).
-    5. `TestBuildHTTPHandler401CarriesCORS` — POST with a bad token +
-       allowed `Origin` → 401 **with** `Access-Control-Allow-Origin` and
-       `Access-Control-Expose-Headers: Mcp-Session-Id, Last-Event-ID`.
-    6. `TestBuildHTTPHandlerInitializeCORS` — full `initialize` round-trip
-       (mirror `TestBuildHTTPHandlerEndToEnd`) with an allowed `Origin` →
-       non-401, CORS headers present; then a follow-up request re-sending the
-       session ID (or a made-up one) is still served — the always-stateless
-       guarantee (verified: v1.6.1 *does* issue a vestigial
-       `Mcp-Session-Id` header, so the test asserts it is *ignored*, not
-       absent).
-    7. `TestBuildHTTPHandlerCORSDisabled` — zero `corsConfig`, request
-       without Origin → no CORS headers at all (regression guard for the
-       default-off promise).
-  - **Review Criteria:**
-    - All seven tests present; `go test ./...` green; no sleeps/polling.
-    - The pre-existing tests are unmodified except the two `buildHTTPHandler`
-      call sites gaining the zero-value `corsConfig` argument.
-
-- [x] **Task 5: Documentation & release**
-  - **Description:**
-    - `README.md`: new `#### Browser Clients (CORS)` subsection after
-      `#### Authentication (optional)`, under `### Starting the Server`
-      (mirroring the auth subsection shape: env vars + flag precedence +
-      client example), covering: CORS is off by default and opt-in;
-      `--allowed-origins` (comma-separated, exact match, production
-      recommendation); `--allow-all-origins` is a dev convenience — safe
-      only with `--api-key` + TLS, because the server executes local scripts
-      CORS gates only response *readability*, not reachability;
-      **0.5.0 behavior change — the transport is always stateless:** each
-      request stands on its own; go-sdk v1.6.1 still issues a vestigial
-      `Mcp-Session-Id` header on `initialize` but ignores it on later
-      requests, so clients that stored and send a session ID keep working;
-      the SDK defaults a missing `Mcp-Protocol-Version` header to 2025-03-26
-      (oldest supported); this is also why raw `EventSource` remains unusable
-      in any mode — use a fetch-based client such as the MCP TS SDK; stateless
-      clients per spec send `Mcp-Protocol-Version` per request, and fetch
-      clients must send `Accept: application/json, text/event-stream` on POST
-      (the SDK 400s otherwise; the TS SDK does both automatically);
-      `--disable-localhost-protection` for dev setups where the page is
-      served from a tunnel/LAN hostname and the server binds 127.0.0.1, with
-      the DNS-rebinding trade-off warning; the flag intentionally has no env
-      fallback; `MCPGODEBUG=enableoriginverification=1` (go-sdk v1.6.1)
-      makes the SDK 403 *all* cross-origin requests internally and conflicts
-      with this feature — do not set it to "fix" CORS failures; a short ops
-      note that a TLS-terminating proxy (Caddy/nginx) is required for
-      browser production use and is the alternative way to add CORS.
-    - `serverVersion` → `"0.5.0"` (single location).
-  - **Review Criteria:**
-    - README examples copy-paste runnable; flag/env names match the code
-      exactly.
-    - Version string updated in exactly one place.
-
-- [x] **Task 6: Commits**
-  - **Description:** Conventional commits, one per task unit; `PLAN.md` is
-    included in each related commit (per AGENTS.md Committer convention).
-    The first commit also carries the `plans/2026-09-03-api-token-auth.md`
-    archive move:
-    1. `feat: add CORS and streamable-HTTP mode configuration flags`
-       (Task 1 + archive move)
-    2. `feat: CORS middleware for browser clients on the HTTP transport`
-       (Task 2)
-    3. `feat: run the streamable HTTP transport stateless and wire in CORS`
-       (Task 3)
-    4. `test: cover CORS middleware, preflight ordering, and origin resolution`
-       (Task 4)
-    5. `docs: document browser client (CORS) support; bump version to 0.5.0`
-       (Task 5)
-    6. `fix: report contradictory CORS flags before origin validation; annotate
-       client example` (quality-pass follow-up: contradiction error no longer
-       masked by a bad origin value; README TS SDK URL annotated)
-    7. `fix: address PR review comments: port-only origins, explicit-bool flag
-       precedence, http method constants, enabled() naming, usage/README
-       wording` (Copilot + MKuckert review round)
-  - **Review Criteria:** `git log` matches; no secrets in any commit (tests
-    use placeholder tokens only).
-
----
+- [x] **Task 5: Commit & branch hygiene (cross-cutting)**
+  - **Description:** Work lands on branch `feat/timeout-handling` off `main`.
+    One conventional commit per task in order: `feat: parse timeout duration
+    strings` (includes PLAN.md), `feat: --timeout and --no-timeout flags`,
+    `feat: per-tool Timeout: frontmatter`, `feat: apply resolved tool timeouts`,
+    `docs: timeout configuration`. `go build ./...`, `go vet ./...`,
+    `go test ./...` green at every commit; final manual smoke: stdio run with
+    a `sleep 10` script under `Timeout: 1s` and under `--no-timeout`.
+  - **Review Criteria:** `git log main..feat/timeout-handling` shows exactly the
+    five commits, all building/testing green; PR ready to open.
+    Reviewer advisory (round 1): the `newToolRegistry` signature change breaks
+    three existing call sites in main_test.go, and the exact-equality assertion
+    `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges`
+    (line ~352) must be updated for the suffix — update them in the same commit
+    as Task 3 so every commit builds green.
 
 ## Edge Case & Safety Checklist
 
-- **CORS disabled (default):** no middleware, no `Vary: Origin`, no OPTIONS
-  change — existing curl/desktop clients see byte-identical CORS behavior.
-  Deliberate opt-in; Task 4, test 7 (`TestBuildHTTPHandlerCORSDisabled`)
-  guards it.
-- **Always stateless (0.5.0 behavior change, verified):** the SDK v1.6.1
-  still issues a `Mcp-Session-Id` header on `initialize` even in stateless
-  mode, but ignores it on all later requests. Existing clients that store
-  it and send it on later requests keep working — nothing breaks, the
-  header is simply vestigial. Documented as a 0.5.0 change in the README.
-  (GET was already unusable without a session; in stateless mode it is a
-  clean 405.)
-- **Stateless + missing `Mcp-Protocol-Version` header (verified):** the SDK
-  v1.6.1 defaults to `2025-03-26` (the oldest supported version) and never
-  400s on a missing header; recorded in the README. Spec-conforming clients
-  send the header per request.
-- **Preflight without `Origin`:** treated as non-browser, passed to `next`
-  (SDK answers 400/405-ish) — mirrors curl behavior; no header injection.
-- **`Origin: null`** (sandboxed iframes, `file://` pages): matched like any
-  other string — echoed under `--allow-all-origins` only, never via the
-  exact list. Do not special-case it.
-- **Empty `Access-Control-Request-Headers` on preflight:** the
-  `Allow-Headers` response header is simply omitted (never set empty).
-- **Duplicate `Vary` values:** `h.Add("Vary", "Origin")` appends a second
-  header line if downstream code also sets `Vary`; both lines are legal and
-  clients combine them. Acceptable.
-- **`--allow-all-origins` without `--api-key` on a non-loopback host:** any
-  site on the internet can both invoke tools *and read* responses; the README
-  requires the explicit origin list for production. The flag is accepted
-  (operator choice) — README warning, not a startup error, matching the
-  app's existing open-by-default posture when no token is set.
-- **DNS rebinding / localhost protection:** on by default (`go-sdk`
-  v1.6.1, spec `2025-11-25`); its 403 responses carry CORS headers because
-  the middleware sets headers before `next`. `--disable-localhost-protection`
-  is the escape hatch, documented with the trade-off.
-- **`MCPGODEBUG=enableoriginverification=1` (v1.6.1 compat knob):** the SDK
-  403s cross-origin requests *inside* the handler where the CORS middleware
-  cannot recover — documented in the README as a non-fix.
-- **Credentials:** `Access-Control-Allow-Credentials` is never emitted; the
-  only auth mechanism is the `Authorization` header, which is not a
-  credentialed request under the CORS spec.
-- **Origin wildcard patterns (`https://*.example.com`):** out of scope for
-  v1; exact list covers the realistic cases. Follow-up candidate.
-- **SSE streams:** headers are written once at stream start (before the
-  first SSE byte), which is exactly when the browser evaluates CORS — no
-  `Flusher` special-casing needed.
-- **Stdio mode:** zero behavior change; the CORS flags are parsed and
-  validated (fail-fast) but never applied.
-- **TLS:** the server is HTTP-only; browser production use requires a
-  TLS-terminating proxy (documented).
-
----
+- `--no-timeout` and `--timeout` both passed → startup error, mutually exclusive (documented).
+- Explicitly empty `--timeout=` → startup error (parse of empty fails; `flag.Visit` distinguishes it from omitted).
+- `--timeout 0s` → valid, means no timeout (documented; consistent with `NONE`).
+- Sub-second units (`ms`/`us`/`ns`) → rejected (not meaningful for tool timeouts).
+- Duration sum/multiply overflow → rejected with an `overflows` error before wraparound can yield a positive duration.
+- Negative/decimal/malformed `--timeout` → exit 1 at startup, server never starts.
+- Invalid per-tool `Timeout:` → visible stderr warning + global fallback; never blocks discovery/hot-reload.
+- `Timeout:` on line > 30 → ignored, tool uses global.
+- No deadline (`Timeout: NONE`/`0s`, or `--no-timeout`/`--timeout 0s`) → no timeout; client abort still kills the script (request ctx).
+- Zero timeout ⇒ `context.WithTimeout(ctx, 0)` is NOT used — code path picks raw `ctx` (equivalent, but explicit).
+- Timeout expiry mid-output → partial stdout/stderr returned with the timeout message (existing behavior, unchanged).
+- Hot reload edits only `Timeout:` → tool re-registered with new value, no restart.
+- Symlinked scripts: `Timeout:` read from resolved target (same as `Description:` via `resolvedPath`).
+- Output cap (1 MB) unchanged and independent of timeout.
 
 ## Review Log (Plan Review)
 
-- **Round 1:** **APPROVED**
-
-  Every plan claim was verified against `main.go`, `main_test.go`, and the
-  go-sdk v1.6.1 source: the current `buildHTTPHandler(server, token)`
-  signature and its two test call sites, the `run(...)` signature, the
-  `apiKey`-based startup-log if/else, `reject()` (never clears pre-set
-  headers, so CORS headers ride along on 401s), `serverVersion` at a single
-  `var` location, and the existence of
-  `StreamableHTTPOptions{Stateless, DisableLocalhostProtection}` in v1.6.1
-  (a non-nil zero-value struct is behaviorally identical to today's `nil`).
-  The SDK sets no CORS headers and no `Vary` today, so the default-off
-  promise holds. Security design sound: echo-origin + `Vary: Origin` +
-  never `*` is cache- and credentials-safe; echoing
-  `Access-Control-Request-Headers` is acceptable because only allowed
-  origins see the response; skipping stdlib
-  `http.NewCrossOriginProtection()` is defensible and arguably required —
-  its default-deny policy would 403 the exact external-page → loopback
-  setups the feature exists to serve, while the SDK's default-on
-  DNS-rebinding protection remains the real boundary (its 403s inherit CORS
-  headers from the outer middleware) and the
-  `MCPGODEBUG=enableoriginverification=1` conflict is documented.
-  Completeness vs the research report: config table, all five middleware
-  rules, ordering, security notes, and all eight research tests are covered
-  (research test 8 folded into Task 4's preamble; tests 4–6 merged into
-  plan tests 3/7; the `corsConfig` struct refines the research's four
-  scalar parameters). House style matches
-  `plans/2026-09-03-api-token-auth.md`.
-
-  **Advisory (non-blocking), all folded into the plan text:**
-  1. Edge Case checklist said "Task 7 regression test" — corrected to Task
-     4, test 7 (`TestBuildHTTPHandlerCORSDisabled`).
-  2. Task 3 implied double resolution of CORS (in `main()` *and* `run()`) —
-     now explicit: `main()` resolves/validates, `run()` only consumes.
-  3. Task 5's README anchor "HTTP Server Mode" is not a section heading —
-     now pinned to `#### Browser Clients (CORS)` after
-     `#### Authentication (optional)` under `### Starting the Server`.
-  4. README bullet list gains the research's `Accept:
-     application/json, text/event-stream` note for fetch-based clients.
-  5. Edge Case checklist gains an `Origin: null` note (allow-all only,
-     never via the exact list; do not special-case).
-  No issue link applies (no GitHub issue for this feature); the prior
-  plan's "Resolves:" line has no analog — accepted as-is.
-- **Round 2:** **APPROVED (revised per user decision)**
-
-  User decision 2026-09-24: **drop the `--stateless` flag and hardcode
-  `Stateless: true`** in `buildHTTPHandler` (the app keeps no per-session
-  state — the registry is process-global — so protocol sessions are
-  vestigial; making it the only mode is a deliberate 0.5.0 behavior change,
-  documented). `--disable-localhost-protection` stays as designed (opt-out;
-  the DNS-rebinding protection remains the one real security boundary for a
-  script-executing local server and must not be off by default). Plan text
-  updated consistently: Objective, Requirements (config table, always-
-  stateless decision with `Mcp-Session-Id` and `Mcp-Protocol-Version`
-  consequences + Builder verification item), middleware rule 4 (constant
-  `POST, OPTIONS`), Tasks 1–6 (struct, sketch, flags, usage string, test 2
-  and 6, README bullets, commit 3 subject), and the Edge Case checklist
-  (always-stateless bullet + protocol-version bullet; the `--stateless`
-  bullet replaced). The always-stateless choice is defensible: it loses no
-  app functionality, matches the spec's stateless-server expectations, and
-  simplifies the CORS surface; the client-visible delta (no session ID
-  issued) is called out for the README. No further correction required.
-- **Round 3:** N/A
+- **Round 1:** Verified every claim against the current code: `defaultToolTimeout = 5 * time.Minute` (~line 30), `replace` hardcoding `defaultToolTimeout` (~line 470), `executeTool`'s unconditional `context.WithTimeout(ctx, timeout)` (~line 594), the `resolveCORS` fail-fast pattern in `main()`, the `extractDescription`/`extractParams` mirror targets, and the registry/watch test patterns (`TestRequiredParamValidationViaRegistry`, `TestWatchToolsDetectsContentChanges`). Precedence rules are self-consistent (per-tool > global; `--no-timeout` > `--timeout`; first-match-wins matches `Description:` semantics), error strategy follows fail-loud-fail-fast, format spec is stdlib-achievable, edge checklist covers expiry-mid-output, hot-reload, symlinks, and cancellation-with-no-deadline. Advisory notes (non-blocking): (1) three existing `newToolRegistry(server, dir)` call sites in main_test.go plus the exact-equality assertion `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges` (line 352) will need updates for the new constructor param and the registered-description suffix — Task 5's all-green-at-every-commit gate catches this; (2) define the suffix for empty frontmatter descriptions explicitly (e.g. description becomes `(timeout: 30s)` alone). Status: Approved
 
 ## Final Status (Code Review)
 
-- **Round 1:** (pending)
-- **Round 2:** N/A
-- **Round 3:** N/A
+- **Round 1:** Verified against the diff and by execution: all 5 commits (65ff0d2…66d1493) build/vet/test green individually; parser, precedence (`--no-timeout` > `--timeout`; per-tool > global), first-match-wins, >30-line ignore, warning-on-invalid, description suffixes (incl. empty description → suffix alone, advisory #2), zero≡NONE raw-ctx path, call-site updates (advisory #1), README/usage consistency, and the full edge checklist all confirmed — tests include registry-level expiry, inheritance, NONE-under-short-global, and cancellation-kill. Only deviation: two plan-phase docs commits predate the 5 implementation commits (7 total on branch), which is acceptable and not a defect. Status: Approved
+- **Round 2: PR feedback (Copilot + principal 2026-09-26)** — all 8 items addressed in 2347f08…8e44d82 (build/vet/test green at every commit): (1) units restricted to `s`/`m`/`h` in the shared parser, doc comments, error messages, README, and tests (250ms/us/µs/1000ns now rejected) — 2347f08; (2) overflow guard: multiplication (`n > maxDuration/multiplier`) and addition (`total > maxDuration-term`) checked before each term, `overflows` error; tests cover 3×876000h sum and single-term multiply overflow — 2347f08; (3) `--no-timeout` + `--timeout` is now a startup error (mutually exclusive, not "no-timeout wins") and an explicitly empty `--timeout=` fails fast via `flag.Visit`-tracked `timeoutSet` in `resolveTimeout`; the retired "no-timeout beats --timeout" decision is rewritten in Requirements, the edge checklist, and README — 5af1535; (4) `discoveredTool.TimeoutSet`/`Timeout` replaced by a single `Timeout *time.Duration` (nil = undeclared, &0 = NONE) in the `replace` handler, description suffix, and tests — 85428d3; (5) the no-op `cancel = func(){}` path removed from `executeTool` (`execCtx := ctx`; cancel created and deferred only in the `timeout > 0` branch) — 85428d3; (6) `extractDescription`/`extractParams`/`extractTimeout` merged into a single-pass `extractFrontmatter` (one `os.Open` + scanner) with all tests asserting via the merged function — 8e44d82; (7) the invalid-timeout test captures stderr via a pipe (restoring `os.Stderr`) and asserts the warning contains both the script filename and the invalid-value reason — 8e44d82; (8) README frontmatter section now documents `Param:` (syntax + example in the worked script), and README/PLAN reflect s/m/h-only units, flag mutual exclusion, and explicit-empty failing — bbac358. Verified against `git diff c3c0a13..HEAD` and by execution (build/vet/gofmt/test green at tip): (1) `timeoutUnits` is s/m/h-only in the shared parser, error text, and docs — 250ms/us/µs/1000ns rejected in tests; (2) overflow guards precede each multiply (`n > maxDuration/multiplier`) and add (`total > maxDuration-term`), wrap-to-positive impossible, sum- and single-term-overflow tests assert `overflows`; (3) `resolveTimeout` errors on `--timeout`+`--no-timeout`, explicit-empty `--timeout=` fails via `flag.Visit`-tracked `timeoutSet`, retired "no-timeout beats" decision consistently rewritten in Requirements, checklist, README, and flag help; (4) `Timeout *time.Duration` everywhere (nil/`&0`), no `TimeoutSet` residue; (5) `executeTool` has no no-op cancel — cancel created+deferred only in the `timeout > 0` branch, `execCtx := ctx` otherwise; (6) single-pass `extractFrontmatter` (one open+scan, first Description/Timeout, all valid Params, 30-line window preserved), old extractors deleted, all tests (incl. `TestExtractParams`) route through it; (7) invalid-timeout test captures stderr and asserts filename AND reason; (8) README documents `Param:`, s/m/h, mutual exclusion, and explicit-empty. Merged scanner semantics behavior-identical to the old three passes (the pre-existing scanner.Err discard in extractDescription was the only nuance, unobservable for text files). PLAN text matches the code. All task boxes already ticked in round 1 and remain satisfied. Status: Approved
