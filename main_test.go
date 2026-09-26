@@ -248,7 +248,7 @@ func TestWatchTools(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "")
+	registry := newToolRegistry(server, "", defaultToolTimeout)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -313,7 +313,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "")
+	registry := newToolRegistry(server, "", defaultToolTimeout)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -366,6 +366,93 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
+func TestParseTimeoutDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "minutes", raw: "5m", want: 5 * time.Minute},
+		{name: "seconds", raw: "60s", want: 60 * time.Second},
+		{name: "compound", raw: "1h 30m 5s", want: time.Hour + 30*time.Minute + 5*time.Second},
+		{name: "compound_no_spaces", raw: "1h30m5s", want: time.Hour + 30*time.Minute + 5*time.Second},
+		{name: "micro_us", raw: "250us", want: 250 * time.Microsecond},
+		{name: "micro_µs", raw: "250µs", want: 250 * time.Microsecond},
+		{name: "nanos", raw: "1000ns", want: time.Microsecond},
+		{name: "duplicates_sum", raw: "5m 5m", want: 10 * time.Minute},
+		{name: "none_upper", raw: "NONE", want: 0},
+		{name: "none_lower", raw: "none", want: 0},
+		{name: "none_padded", raw: "  NONE ", want: 0},
+		{name: "zero_seconds", raw: "0s", want: 0},
+		{name: "zero_compound", raw: "0m 0s", want: 0},
+		{name: "negative_rejected", raw: "-5m", wantErr: true},
+		{name: "plus_rejected", raw: "+5m", wantErr: true},
+		{name: "decimal_rejected", raw: "1.5h", wantErr: true},
+		{name: "bare_unit_rejected", raw: "m5", wantErr: true},
+		{name: "digits_only_rejected", raw: "5", wantErr: true},
+		{name: "bare_unit_alone_rejected", raw: "h", wantErr: true},
+		{name: "empty_rejected", raw: "", wantErr: true},
+		{name: "whitespace_only_rejected", raw: "   ", wantErr: true},
+		{name: "unknown_unit_rejected", raw: "5x", wantErr: true},
+		{name: "compound_with_bad_token_rejected", raw: "5m bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTimeoutDuration(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseTimeoutDuration(%q) = %v, want error", tt.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTimeoutDuration(%q) unexpected error: %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseTimeoutDuration(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeoutFlag string
+		noTimeout   bool
+		want        time.Duration
+		wantErr     bool
+	}{
+		{name: "default_when_unset", timeoutFlag: "", want: defaultToolTimeout},
+		{name: "flag_parsed", timeoutFlag: "5s", want: 5 * time.Second},
+		{name: "flag_none", timeoutFlag: "NONE", want: 0},
+		{name: "no_timeout_beats_flag", timeoutFlag: "5s", noTimeout: true, want: 0},
+		{name: "no_timeout_alone", noTimeout: true, want: 0},
+		{name: "invalid_flag_errors", timeoutFlag: "bogus", wantErr: true},
+		{name: "no_timeout_wins_over_invalid_flag", timeoutFlag: "bogus", noTimeout: true, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTimeout(tt.timeoutFlag, tt.noTimeout)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolveTimeout(%q, %v) = %v, want error", tt.timeoutFlag, tt.noTimeout, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTimeout(%q, %v) unexpected error: %v", tt.timeoutFlag, tt.noTimeout, err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveTimeout(%q, %v) = %v, want %v", tt.timeoutFlag, tt.noTimeout, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1613,7 +1700,7 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir)
+	registry := newToolRegistry(server, tmpDir, defaultToolTimeout)
 
 	registry.replace([]discoveredTool{
 		{

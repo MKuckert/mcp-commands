@@ -62,7 +62,7 @@ are equivalent (zero duration = no deadline).
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Duration parser + flag plumbing**
+- [/] **Task 1: Duration parser + flag plumbing**
   - **Description:** Add `parseTimeoutDuration(raw string) (time.Duration, error)`
     in `main.go` implementing the format spec above (returns `0` for `NONE`;
     rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI

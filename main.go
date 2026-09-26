@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,7 @@ const (
 	scanHeaderLines       = 30
 	scanDescriptionPrefix = "Description:"
 	scanParamPrefix       = "Param:"
+	scanTimeoutPrefix     = "Timeout:"
 	watchToolsInterval    = 2 * time.Second
 	watchDebounceDelay    = 100 * time.Millisecond
 	serverName            = "mcp-commands"
@@ -59,6 +61,8 @@ type discoveredTool struct {
 	Path        string
 	Description string
 	Params      []paramSpec
+	Timeout     time.Duration // valid per-tool Timeout: value
+	TimeoutSet  bool          // true when a valid Timeout: was declared
 }
 
 // discoverTools scans the given directory for executable files and symlinks
@@ -140,6 +144,88 @@ func extractDescription(filePath string) string {
 	}
 
 	return ""
+}
+
+// timeoutUnits maps the allowed duration units to their values. Two-letter
+// units are tried before one-letter units when tokenizing, so "1h30m5s" and
+// "1h 30m 5s" both parse.
+var timeoutUnits = map[string]time.Duration{
+	"ns": time.Nanosecond,
+	"us": time.Microsecond, "µs": time.Microsecond,
+	"ms": time.Millisecond,
+	"s":  time.Second,
+	"m":  time.Minute,
+	"h":  time.Hour,
+}
+
+// parseTimeoutDuration parses a formatted timeout duration string: a list of
+// <digits><unit> tokens (units ns, us, µs, ms, s, m, h; e.g. "5m", "60s",
+// "1h 30m 5s", "1h30m5s"); whitespace between tokens is optional. Decimals,
+// signs, and bare units are rejected. The literal NONE (case-insensitive,
+// surrounding whitespace trimmed) and a result of 0 both mean "no timeout"
+// and yield 0.
+func parseTimeoutDuration(raw string) (time.Duration, error) {
+	if strings.EqualFold(strings.TrimSpace(raw), "NONE") {
+		return 0, nil
+	}
+	var total time.Duration
+	seen := false
+	for rest := raw; len(rest) > 0; {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" {
+			break
+		}
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		if i == 0 {
+			return 0, fmt.Errorf("invalid timeout %q: expected <digits><unit> (units ns, us, µs, ms, s, m, h) or NONE", rest)
+		}
+		multiplier, after, ok := matchTimeoutUnit(rest[i:])
+		if !ok {
+			return 0, fmt.Errorf("invalid timeout unit %q: allowed units are ns, us, µs, ms, s, m, h", rest[i:])
+		}
+		n, err := strconv.ParseUint(rest[:i], 10, 63)
+		if err != nil {
+			return 0, fmt.Errorf("invalid timeout amount %q: %v", rest[:i], err)
+		}
+		total += time.Duration(n) * multiplier
+		rest = after
+		seen = true
+	}
+	if !seen {
+		return 0, fmt.Errorf("timeout duration %q is empty, expected <digits><unit> (units ns, us, µs, ms, s, m, h) or NONE", raw)
+	}
+	if total < 0 { // overflow wraparound
+		return 0, fmt.Errorf("timeout duration %q overflows", raw)
+	}
+	return total, nil
+}
+
+// matchTimeoutUnit matches a unit at the start of s, longest first (µs is
+// multibyte, so matching is prefix-based, not byte-offset based), and
+// returns its multiplier plus the remainder of the string.
+func matchTimeoutUnit(s string) (time.Duration, string, bool) {
+	for _, unit := range []string{"ns", "us", "µs", "ms", "s", "m", "h"} {
+		if strings.HasPrefix(s, unit) {
+			return timeoutUnits[unit], s[len(unit):], true
+		}
+	}
+	return 0, "", false
+}
+
+// resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
+// before the server starts. --no-timeout beats --timeout; an unset --timeout
+// yields defaultToolTimeout.
+func resolveTimeout(timeoutFlag string, noTimeout bool) (time.Duration, error) {
+	if noTimeout {
+		return 0, nil
+	}
+	if timeoutFlag != "" {
+		return parseTimeoutDuration(timeoutFlag)
+	}
+	return defaultToolTimeout, nil
 }
 
 // extractParams reads the first scanHeaderLines of a file and parses
@@ -435,15 +521,16 @@ func combineToolOutput(stdout, stderr []byte) string {
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing
 // tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
-	server      *mcp.Server
-	dirAbs      string
-	mu          sync.Mutex
-	names       []string
-	lastHandler mcp.ToolHandler
+	server        *mcp.Server
+	dirAbs        string
+	globalTimeout time.Duration // applied to tools without a per-tool Timeout:
+	mu            sync.Mutex
+	names         []string
+	lastHandler   mcp.ToolHandler
 }
 
-func newToolRegistry(server *mcp.Server, dir string) *toolRegistry {
-	return &toolRegistry{server: server, dirAbs: dir}
+func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration) *toolRegistry {
+	return &toolRegistry{server: server, dirAbs: dir, globalTimeout: globalTimeout}
 }
 
 // replace unregisters all currently tracked tools and registers a new set of tools.
@@ -854,6 +941,8 @@ func main() {
 	allowAllOriginsFlag := flag.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
 	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
+	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
+	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (beats --timeout)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -880,13 +969,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors); err != nil {
+	// Resolved and validated here (all modes, fail-fast); run only consumes it.
+	timeout, err := resolveTimeout(*timeoutFlag, *noTimeoutFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: --timeout: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -922,7 +1018,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs)
+	registry := newToolRegistry(server, dirAbs, timeout)
 	registry.replace(tools)
 
 	if watch {
