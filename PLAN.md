@@ -62,7 +62,7 @@ are equivalent (zero duration = no deadline).
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [/] **Task 1: Duration parser + flag plumbing**
+- [x] **Task 1: Duration parser + flag plumbing**
   - **Description:** Add `parseTimeoutDuration(raw string) (time.Duration, error)`
     in `main.go` implementing the format spec above (returns `0` for `NONE`;
     rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI
@@ -78,7 +78,7 @@ are equivalent (zero duration = no deadline).
     clean, no new deps in `go.mod`; the three existing `newToolRegistry(server, dir)`
     call sites in main_test.go are updated to the new signature in the same commit
     (reviewer advisory, round 1).
-- [/] **Task 2: Per-tool `Timeout:` frontmatter**
+- [x] **Task 2: Per-tool `Timeout:` frontmatter**
   - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and
     `extractTimeout(filePath string) (time.Duration, bool)` mirroring
     `extractDescription` (first match within `scanHeaderLines`; returns
@@ -90,7 +90,7 @@ are equivalent (zero duration = no deadline).
     beyond line 30 ignored, invalid value logs warning + `TimeoutSet == false`,
     first-of-multiple wins. Hot reload of a script whose `Timeout:` changed
     re-registers with the new value (covered by existing watch test pattern).
-- [/] **Task 3: Apply resolved timeout at execution**
+- [x] **Task 3: Apply resolved timeout at execution**
   - **Description:** In `toolRegistry.replace`, handler resolves
     `t := r.globalTimeout; if tool.TimeoutSet { t = tool.Timeout }` and passes
     `t` to `executeTool` (replacing the `defaultToolTimeout` argument). In
@@ -106,7 +106,7 @@ are equivalent (zero duration = no deadline).
     completes (short script). Zero/`NONE` path uses request ctx: cancelling the
     caller ctx kills the script. Description suffix present and correct for
     all three cases (set, none, inherited).
-- [/] **Task 4: Docs, usage text, README**
+- [x] **Task 4: Docs, usage text, README**
   - **Description:** Update the `Usage:` line in `main.go` with `[--timeout <duration>] | [--no-timeout]`.
     README: extend the Safety First bullet, the Usage section with both flags,
     and add a frontmatter subsection documenting `Timeout: <duration>` / `NONE`
@@ -116,7 +116,7 @@ are equivalent (zero duration = no deadline).
     first-match rule, warning-on-invalid); usage text and `flag` help strings
     consistent with README.
 
-- [/] **Task 5: Commit & branch hygiene (cross-cutting)**
+- [x] **Task 5: Commit & branch hygiene (cross-cutting)**
   - **Description:** Work lands on branch `feat/timeout-handling` off `main`.
     One conventional commit per task in order: `feat: parse timeout duration
     strings` (includes PLAN.md), `feat: --timeout and --no-timeout flags`,
@@ -152,4 +152,4 @@ are equivalent (zero duration = no deadline).
 
 ## Final Status (Code Review)
 
-- **Round 1:** [N/A]
+- **Round 1:** Verified against the diff and by execution: all 5 commits (65ff0d2…66d1493) build/vet/test green individually; parser, precedence (`--no-timeout` > `--timeout`; per-tool > global), first-match-wins, >30-line ignore, warning-on-invalid, description suffixes (incl. empty description → suffix alone, advisory #2), zero≡NONE raw-ctx path, call-site updates (advisory #1), README/usage consistency, and the full edge checklist all confirmed — tests include registry-level expiry, inheritance, NONE-under-short-global, and cancellation-kill. Only deviation: two plan-phase docs commits predate the 5 implementation commits (7 total on branch), which is acceptable and not a defect. Status: Approved
