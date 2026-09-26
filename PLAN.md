@@ -106,7 +106,7 @@ are equivalent (zero duration = no deadline).
     completes (short script). Zero/`NONE` path uses request ctx: cancelling the
     caller ctx kills the script. Description suffix present and correct for
     all three cases (set, none, inherited).
-- [ ] **Task 4: Docs, usage text, README**
+- [/] **Task 4: Docs, usage text, README**
   - **Description:** Update the `Usage:` line in `main.go` with `[--timeout <duration>] | [--no-timeout]`.
     README: extend the Safety First bullet, the Usage section with both flags,
     and add a frontmatter subsection documenting `Timeout: <duration>` / `NONE`

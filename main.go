@@ -1029,7 +1029,7 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
 	}
 

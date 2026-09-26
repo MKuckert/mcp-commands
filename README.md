@@ -12,7 +12,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 - **Auto-Documentation:** Reads the first few lines of your script for a `Description:` comment and presents it to the LLM to provide context on what the tool does.
 - **Smart Argument Translation:** Safely maps JSON tool arguments from the LLM into POSIX-compliant CLI flags (e.g., `{"force": true, "file": "data.txt"}` becomes `--force --file data.txt`).
 - **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and HTTP streaming transport for remote connections.
-- **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces execution timeouts and output limits.
+- **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces a configurable execution timeout (default 5 minutes, per tool, per server, or disabled) and output limits.
 - **Raw Output:** Returns the raw stdout and stderr (capped to 1 MB) of the executed script, allowing LLMs to process the output directly.
 
 ## Installation
@@ -137,6 +137,30 @@ const client = new Client({ name: "web-client", version: "1.0.0" });
 await client.connect(transport);
 ```
 
+#### Timeouts
+
+Every tool execution is bounded by a timeout (default: **5 minutes**). When the deadline passes, the script is killed and the tool returns an error result of the form `tool timed out after <duration>` (plus any partial output). Three levels, in precedence order (per tool > CLI > default):
+
+| Level | How | Meaning |
+|---|---|---|
+| **Per tool** | `Timeout: <duration>` line in the script's frontmatter (first occurrence wins, like `Description:`) | Always wins, even over `--no-timeout`. |
+| **Global** | `--timeout <duration>` flag | Applies to every tool without its own `Timeout:`. Parsed at startup; an invalid value exits with an error before the server starts. |
+| **Default** | _(no flag, no frontmatter)_ | 5 minutes. |
+
+The duration is a whitespace-separated list of `<digits><unit>` tokens (units `ns`, `us`, `µs`, `ms`, `s`, `m`, `h`; e.g. `5m`, `60s`, `1h 30m 5s`; whitespace between tokens is optional). Decimals and signs are rejected. `NONE` (case-insensitive) and a result of `0` (e.g. `0s`) mean **no timeout**.
+
+```bash
+# Global deadline for all tools: 10 minutes
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --timeout 10m
+
+# No deadline at all (client cancellation/abort still kills scripts)
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --no-timeout
+```
+
+`--no-timeout` beats `--timeout` when both are passed, but a script that declares `Timeout: 30s` in its frontmatter always gets 30 seconds regardless. An invalid per-tool `Timeout:` value does **not** break discovery: the server logs `Warning: ignoring invalid Timeout in <file>: <reason>` to stderr and the tool falls back to the global timeout. With no deadline, a client abort/cancel still kills the running script — "no timeout" means "no deadline", never "uninterruptible".
+
+The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` suffix so the LLM knows its budget.
+
 ### Creating Tools
 
 Simply create an executable file in your `--scripts` directory.
@@ -155,6 +179,25 @@ echo "Hello, $NAME!"
 2. The server exposes a tool named `hello-world`.
 3. The LLM sees the description: `Prints a greeting message. Accepts a "name" argument.`
 4. If the LLM calls it with `{"name": "Alice"}`, the server executes `./hello-world --name Alice`.
+
+#### Script Frontmatter
+
+The first 30 lines of a script are scanned for `Description:` and `Timeout:` annotations (the first occurrence of each wins; extras are silently ignored):
+
+- `Description: <text>` — presented to the LLM as the tool description.
+- `Timeout: <duration>` — overrides the global/default timeout for this tool only. Accepts the same duration format as `--timeout` (e.g. `30s`, `1h 30m 5s`) or `NONE`/`0s` for no deadline.
+
+A fully annotated example:
+
+```bash
+#!/bin/bash
+# Description: Runs the long-running render pipeline.
+# Timeout: 1h 30m 5s
+
+echo "rendering..."
+```
+
+This script is registered as a tool with the description `Runs the long-running render pipeline. (timeout: 1h30m5s)` and is killed after `1h 30m 5s` if it overruns. Without the `Timeout:` line it would inherit the global timeout (`--timeout` flag, default 5 minutes). An invalid `Timeout:` value logs a warning to stderr and falls back to the global timeout, so editing a script's timeout mid-flight never breaks discovery or hot reload.
 
 ### Argument Translation Rules
 
