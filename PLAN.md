@@ -78,7 +78,7 @@ are equivalent (zero duration = no deadline).
     clean, no new deps in `go.mod`; the three existing `newToolRegistry(server, dir)`
     call sites in main_test.go are updated to the new signature in the same commit
     (reviewer advisory, round 1).
-- [ ] **Task 2: Per-tool `Timeout:` frontmatter**
+- [/] **Task 2: Per-tool `Timeout:` frontmatter**
   - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and
     `extractTimeout(filePath string) (time.Duration, bool)` mirroring
     `extractDescription` (first match within `scanHeaderLines`; returns

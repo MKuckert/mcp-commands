@@ -750,6 +750,108 @@ func TestCombineToolOutput(t *testing.T) {
 	}
 }
 
+func writeTimeoutScript(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+	return path
+}
+
+func TestExtractTimeout(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: no timeout\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if set {
+			t.Errorf("expected TimeoutSet=false for absent Timeout:, got (%v, true)", d)
+		}
+	})
+
+	t.Run("valid_30s", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if !set || d != 30*time.Second {
+			t.Errorf("expected (30s, true), got (%v, %v)", d, set)
+		}
+	})
+
+	t.Run("none", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: NONE\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if !set || d != 0 {
+			t.Errorf("expected (0, true) for NONE, got (%v, %v)", d, set)
+		}
+	})
+
+	t.Run("zero_seconds", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 0s\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if !set || d != 0 {
+			t.Errorf("expected (0, true) for 0s, got (%v, %v)", d, set)
+		}
+	})
+
+	t.Run("invalid_falls_back", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if set || d != 0 {
+			t.Errorf("expected (0, false) for invalid value, got (%v, %v)", d, set)
+		}
+	})
+
+	t.Run("first_occurrence_wins", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\n# Timeout: 5m\necho hi\n")
+
+		d, set := extractTimeout(path)
+		if !set || d != 30*time.Second {
+			t.Errorf("expected first occurrence (30s, true), got (%v, %v)", d, set)
+		}
+	})
+
+	t.Run("beyond_scan_window_ignored", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		lines := []string{"#!/bin/bash"}
+		for i := 0; i < scanHeaderLines; i++ {
+			lines = append(lines, fmt.Sprintf("# Line %d", i))
+		}
+		lines = append(lines, "# Timeout: 30s", "echo done")
+		path := writeTimeoutScript(t, tmpDir, strings.Join(lines, "\n"))
+
+		d, set := extractTimeout(path)
+		if set {
+			t.Errorf("expected TimeoutSet=false for line beyond scan window, got (%v, true)", d)
+		}
+	})
+}
+
+func TestDiscoverToolsExtractsTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: sleeper\n# Timeout: 1m\necho hi\n")
+
+	tools, err := discoverTools(tmpDir)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if !tools[0].TimeoutSet || tools[0].Timeout != time.Minute {
+		t.Errorf("expected (1m, true), got (%v, %v)", tools[0].Timeout, tools[0].TimeoutSet)
+	}
+}
+
 func TestExtractParams(t *testing.T) {
 	t.Run("happy_path_all_types", func(t *testing.T) {
 		tmpDir := t.TempDir()

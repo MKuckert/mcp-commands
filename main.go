@@ -100,6 +100,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 
 		description := extractDescription(resolvedPath)
 		params := extractParams(resolvedPath)
+		timeout, timeoutSet := extractTimeout(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
@@ -107,6 +108,8 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			Path:        resolvedPath,
 			Description: description,
 			Params:      params,
+			Timeout:     timeout,
+			TimeoutSet:  timeoutSet,
 		})
 	}
 
@@ -226,6 +229,48 @@ func resolveTimeout(timeoutFlag string, noTimeout bool) (time.Duration, error) {
 		return parseTimeoutDuration(timeoutFlag)
 	}
 	return defaultToolTimeout, nil
+}
+
+// extractTimeout reads the first scanHeaderLines of a file and looks for a
+// line containing scanTimeoutPrefix ("Timeout:"). It returns the parsed
+// duration and whether a Timeout: was declared. The first occurrence wins
+// (same rule as Description:); NONE and 0 mean no timeout. An invalid value
+// logs a stderr warning and returns (0, false) so the global timeout applies.
+func extractTimeout(filePath string) (time.Duration, bool) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return 0, false
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() && lineCount < scanHeaderLines {
+		lineCount++
+		line := scanner.Text()
+
+		if !strings.Contains(line, scanTimeoutPrefix) {
+			continue
+		}
+
+		parts := strings.SplitN(line, scanTimeoutPrefix, 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		duration, err := parseTimeoutDuration(parts[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
+			return 0, false
+		}
+		return duration, true
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, false
+	}
+
+	return 0, false
 }
 
 // extractParams reads the first scanHeaderLines of a file and parses
