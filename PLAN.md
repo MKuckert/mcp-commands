@@ -90,7 +90,7 @@ are equivalent (zero duration = no deadline).
     beyond line 30 ignored, invalid value logs warning + `TimeoutSet == false`,
     first-of-multiple wins. Hot reload of a script whose `Timeout:` changed
     re-registers with the new value (covered by existing watch test pattern).
-- [ ] **Task 3: Apply resolved timeout at execution**
+- [/] **Task 3: Apply resolved timeout at execution**
   - **Description:** In `toolRegistry.replace`, handler resolves
     `t := r.globalTimeout; if tool.TimeoutSet { t = tool.Timeout }` and passes
     `t` to `executeTool` (replacing the `defaultToolTimeout` argument). In

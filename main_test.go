@@ -349,7 +349,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ListTools failed: %v", err)
 		}
-		if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated" {
+		if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated (timeout: 5m0s)" {
 			cancel()
 			break
 		}
@@ -1791,6 +1791,199 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 	if got := headers.Get("Vary"); got != "" {
 		t.Errorf("Vary = %q, want absent (CORS disabled)", got)
+	}
+}
+
+func TestResolvedTimeoutViaRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	sleepPath := filepath.Join(tmpDir, "sleep5.sh")
+	if err := os.WriteFile(sleepPath, []byte("#!/bin/bash\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatalf("failed to create sleep script: %v", err)
+	}
+	fastPath := filepath.Join(tmpDir, "fast.sh")
+	if err := os.WriteFile(fastPath, []byte("#!/bin/bash\necho fast\n"), 0o755); err != nil {
+		t.Fatalf("failed to create fast script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 2*time.Second)
+	registry.replace([]discoveredTool{
+		{Name: "pinned", Path: sleepPath, Description: "pinned tool", Timeout: 1 * time.Second, TimeoutSet: true},
+		{Name: "inherited", Path: sleepPath, Description: "inherited tool"},
+		{Name: "none", Path: fastPath, Description: "none tool", Timeout: 0, TimeoutSet: true},
+		{Name: "bare", Path: fastPath, TimeoutSet: true, Timeout: 0}, // empty description: suffix alone
+		{Name: "canceller", Path: sleepPath, Timeout: 0, TimeoutSet: true},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	descs := make(map[string]string, len(res.Tools))
+	for _, tool := range res.Tools {
+		descs[tool.Name] = tool.Description
+	}
+	wantDescs := map[string]string{
+		"pinned":    "pinned tool (timeout: 1s)",
+		"inherited": "inherited tool (timeout: 2s)",
+		"none":      "none tool (timeout: none)",
+		"bare":      "(timeout: none)",
+		"canceller": "(timeout: none)",
+	}
+	for name, want := range wantDescs {
+		if got := descs[name]; got != want {
+			t.Errorf("description of %q = %q, want %q", name, got, want)
+		}
+	}
+
+	t.Run("per_tool_timeout_wins", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "pinned"})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected IsError result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "timed out after 1s") {
+			t.Fatalf("expected timeout message with 1s, got %q", got)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 5s script duration", elapsed)
+		}
+	})
+
+	t.Run("global_timeout_inherited", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "inherited"})
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || !result.IsError {
+			t.Fatalf("expected IsError result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "timed out after 2s") {
+			t.Fatalf("expected timeout message with 2s, got %q", got)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 5s script duration", elapsed)
+		}
+	})
+
+	t.Run("none_under_short_global_completes", func(t *testing.T) {
+		start := time.Now()
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "none"})
+		if err != nil {
+			t.Fatalf("CallTool failed: %v", err)
+		}
+		if result == nil || result.IsError {
+			t.Fatalf("expected success result, got %#v", result)
+		}
+		if got := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "fast") {
+			t.Fatalf("expected fast output, got %q", got)
+		}
+		if elapsed := time.Since(start); elapsed > 4*time.Second {
+			t.Errorf("call took %v, want well under the 2s global", elapsed)
+		}
+	})
+
+	t.Run("cancellation_kills_script_without_deadline", func(t *testing.T) {
+		callCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			cancel()
+		}()
+		start := time.Now()
+		result, err := clientSession.CallTool(callCtx, &mcp.CallToolParams{Name: "canceller"})
+		elapsed := time.Since(start)
+		if err == nil && (result == nil || !result.IsError) {
+			t.Fatalf("expected error or IsError result after cancellation, got %#v", result)
+		}
+		if elapsed > 4*time.Second {
+			t.Errorf("canceled call took %v, want ~500ms (request ctx kills the script)", elapsed)
+		}
+	})
+}
+
+func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 2*time.Second)
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// Hot reload: editing only the Timeout: line re-registers the tool.
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Timeout: 30s\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to update script: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		res, err := clientSession.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools failed: %v", err)
+		}
+		if len(res.Tools) == 1 && res.Tools[0].Description == "(timeout: 30s)" {
+			cancel()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watchTools did not refresh updated Timeout: %+v", res.Tools)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
 	}
 }
 

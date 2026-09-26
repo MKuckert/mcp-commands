@@ -593,8 +593,21 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	for _, discoveredTool := range tools {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
-		toolDescription := discoveredTool.Description
 		toolParams := discoveredTool.Params
+
+		// A per-tool Timeout: always wins over the global, even --no-timeout.
+		toolTimeout := r.globalTimeout
+		if discoveredTool.TimeoutSet {
+			toolTimeout = discoveredTool.Timeout
+		}
+
+		description := discoveredTool.Description
+		suffix := timeoutSuffix(toolTimeout)
+		if description == "" {
+			description = suffix
+		} else {
+			description += " " + suffix
+		}
 
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			parsedArgs, err := parseToolArguments(req.Params.Arguments)
@@ -607,18 +620,28 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 					IsError: true,
 				}, nil
 			}
-			return executeTool(ctx, toolPath, parsedArgs, defaultToolTimeout, r.dirAbs)
+			return executeTool(ctx, toolPath, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
 		r.server.AddTool(&mcp.Tool{
 			Name:        toolName,
-			Description: toolDescription,
+			Description: description,
 			InputSchema: buildInputSchema(toolParams),
 		}, handlerFunc)
 
 		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
+}
+
+// timeoutSuffix renders the resolved timeout for the registered tool
+// description so the LLM knows its budget: "(timeout: 30s)" or
+// "(timeout: none)" when no deadline applies.
+func timeoutSuffix(timeout time.Duration) string {
+	if timeout > 0 {
+		return fmt.Sprintf("(timeout: %s)", timeout)
+	}
+	return "(timeout: none)"
 }
 
 func mustJSONMarshal(v any) json.RawMessage {
@@ -724,7 +747,16 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 		}, nil
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	var execCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		// No deadline: run under the request context itself so client
+		// cancellation/abort still kills the script.
+		execCtx = ctx
+		cancel = func() {}
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
