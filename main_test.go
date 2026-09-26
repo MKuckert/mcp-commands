@@ -434,22 +434,25 @@ func TestResolveTimeout(t *testing.T) {
 	tests := []struct {
 		name        string
 		timeoutFlag string
+		timeoutSet  bool
 		noTimeout   bool
 		want        time.Duration
 		wantErr     bool
 	}{
 		{name: "default_when_unset", timeoutFlag: "", want: defaultToolTimeout},
-		{name: "flag_parsed", timeoutFlag: "5s", want: 5 * time.Second},
-		{name: "flag_none", timeoutFlag: "NONE", want: 0},
-		{name: "no_timeout_beats_flag", timeoutFlag: "5s", noTimeout: true, want: 0},
+		{name: "flag_parsed", timeoutFlag: "5s", timeoutSet: true, want: 5 * time.Second},
+		{name: "flag_none", timeoutFlag: "NONE", timeoutSet: true, want: 0},
+		{name: "flag_zero", timeoutFlag: "0s", timeoutSet: true, want: 0},
 		{name: "no_timeout_alone", noTimeout: true, want: 0},
-		{name: "invalid_flag_errors", timeoutFlag: "bogus", wantErr: true},
-		{name: "no_timeout_wins_over_invalid_flag", timeoutFlag: "bogus", noTimeout: true, want: 0},
+		{name: "no_timeout_and_flag_exclusive", timeoutFlag: "5s", timeoutSet: true, noTimeout: true, wantErr: true},
+		{name: "no_timeout_and_invalid_flag_exclusive", timeoutFlag: "bogus", timeoutSet: true, noTimeout: true, wantErr: true},
+		{name: "invalid_flag_errors", timeoutFlag: "bogus", timeoutSet: true, wantErr: true},
+		{name: "explicit_empty_flag_errors", timeoutFlag: "", timeoutSet: true, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveTimeout(tt.timeoutFlag, tt.noTimeout)
+			got, err := resolveTimeout(tt.timeoutFlag, tt.timeoutSet, tt.noTimeout)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("resolveTimeout(%q, %v) = %v, want error", tt.timeoutFlag, tt.noTimeout, got)

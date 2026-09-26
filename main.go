@@ -224,13 +224,18 @@ func matchTimeoutUnit(s string) (time.Duration, string, bool) {
 }
 
 // resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
-// before the server starts. --no-timeout beats --timeout; an unset --timeout
-// yields defaultToolTimeout.
-func resolveTimeout(timeoutFlag string, noTimeout bool) (time.Duration, error) {
+// before the server starts. --timeout and --no-timeout are mutually exclusive
+// (passing both is a startup error); an explicitly-set --timeout must parse
+// (an explicit --timeout= is therefore rejected); an unset --timeout yields
+// defaultToolTimeout.
+func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Duration, error) {
+	if noTimeout && timeoutSet {
+		return 0, fmt.Errorf("--timeout and --no-timeout are mutually exclusive")
+	}
 	if noTimeout {
 		return 0, nil
 	}
-	if timeoutFlag != "" {
+	if timeoutSet {
 		return parseTimeoutDuration(timeoutFlag)
 	}
 	return defaultToolTimeout, nil
@@ -1024,7 +1029,7 @@ func main() {
 	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
-	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (beats --timeout)")
+	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -1040,9 +1045,13 @@ func main() {
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
+	timeoutSet := false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "allow-all-origins" {
+		switch f.Name {
+		case "allow-all-origins":
 			allowAllSet = true
+		case "timeout":
+			timeoutSet = true
 		}
 	})
 	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
@@ -1052,9 +1061,9 @@ func main() {
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
-	timeout, err := resolveTimeout(*timeoutFlag, *noTimeoutFlag)
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: --timeout: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
