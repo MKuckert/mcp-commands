@@ -843,6 +843,29 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid_does_not_drop_later_params", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\n# Param: name string required \"the name\"\necho hi\n")
+
+		// Suppress the warning; assert scan continuity, not the warning here.
+		discard, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("failed to open %s: %v", os.DevNull, err)
+		}
+		oldStderr := os.Stderr
+		os.Stderr = discard
+		desc, params, timeout := extractFrontmatter(path)
+		os.Stderr = oldStderr
+		_ = discard.Close()
+
+		if timeout != nil {
+			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
+		}
+		if desc != "" || len(params) != 1 || params[0].Name != "name" {
+			t.Errorf("scan stopped after invalid Timeout: desc=%q params=%#v", desc, params)
+		}
+	})
+
 	t.Run("first_occurrence_wins", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\n# Timeout: 5m\necho hi\n")

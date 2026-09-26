@@ -41,7 +41,7 @@ const (
 	serverName            = "mcp-commands"
 )
 
-var serverVersion = "0.5.0"
+var serverVersion = "0.6.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
@@ -150,12 +150,13 @@ func extractFrontmatter(filePath string) (description string, params []paramSpec
 		if !timeoutSeen && strings.Contains(line, scanTimeoutPrefix) {
 			parts := strings.SplitN(line, scanTimeoutPrefix, 2)
 			if len(parts) == 2 {
-				duration, err := parseTimeoutDuration(parts[1])
-				if err != nil {
+				if duration, err := parseTimeoutDuration(parts[1]); err != nil {
+					// Warn and keep timeout nil (global applies) without
+					// interrupting the scan, so later Param: lines are still collected.
 					fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
-					return description, params, nil
+				} else {
+					timeout = &duration
 				}
-				timeout = &duration
 			}
 			timeoutSeen = true
 			continue
