@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -772,14 +773,14 @@ func writeTimeoutScript(t *testing.T, dir, body string) string {
 	return path
 }
 
-func TestExtractTimeout(t *testing.T) {
+func TestExtractFrontmatterTimeout(t *testing.T) {
 	t.Run("absent", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: no timeout\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if set {
-			t.Errorf("expected TimeoutSet=false for absent Timeout:, got (%v, true)", d)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout != nil {
+			t.Errorf("expected nil timeout for absent Timeout:, got %v", *timeout)
 		}
 	})
 
@@ -787,9 +788,9 @@ func TestExtractTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if !set || d != 30*time.Second {
-			t.Errorf("expected (30s, true), got (%v, %v)", d, set)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 30*time.Second {
+			t.Errorf("expected pointer to 30s, got %#v", timeout)
 		}
 	})
 
@@ -797,9 +798,9 @@ func TestExtractTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: NONE\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if !set || d != 0 {
-			t.Errorf("expected (0, true) for NONE, got (%v, %v)", d, set)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 0 {
+			t.Errorf("expected pointer to 0 for NONE, got %#v", timeout)
 		}
 	})
 
@@ -807,9 +808,9 @@ func TestExtractTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 0s\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if !set || d != 0 {
-			t.Errorf("expected (0, true) for 0s, got (%v, %v)", d, set)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 0 {
+			t.Errorf("expected pointer to 0 for 0s, got %#v", timeout)
 		}
 	})
 
@@ -817,9 +818,28 @@ func TestExtractTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if set || d != 0 {
-			t.Errorf("expected (0, false) for invalid value, got (%v, %v)", d, set)
+		// Capture the stderr warning emitted for the invalid value.
+		oldStderr := os.Stderr
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("failed to create pipe: %v", err)
+		}
+		os.Stderr = w
+		_, _, timeout := extractFrontmatter(path)
+		os.Stderr = oldStderr
+		_ = w.Close()
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
+
+		if timeout != nil {
+			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
+		}
+		if !strings.Contains(buf.String(), filepath.Base(path)) {
+			t.Errorf("warning %q does not name the script file %q", buf.String(), filepath.Base(path))
+		}
+		if !strings.Contains(buf.String(), "bogus") {
+			t.Errorf("warning %q does not state the invalid value's reason", buf.String())
 		}
 	})
 
@@ -827,9 +847,9 @@ func TestExtractTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\n# Timeout: 5m\necho hi\n")
 
-		d, set := extractTimeout(path)
-		if !set || d != 30*time.Second {
-			t.Errorf("expected first occurrence (30s, true), got (%v, %v)", d, set)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout == nil || *timeout != 30*time.Second {
+			t.Errorf("expected first occurrence (30s), got %#v", timeout)
 		}
 	})
 
@@ -842,9 +862,9 @@ func TestExtractTimeout(t *testing.T) {
 		lines = append(lines, "# Timeout: 30s", "echo done")
 		path := writeTimeoutScript(t, tmpDir, strings.Join(lines, "\n"))
 
-		d, set := extractTimeout(path)
-		if set {
-			t.Errorf("expected TimeoutSet=false for line beyond scan window, got (%v, true)", d)
+		_, _, timeout := extractFrontmatter(path)
+		if timeout != nil {
+			t.Errorf("expected nil timeout for line beyond scan window, got %v", *timeout)
 		}
 	})
 }
@@ -880,7 +900,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 3 {
 			t.Errorf("Expected 3 params, got %d", len(params))
@@ -916,7 +936,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 0 {
 			t.Errorf("Expected 0 params, got %d", len(params))
@@ -935,7 +955,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		// Only the valid param should be extracted
 		if len(params) != 1 {
@@ -958,7 +978,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -980,7 +1000,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -1001,7 +1021,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param, got %d", len(params))
@@ -1023,7 +1043,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -1051,7 +1071,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		params := extractParams(scriptPath)
+		_, params, _ := extractFrontmatter(scriptPath)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param (beyond window ignored), got %d", len(params))

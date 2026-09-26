@@ -98,13 +98,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			continue
 		}
 
-		description := extractDescription(resolvedPath)
-		params := extractParams(resolvedPath)
-		timeout, timeoutSet := extractTimeout(resolvedPath)
-		var timeoutPtr *time.Duration
-		if timeoutSet {
-			timeoutPtr = &timeout
-		}
+		description, params, timeout := extractFrontmatter(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
@@ -112,44 +106,73 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			Path:        resolvedPath,
 			Description: description,
 			Params:      params,
-			Timeout:     timeoutPtr,
+			Timeout:     timeout,
 		})
 	}
 
 	return tools, nil
 }
 
-// extractDescription reads the first scanHeaderLines of a file and
-// looks for a line containing scanDescriptionPrefix ("Description:").
-// If found, it returns the string following the prefix. This is used
-// to populate the description field of the MCP Tool, providing LLMs
-// with context on what the tool does.
-func extractDescription(filePath string) string {
+// extractFrontmatter reads the first scanHeaderLines lines of a file in a
+// single pass and collects the tool's frontmatter: the first Description:
+// line (first occurrence wins; populates the MCP tool description), all
+// Param: annotations (invalid ones log a stderr warning and are skipped),
+// and the first Timeout: value (first occurrence wins; nil when undeclared
+// so the global applies, &0 for NONE/0; an invalid value logs a stderr
+// warning and yields nil so the global applies). An unreadable file yields
+// zero values.
+func extractFrontmatter(filePath string) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return ""
+		return "", []paramSpec{}, nil
 	}
 	defer file.Close()
 
+	params = []paramSpec{}
+	descriptionSeen := false
+	timeoutSeen := false
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
+
 	for scanner.Scan() && lineCount < scanHeaderLines {
 		lineCount++
 		line := scanner.Text()
 
-		if strings.Contains(line, scanDescriptionPrefix) {
+		if !descriptionSeen && strings.Contains(line, scanDescriptionPrefix) {
 			parts := strings.SplitN(line, scanDescriptionPrefix, 2)
 			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
+				description = strings.TrimSpace(parts[1])
+			}
+			descriptionSeen = true
+			continue
+		}
+
+		if !timeoutSeen && strings.Contains(line, scanTimeoutPrefix) {
+			parts := strings.SplitN(line, scanTimeoutPrefix, 2)
+			if len(parts) == 2 {
+				duration, err := parseTimeoutDuration(parts[1])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
+					return description, params, nil
+				}
+				timeout = &duration
+			}
+			timeoutSeen = true
+			continue
+		}
+
+		if strings.Contains(line, scanParamPrefix) {
+			parts := strings.SplitN(line, scanParamPrefix, 2)
+			if len(parts) == 2 {
+				// Invalid annotations log their own stderr warning.
+				if param, err := parseParamAnnotation(strings.TrimSpace(parts[1]), filePath, line); err == nil {
+					params = append(params, param)
+				}
 			}
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return ""
-	}
-
-	return ""
+	return description, params, timeout
 }
 
 // timeoutUnits maps the allowed duration units to their values. Sub-second
@@ -241,102 +264,6 @@ func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Durati
 		return parseTimeoutDuration(timeoutFlag)
 	}
 	return defaultToolTimeout, nil
-}
-
-// extractTimeout reads the first scanHeaderLines of a file and looks for a
-// line containing scanTimeoutPrefix ("Timeout:"). It returns the parsed
-// duration and whether a Timeout: was declared. The first occurrence wins
-// (same rule as Description:); NONE and 0 mean no timeout. An invalid value
-// logs a stderr warning and returns (0, false) so the global timeout applies.
-func extractTimeout(filePath string) (time.Duration, bool) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return 0, false
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	lineCount := 0
-	for scanner.Scan() && lineCount < scanHeaderLines {
-		lineCount++
-		line := scanner.Text()
-
-		if !strings.Contains(line, scanTimeoutPrefix) {
-			continue
-		}
-
-		parts := strings.SplitN(line, scanTimeoutPrefix, 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		duration, err := parseTimeoutDuration(parts[1])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
-			return 0, false
-		}
-		return duration, true
-	}
-
-	if err := scanner.Err(); err != nil {
-		return 0, false
-	}
-
-	return 0, false
-}
-
-// extractParams reads the first scanHeaderLines of a file and parses
-// any Param: annotations. It returns a slice of paramSpec with all valid
-// parameters. Invalid or malformed annotations produce a stderr warning and
-// are skipped without panicking.
-//
-// The annotation syntax is:
-//
-//	# Param: <name> <type> <required|optional> "<description>"
-//
-// Validation includes:
-// - name must match argumentKeyPattern
-// - type must be one of "string", "number", "boolean"
-// - required token must be "required" or "optional"
-// - description must be quoted
-func extractParams(filePath string) []paramSpec {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return []paramSpec{}
-	}
-	defer file.Close()
-
-	var params []paramSpec
-	scanner := bufio.NewScanner(file)
-	lineCount := 0
-
-	for scanner.Scan() && lineCount < scanHeaderLines {
-		lineCount++
-		line := scanner.Text()
-
-		if !strings.Contains(line, scanParamPrefix) {
-			continue
-		}
-
-		// Split on the first occurrence of "Param:"
-		parts := strings.SplitN(line, scanParamPrefix, 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		rawAnnotation := strings.TrimSpace(parts[1])
-
-		// Parse the annotation: <name> <type> <required|optional> "<description>"
-		param, err := parseParamAnnotation(rawAnnotation, filePath, line)
-		if err != nil {
-			// Warning already logged in parseParamAnnotation
-			continue
-		}
-
-		params = append(params, param)
-	}
-
-	return params
 }
 
 // parseParamAnnotation parses a single parameter annotation string.
