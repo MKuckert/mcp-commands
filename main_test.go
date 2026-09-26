@@ -860,8 +860,8 @@ func TestDiscoverToolsExtractsTimeout(t *testing.T) {
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(tools))
 	}
-	if !tools[0].TimeoutSet || tools[0].Timeout != time.Minute {
-		t.Errorf("expected (1m, true), got (%v, %v)", tools[0].Timeout, tools[0].TimeoutSet)
+	if tools[0].Timeout == nil || *tools[0].Timeout != time.Minute {
+		t.Errorf("expected pointer to 1m, got %#v", tools[0].Timeout)
 	}
 }
 
@@ -1820,12 +1820,14 @@ func TestResolvedTimeoutViaRegistry(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, tmpDir, 2*time.Second)
+	oneSecond := time.Second
+	noTimeout := time.Duration(0)
 	registry.replace([]discoveredTool{
-		{Name: "pinned", Path: sleepPath, Description: "pinned tool", Timeout: 1 * time.Second, TimeoutSet: true},
-		{Name: "inherited", Path: sleepPath, Description: "inherited tool"},
-		{Name: "none", Path: fastPath, Description: "none tool", Timeout: 0, TimeoutSet: true},
-		{Name: "bare", Path: fastPath, TimeoutSet: true, Timeout: 0}, // empty description: suffix alone
-		{Name: "canceller", Path: sleepPath, Timeout: 0, TimeoutSet: true},
+		{Name: "pinned", Path: sleepPath, Description: "pinned tool", Timeout: &oneSecond},
+		{Name: "inherited", Path: sleepPath, Description: "inherited tool"}, // nil: inherits global
+		{Name: "none", Path: fastPath, Description: "none tool", Timeout: &noTimeout},
+		{Name: "bare", Path: fastPath, Timeout: &noTimeout}, // empty description: suffix alone
+		{Name: "canceller", Path: sleepPath, Timeout: &noTimeout},
 	})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()

@@ -62,8 +62,7 @@ type discoveredTool struct {
 	Path        string
 	Description string
 	Params      []paramSpec
-	Timeout     time.Duration // valid per-tool Timeout: value
-	TimeoutSet  bool          // true when a valid Timeout: was declared
+	Timeout     *time.Duration // valid per-tool Timeout: value; nil when undeclared (global applies), &0 for NONE/0
 }
 
 // discoverTools scans the given directory for executable files and symlinks
@@ -102,6 +101,10 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 		description := extractDescription(resolvedPath)
 		params := extractParams(resolvedPath)
 		timeout, timeoutSet := extractTimeout(resolvedPath)
+		var timeoutPtr *time.Duration
+		if timeoutSet {
+			timeoutPtr = &timeout
+		}
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		tools = append(tools, discoveredTool{
@@ -109,8 +112,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 			Path:        resolvedPath,
 			Description: description,
 			Params:      params,
-			Timeout:     timeout,
-			TimeoutSet:  timeoutSet,
+			Timeout:     timeoutPtr,
 		})
 	}
 
@@ -607,8 +609,8 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 		// A per-tool Timeout: always wins over the global, even --no-timeout.
 		toolTimeout := r.globalTimeout
-		if discoveredTool.TimeoutSet {
-			toolTimeout = discoveredTool.Timeout
+		if discoveredTool.Timeout != nil {
+			toolTimeout = *discoveredTool.Timeout
 		}
 
 		description := discoveredTool.Description
@@ -757,17 +759,15 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 		}, nil
 	}
 
-	var execCtx context.Context
-	var cancel context.CancelFunc
+	execCtx := ctx
 	if timeout > 0 {
+		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
-	} else {
-		// No deadline: run under the request context itself so client
-		// cancellation/abort still kills the script.
-		execCtx = ctx
-		cancel = func() {}
+		defer cancel()
 	}
-	defer cancel()
+	// With timeout == 0 the request context itself is used: client
+	// cancellation/abort still kills the script, so "no timeout" means
+	// "no deadline", never "uninterruptible".
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
