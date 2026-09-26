@@ -144,10 +144,10 @@ Every tool execution is bounded by a timeout (default: **5 minutes**). When the 
 | Level | How | Meaning |
 |---|---|---|
 | **Per tool** | `Timeout: <duration>` line in the script's frontmatter (first occurrence wins, like `Description:`) | Always wins, even over `--no-timeout`. |
-| **Global** | `--timeout <duration>` flag | Applies to every tool without its own `Timeout:`. Parsed at startup; an invalid value exits with an error before the server starts. |
+| **Global** | `--timeout <duration>` flag | Applies to every tool without its own `Timeout:`. Parsed at startup; an invalid — or explicitly empty — value exits with an error before the server starts. |
 | **Default** | _(no flag, no frontmatter)_ | 5 minutes. |
 
-The duration is a whitespace-separated list of `<digits><unit>` tokens (units `ns`, `us`, `µs`, `ms`, `s`, `m`, `h`; e.g. `5m`, `60s`, `1h 30m 5s`; whitespace between tokens is optional). Decimals and signs are rejected. `NONE` (case-insensitive) and a result of `0` (e.g. `0s`) mean **no timeout**.
+The duration is a whitespace-separated list of `<digits><unit>` tokens (units `s`, `m`, `h`; e.g. `5m`, `60s`, `1h 30m 5s`; whitespace between tokens is optional). Sub-second units, decimals, and signs are rejected, and values that overflow are rejected with a clear error. `NONE` (case-insensitive) and a result of `0` (e.g. `0s`) mean **no timeout**.
 
 ```bash
 # Global deadline for all tools: 10 minutes
@@ -157,7 +157,7 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --timeout 10m
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --no-timeout
 ```
 
-`--no-timeout` beats `--timeout` when both are passed, but a script that declares `Timeout: 30s` in its frontmatter always gets 30 seconds regardless. An invalid per-tool `Timeout:` value does **not** break discovery: the server logs `Warning: ignoring invalid Timeout in <file>: <reason>` to stderr and the tool falls back to the global timeout. With no deadline, a client abort/cancel still kills the running script — "no timeout" means "no deadline", never "uninterruptible".
+`--timeout` and `--no-timeout` are **mutually exclusive**: passing both is a startup error, and an explicitly empty `--timeout=` fails the same way (the flags must be passed deliberately). A script that declares `Timeout: 30s` in its frontmatter always gets 30 seconds regardless of the global setting. An invalid per-tool `Timeout:` value does **not** break discovery: the server logs `Warning: ignoring invalid Timeout in <file>: <reason>` to stderr and the tool falls back to the global timeout. With no deadline, a client abort/cancel still kills the running script — "no timeout" means "no deadline", never "uninterruptible".
 
 The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` suffix so the LLM knows its budget.
 
@@ -182,9 +182,10 @@ echo "Hello, $NAME!"
 
 #### Script Frontmatter
 
-The first 30 lines of a script are scanned for `Description:` and `Timeout:` annotations (the first occurrence of each wins; extras are silently ignored):
+The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are silently ignored; every valid `Param:` line is collected):
 
 - `Description: <text>` — presented to the LLM as the tool description.
+- `Param: <name> <type> <required|optional> "<description>"` — declares a typed tool parameter (`string`, `number`, or `boolean`; the description must be quoted). One line per parameter; invalid lines log a warning to stderr and are skipped. The name must match `^[a-zA-Z][a-zA-Z0-9_-]*$`.
 - `Timeout: <duration>` — overrides the global/default timeout for this tool only. Accepts the same duration format as `--timeout` (e.g. `30s`, `1h 30m 5s`) or `NONE`/`0s` for no deadline.
 
 A fully annotated example:
@@ -192,6 +193,7 @@ A fully annotated example:
 ```bash
 #!/bin/bash
 # Description: Runs the long-running render pipeline.
+# Param: source string required "Source file to render"
 # Timeout: 1h 30m 5s
 
 echo "rendering..."

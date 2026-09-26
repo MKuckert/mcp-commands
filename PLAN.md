@@ -38,16 +38,27 @@ are equivalent (zero duration = no deadline).
 **Format spec (shared by flag and frontmatter):**
 
 - Whitespace-separated list of tokens, each exactly `^<digits><unit>$` with unit
-  one of `ns`, `us`, `µs`, `ms`, `s`, `m`, `h`. At least one token required.
-  Digits-only integers (no decimals, no `+`/`-` signs, no bare unit).
-  Examples: `5m`, `60s`, `1h 30m 5s`. Whitespace between tokens is optional.
+  one of `s`, `m`, `h` (sub-second units are not meaningful for tool timeouts
+  and are rejected). At least one token required. Digits-only integers (no
+  decimals, no `+`/`-` signs, no bare unit). Examples: `5m`, `60s`,
+  `1h 30m 5s`. Whitespace between tokens is optional.
 - `NONE` (case-insensitive, leading/trailing whitespace trimmed) → no timeout.
 - Result of `0` (e.g. `0s`) → no timeout, identical to `NONE`.
+- Overflow guard: each term is checked for multiplication overflow
+  (`n > maxDuration/multiplier`) and the running sum for addition overflow
+  (`total > maxDuration-term`); a violating value is rejected with a clear
+  `overflows` error before any wraparound arithmetic can produce a positive
+  duration.
 
 **Precedence decisions (recorded):**
 
-- `--no-timeout` **beats** `--timeout` when both are passed (explicit boolean
-  flag precedence — the pattern established in the CORS feature review).
+- `--no-timeout` and `--timeout` are **mutually exclusive** (Round 2; the
+  earlier "no-timeout beats --timeout" decision is retired): passing both is a
+  startup error, mirroring the CORS `--allowed-origins` + `--allow-all-origins`
+  contradiction pattern. The `--timeout` flag visit is tracked via `flag.Visit`
+  so an explicitly empty `--timeout=` is distinguishable from the `""` default
+  and fails fast on parse (empty → error); the default 5m applies only when the
+  flag was omitted entirely.
 - Per-tool `Timeout:` **always** overrides the global, even if the global is
   `--no-timeout`: an author who pinned `Timeout: 30s` gets 30s; authors get
   predictable per-script behavior.
@@ -68,38 +79,53 @@ are equivalent (zero duration = no deadline).
     rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI
     flags `--timeout` (string, default `""` → `5 * time.Minute`) and `--no-timeout`
     (bool). Resolve in `main()` before `run()` (fail-fast on parse error, like
-    CORS): `--no-timeout` ⇒ 0; `--timeout` given ⇒ parsed; else 5m. Thread the
-    resolved `time.Duration` through `run(...)` into `newToolRegistry(server, dir, globalTimeout)`
+    CORS): `--timeout` + `--no-timeout` ⇒ mutual-exclusion error; `--no-timeout`
+    ⇒ 0; `--timeout` visited ⇒ parsed value (explicit empty ⇒ parse error);
+    else 5m. The `--timeout` visit is tracked with `flag.Visit` (pattern shared
+    with `--allow-all-origins`). The parser enforces the overflow guard above.
+    Thread the resolved `time.Duration` through `run(...)` into
+    `newToolRegistry(server, dir, globalTimeout)`
     (new field on `toolRegistry`).
   - **Review Criteria:** Table tests cover: `5m`, `60s`, `1h 30m 5s` (sums
-    correctly), `NONE`/`none`/` NONE `, `0s` → 0; rejects `-5m`, `+5m`, `1.5h`,
-    `m5`, `h`, `""`, `5m 5m` is accepted (10m). `--no-timeout` + `--timeout 5s`
-    ⇒ 0. Startup with `--timeout bogus` exits 1 with a clear message. `go vet`
-    clean, no new deps in `go.mod`; the three existing `newToolRegistry(server, dir)`
-    call sites in main_test.go are updated to the new signature in the same commit
-    (reviewer advisory, round 1).
+    correctly), `NONE`/`none`/` NONE `, `0s` → 0; accepts `5m 5m` (10m); rejects
+    sub-second `250ms`/`250us`/`250µs`/`1000ns`, `-5m`, `+5m`, `1.5h`, `m5`,
+    `h`, `""`, unknown units. Overflow: three ~max terms whose sum exceeds
+    `math.MaxInt64` (`876000h × 3`) and a single term whose seconds→nanoseconds
+    multiply overflows (`9223372037s`) are rejected with an `overflows` error.
+    `resolveTimeout`: `--no-timeout` + `--timeout` ⇒ mutual-exclusion error;
+    explicit empty `--timeout=` ⇒ parse error; `--no-timeout` alone ⇒ 0;
+    omitted ⇒ 5m. Startup with `--timeout bogus` exits 1 with a clear message.
+    `go vet` clean, no new deps in `go.mod`; the three existing
+    `newToolRegistry(server, dir)` call sites in main_test.go are updated to the
+    new signature in the same commit (reviewer advisory, round 1).
 - [x] **Task 2: Per-tool `Timeout:` frontmatter**
-  - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and
-    `extractTimeout(filePath string) (time.Duration, bool)` mirroring
-    `extractDescription` (first match within `scanHeaderLines`; returns
-    `(0, false)` when absent, `(0, true)` for `NONE`/`0`, `(d, true)` when
-    valid). Invalid value → stderr warning, returns `(0, false)` so the global
-    applies. Extend `discoveredTool` with `Timeout time.Duration` and
-    `TimeoutSet bool`; populate both in `discoverTools`.
-  - **Review Criteria:** Tests: present/absent, `NONE` vs `0s` vs `30s`, value
-    beyond line 30 ignored, invalid value logs warning + `TimeoutSet == false`,
-    first-of-multiple wins. Hot reload of a script whose `Timeout:` changed
-    re-registers with the new value (covered by existing watch test pattern).
+  - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and timeout
+    extraction (first match within `scanHeaderLines`; `nil` when absent,
+    `&0` for `NONE`/`0`, `&d` when valid; invalid value → stderr warning,
+    `nil` so the global applies). Round 2: merged with `extractDescription`
+    and `extractParams` into a single-pass `extractFrontmatter(path)
+    (desc, params, timeout *time.Duration)` — one `os.Open` + scanner, first
+    `Description:`, all valid `Param:` lines, first `Timeout:`. `discoveredTool`
+    carries one `Timeout *time.Duration` (nil = undeclared, `&0` = NONE);
+    populated in `discoverTools`.
+  - **Review Criteria:** Tests assert via `extractFrontmatter`: present/absent
+    (pointer nil vs non-nil), `NONE` vs `0s` vs `30s`, value beyond line 30
+    ignored, first-of-multiple wins. The invalid-value case captures stderr via
+    a pipe (restoring `os.Stderr`) and asserts the warning names the script file
+    AND states the invalid value's reason. Hot reload of a script whose `Timeout:`
+    changed re-registers with the new value (covered by existing watch test
+    pattern).
 - [x] **Task 3: Apply resolved timeout at execution**
   - **Description:** In `toolRegistry.replace`, handler resolves
-    `t := r.globalTimeout; if tool.TimeoutSet { t = tool.Timeout }` and passes
-    `t` to `executeTool` (replacing the `defaultToolTimeout` argument). In
+    `t := r.globalTimeout; if tool.Timeout != nil { t = *tool.Timeout }` and
+    passes `t` to `executeTool` (replacing the `defaultToolTimeout` argument).
+    In
     `executeTool`, only call `context.WithTimeout(ctx, timeout)` when
     `timeout > 0`; otherwise use `ctx` directly (cancellation preserved). Append
     a short suffix to the registered tool description, e.g.
     `(timeout: 30s)` / `(timeout: none)`, so the LLM knows the budget.
   - **Review Criteria:** Registry-level test (pattern:
-    `TestRequiredParamValidationViaRegistry`): tool with `Timeout: 1s` running a
+    `TestRequiredParamValidationViaRegistry`): tool with `Timeout: &1s` running a
     `sleep 5` script returns `IsError` + "timed out after 1s" within ~1–2s;
     same script via a tool *without* `Timeout:` under `--timeout`-style global
     of e.g. 2s gets the global; `Timeout: NONE` under a short global still
@@ -134,12 +160,15 @@ are equivalent (zero duration = no deadline).
 
 ## Edge Case & Safety Checklist
 
-- `--no-timeout` and `--timeout` both passed → `--no-timeout` wins (documented).
+- `--no-timeout` and `--timeout` both passed → startup error, mutually exclusive (documented).
+- Explicitly empty `--timeout=` → startup error (parse of empty fails; `flag.Visit` distinguishes it from omitted).
 - `--timeout 0s` → valid, means no timeout (documented; consistent with `NONE`).
+- Sub-second units (`ms`/`us`/`ns`) → rejected (not meaningful for tool timeouts).
+- Duration sum/multiply overflow → rejected with an `overflows` error before wraparound can yield a positive duration.
 - Negative/decimal/malformed `--timeout` → exit 1 at startup, server never starts.
 - Invalid per-tool `Timeout:` → visible stderr warning + global fallback; never blocks discovery/hot-reload.
 - `Timeout:` on line > 30 → ignored, tool uses global.
-- `Timeout: NONE` + `--no-timeout` → no deadline; client abort still kills the script (request ctx).
+- No deadline (`Timeout: NONE`/`0s`, or `--no-timeout`/`--timeout 0s`) → no timeout; client abort still kills the script (request ctx).
 - Zero timeout ⇒ `context.WithTimeout(ctx, 0)` is NOT used — code path picks raw `ctx` (equivalent, but explicit).
 - Timeout expiry mid-output → partial stdout/stderr returned with the timeout message (existing behavior, unchanged).
 - Hot reload edits only `Timeout:` → tool re-registered with new value, no restart.
@@ -153,3 +182,4 @@ are equivalent (zero duration = no deadline).
 ## Final Status (Code Review)
 
 - **Round 1:** Verified against the diff and by execution: all 5 commits (65ff0d2…66d1493) build/vet/test green individually; parser, precedence (`--no-timeout` > `--timeout`; per-tool > global), first-match-wins, >30-line ignore, warning-on-invalid, description suffixes (incl. empty description → suffix alone, advisory #2), zero≡NONE raw-ctx path, call-site updates (advisory #1), README/usage consistency, and the full edge checklist all confirmed — tests include registry-level expiry, inheritance, NONE-under-short-global, and cancellation-kill. Only deviation: two plan-phase docs commits predate the 5 implementation commits (7 total on branch), which is acceptable and not a defect. Status: Approved
+- **Round 2: PR feedback (Copilot + principal 2026-09-26)** — all 8 items addressed in 2347f08…8e44d82 (build/vet/test green at every commit): (1) units restricted to `s`/`m`/`h` in the shared parser, doc comments, error messages, README, and tests (250ms/us/µs/1000ns now rejected) — 2347f08; (2) overflow guard: multiplication (`n > maxDuration/multiplier`) and addition (`total > maxDuration-term`) checked before each term, `overflows` error; tests cover 3×876000h sum and single-term multiply overflow — 2347f08; (3) `--no-timeout` + `--timeout` is now a startup error (mutually exclusive, not "no-timeout wins") and an explicitly empty `--timeout=` fails fast via `flag.Visit`-tracked `timeoutSet` in `resolveTimeout`; the retired "no-timeout beats --timeout" decision is rewritten in Requirements, the edge checklist, and README — 5af1535; (4) `discoveredTool.TimeoutSet`/`Timeout` replaced by a single `Timeout *time.Duration` (nil = undeclared, &0 = NONE) in the `replace` handler, description suffix, and tests — 85428d3; (5) the no-op `cancel = func(){}` path removed from `executeTool` (`execCtx := ctx`; cancel created and deferred only in the `timeout > 0` branch) — 85428d3; (6) `extractDescription`/`extractParams`/`extractTimeout` merged into a single-pass `extractFrontmatter` (one `os.Open` + scanner) with all tests asserting via the merged function — 8e44d82; (7) the invalid-timeout test captures stderr via a pipe (restoring `os.Stderr`) and asserts the warning contains both the script filename and the invalid-value reason — 8e44d82; (8) README frontmatter section now documents `Param:` (syntax + example in the worked script), and README/PLAN reflect s/m/h-only units, flag mutual exclusion, and explicit-empty failing — this commit. Status: Changes requested → remediated by commits 2347f08…8e44d82 (pending final review)
