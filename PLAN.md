@@ -116,7 +116,7 @@ are equivalent (zero duration = no deadline).
     first-match rule, warning-on-invalid); usage text and `flag` help strings
     consistent with README.
 
-- [ ] **Task 5: Commit & branch hygiene (cross-cutting)**
+- [/] **Task 5: Commit & branch hygiene (cross-cutting)**
   - **Description:** Work lands on branch `feat/timeout-handling` off `main`.
     One conventional commit per task in order: `feat: parse timeout duration
     strings` (includes PLAN.md), `feat: --timeout and --no-timeout flags`,
