@@ -371,19 +371,22 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 func TestParseTimeoutDuration(t *testing.T) {
 	tests := []struct {
-		name    string
-		raw     string
-		want    time.Duration
-		wantErr bool
+		name         string
+		raw          string
+		want         time.Duration
+		wantErr      bool
+		wantOverflow bool
 	}{
 		{name: "minutes", raw: "5m", want: 5 * time.Minute},
 		{name: "seconds", raw: "60s", want: 60 * time.Second},
 		{name: "compound", raw: "1h 30m 5s", want: time.Hour + 30*time.Minute + 5*time.Second},
 		{name: "compound_no_spaces", raw: "1h30m5s", want: time.Hour + 30*time.Minute + 5*time.Second},
-		{name: "micro_us", raw: "250us", want: 250 * time.Microsecond},
-		{name: "micro_µs", raw: "250µs", want: 250 * time.Microsecond},
-		{name: "nanos", raw: "1000ns", want: time.Microsecond},
 		{name: "duplicates_sum", raw: "5m 5m", want: 10 * time.Minute},
+		{name: "subsecond_ms_rejected", raw: "250ms", wantErr: true},
+		{name: "subsecond_us_rejected", raw: "250us", wantErr: true},
+		{name: "subsecond_µs_rejected", raw: "250µs", wantErr: true},
+		{name: "subsecond_ns_rejected", raw: "1000ns", wantErr: true},
+		{name: "compound_subsecond_rejected", raw: "5m 250ms", wantErr: true},
 		{name: "none_upper", raw: "NONE", want: 0},
 		{name: "none_lower", raw: "none", want: 0},
 		{name: "none_padded", raw: "  NONE ", want: 0},
@@ -399,6 +402,10 @@ func TestParseTimeoutDuration(t *testing.T) {
 		{name: "whitespace_only_rejected", raw: "   ", wantErr: true},
 		{name: "unknown_unit_rejected", raw: "5x", wantErr: true},
 		{name: "compound_with_bad_token_rejected", raw: "5m bogus", wantErr: true},
+		// ~300 years total: each 876000h (100y) term fits, the sum does not.
+		{name: "sum_overflow_rejected", raw: "876000h 876000h 876000h", wantErr: true, wantOverflow: true},
+		// Fits in 63 bits, but seconds→nanoseconds multiplication overflows.
+		{name: "single_term_overflow_rejected", raw: "9223372037s", wantErr: true, wantOverflow: true},
 	}
 
 	for _, tt := range tests {
@@ -407,6 +414,9 @@ func TestParseTimeoutDuration(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseTimeoutDuration(%q) = %v, want error", tt.raw, got)
+				}
+				if tt.wantOverflow && !strings.Contains(err.Error(), "overflows") {
+					t.Errorf("parseTimeoutDuration(%q) error = %v, want \"overflows\"", tt.raw, err)
 				}
 				return
 			}
