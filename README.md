@@ -285,9 +285,11 @@ required-parameter validation before the script starts.
   | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
 
 - Server-mode flags (`--host`, `--port`, `--api-key`, and the CORS flags
-  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`;
-  plus `--watch`) are ignored in diagnostic mode; if you pass them
-  explicitly, a single notice is printed to stderr.
+  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`)
+  are ignored in both diagnostic modes, and `--watch` is ignored with
+  `--call-tool` as well; if you pass any of them explicitly, a single notice
+  is printed to stderr. `--watch` is *honored* with `--list-tools` — it is
+  the live-list mode described above and never listed as ignored there.
 
 Inherited quirk, same as server mode: a parameter name declared more than
 once is last-wins in the schema, but validation enforces *any* `required`

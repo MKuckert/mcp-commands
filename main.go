@@ -765,6 +765,10 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 	}
 
 	debounceTimer := time.NewTimer(watchDebounceDelay)
+	// NewTimer arms the clock immediately; disarm it right away so onChange
+	// only fires after a file event Resets the timer. (Go >= 1.23 Stop drains
+	// the channel, so no stale tick can be in flight.)
+	debounceTimer.Stop()
 	defer debounceTimer.Stop()
 	debounceActive := false
 

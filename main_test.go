@@ -2422,13 +2422,20 @@ func TestWatchChanges(t *testing.T) {
 		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
 	}()
 
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-		t.Fatalf("failed to modify script: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+	// Re-write until the change is observed: the first write can race the
+	// watcher registration (a lost event is legal for fsnotify), and only
+	// writes landing after Add is guaranteed to produce a debounced fire.
+	for i := 0; i < 40; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+			t.Fatalf("failed to modify script: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if calls.Load() > 0 {
+			break
+		}
 	}
 	if calls.Load() == 0 {
 		t.Fatal("onChange did not fire on file change")
@@ -2442,6 +2449,38 @@ func TestWatchChanges(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watchChanges did not stop after cancel")
+	}
+}
+
+// TestWatchChangesNoSpuriousFire guards the debounce arming: with zero
+// filesystem events the timer must stay disarmed (regression — NewTimer
+// arms the clock immediately, so the first debounce window elapsed without
+// any event).
+func TestWatchChangesNoSpuriousFire(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	time.Sleep(500 * time.Millisecond) // several debounce windows, no events
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("onChange fired %d times with zero events, want 0", n)
 	}
 }
 
@@ -2583,6 +2622,66 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		}
 		if clears.Load() == 0 {
 			t.Error("injected clearScreen was not called before the re-print")
+		}
+	})
+
+	t.Run("live_mode_stays_quiet_without_changes", func(t *testing.T) {
+		scriptsDir := t.TempDir()
+		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+
+		var clears atomic.Int32
+		var cancel context.CancelFunc
+		oldClear := clearScreen
+		clearScreen = func(io.Writer) { clears.Add(1) }
+		oldNotify := notifySignals
+		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+			c, c2 := context.WithCancel(ctx)
+			cancel = c2
+			return c, func() {}
+		}
+		defer func() {
+			clearScreen = oldClear
+			notifySignals = oldNotify
+		}()
+
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+		}()
+
+		// Initial print.
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") {
+			t.Fatalf("initial print missing: %q", stdout.String())
+		}
+
+		// Several debounce windows with zero events: the debounce timer must
+		// not fire on its own (regression: it was armed at creation, causing
+		// an unsolicited clear + full re-print ~100 ms after start).
+		time.Sleep(500 * time.Millisecond)
+
+		if n := strings.Count(stdout.String(), "alpha (timeout: 5m0s)"); n != 1 {
+			t.Errorf("list printed %d times with no changes, want exactly 1: %q", n, stdout.String())
+		}
+		if n := clears.Load(); n != 0 {
+			t.Errorf("clearScreen called %d times with no changes, want 0", n)
+		}
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("live mode exit code = %d, want 0", code)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("live mode did not stop after cancel")
 		}
 	})
 }
