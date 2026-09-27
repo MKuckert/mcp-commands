@@ -216,7 +216,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
     file change (existing `TestWatchTools` pattern; `watchTools` itself stays
     behavior-identical — its tests green), screen-clear only on TTY (test
     injects the clear function), re-print uses the re-queried width.
-- [/] **Task 3: `--call-tool` + `--params` debug invocation**
+- [x] **Task 3: `--call-tool` + `--params` debug invocation**
   - **Description:** Add `--call-tool` (string) and `--params` (string,
     default `{}`) flags and the mutual-exclusion check against `--list-tools`
     (both set → startup error). Implement `runCallTool(scriptsAbs, dirAbs
@@ -243,7 +243,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
     mode; server-mode flags (`--host`, `--port`, `--watch`, `--api-key`,
     CORS) alongside `--call-tool` → the single stderr notice, no server
     started.
-- [/] **Task 4: Docs, usage text, version**
+- [x] **Task 4: Docs, usage text, version**
   - **Description:** README: new **Diagnostics** section in Usage —
     `--list-tools` (with the rendered example from the Objective; wrap width
     = terminal window width on a TTY, 160 fallback when piped) and the live
@@ -353,3 +353,17 @@ meridian_fetch([commit:str])
   **Code quality:** no races found by inspection (live-mode print/clear run in the single `watchChanges` callback; registry mutex unchanged; `resolveWrapWidth`/`clearScreen` are read-only package vars in production); `watchChanges` closes its watcher and timer via `defer`; no silent-fallback smells (`resolveWrapWidth`'s 160 fallback is the documented non-TTY behavior). Race detector run was impossible in this sandbox (noted above). Advisory 1 (non-blocking): the README's `--call-tool` example prints `building with release`, which the implied fixture script (`echo "building with $profile"`) would not produce — paste real captured output per the smoke criterion. Advisory 2: the ignored-flags bullet says `(--host, --port, …)` — name `--api-key` and the CORS flags explicitly as the plan does. Advisory 3: "preview what the MCP server would expose" vs the plan's "prints exactly what the LLM sees" — near-equivalent, align the phrasing. Advisory 4: `runCallTool` writes results to `os.Stdout` directly, forcing the `captureStdout` os-Pipe swap in tests; the plan fixed this signature, so not required — a writer param would be cleaner.
 
   **Corrections required for approval:** (1) add the missing unknown-tool test to `TestRunCallTool` (unknown name → code 1, error contains the name and the available-tools list); (2) fix the README wrap bullet to: window width on a TTY, 160-rune fallback when piped/non-TTY, never mid-word; (3) add the five missing README items from blocker 3. **Status: Rejected**
+
+- **Round 2:** Verified the `55083ff` response (diff touches only `README.md`, `main.go`, `main_test.go`).
+
+  **(1) Unknown-tool test — met.** New first subtest `unknown_tool_code_1_lists_available_names` in `TestRunCallTool`: runs `run("nope", "{}", 5m)`, asserts code 1, non-nil error, exact message `unknown tool "nope"; available tools: badinterp, fail, ok, ok_param, sleep1, slow_none` (the full fixture set in `discoverTools`'s filename-sorted order — I re-verified the sort against the six fixtures) and empty stdout (operational → stderr split). Matches the criterion verbatim.
+
+  **(2) README wrap bullet — met.** Now reads: word-wrapped (never mid-word) at the terminal window width when stdout is a TTY — re-queried on every print, resizes honored — falling back to a fixed 160-rune width when piped. All three required facts present and accurate against `resolveWrapWidth`.
+
+  **(3) The five omitted items + TTY-only clear — all present and factually correct.** (i) mutual exclusion as a startup error ✓ (matches the `main()` `--list-tools`/`--call-tool` check); (ii) explicit `--call-tool=` → startup error, never server mode ✓ (`callToolSet` visit-tracking); (iii) explicit-empty `--params=` and JSON `null` ≡ `{}` ✓ (`parseToolArguments` leniency); (iv) exit-code table ✓ — re-verified each row against `executeTool`/`runCallTool`: success → 0/stdout; missing param, non-zero exit, timeout → 1 with result on stdout (all three set `IsError` and are printed before the code-1 return); unknown tool, invalid `--params`, unstartable script, other operational failures → 1, reason on stderr, script never started (`cmd.Start` failure returns an error, not a result); (v) timeout precedence incl. `NONE` ⇒ no deadline ✓; live-mode bullet states screen clear is TTY-only and piped output accumulates ✓ (`clearScreen` is `term.IsTerminal`-gated), runs until `Ctrl-C` ✓ (`notifySignals` SIGINT/SIGTERM).
+
+  **(4) Round-1 advisories — all incorporated.** (1) Real captured output: I rebuilt the binary and re-ran both `--call-tool` examples against the implied fixture (`build.sh` parsing `--profile release` and echoing it, `Timeout:`/`Param:` frontmatter per the rendered list) — the `--list-tools` block, the `--call-tool build --params …` block, and the missing-param line (`missing required parameter: profile`, exit 1) are all byte-exact against actual output; the new prose explains what the examples do. (2) Ignored-flags bullet now names `--host`, `--port`, `--api-key`, the three CORS flags and `--watch` — matches `serverModeFlagNames` + the `--watch` addition exactly. (3) List-tools intro now says "prints exactly what the LLM sees" — plan phrasing. (4) `runCallTool` takes a `stdout io.Writer` (dispatch passes `os.Stdout`; the updated doc comment says so); the `captureStdout` os-Pipe helper is deleted and both call sites in `TestRunCallTool`/`TestRunDiagnosticCallTool` use `bytes.Buffer` — the fragile swap is gone.
+
+  **Regression sweep:** `go build ./...`, `go vet ./...`, `go test . -count=1` all green (7.3s, full suite). The diff contains no changes to Task 1/2 code (helpers, rendering, dispatch seam, live mode, notice, `run()` untouched); the only production change is the `runCallTool` writer parameter + two `Fprintln` targets, which is backward-compatible and covered by the rewritten tests. (Reminder of standing note: `go test -race` is unsupported in this sandbox — race risk was reviewed by inspection in Round 1 and is unchanged.)
+
+  **Task 3 — all criteria met, ticked. Task 4 — all criteria met, ticked.** No new defects; no new advisories. **Status: Approved**
