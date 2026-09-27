@@ -165,8 +165,9 @@ and exits non-zero.
     code, or capture the writer passed to `renderToolList`): zero tools →
     empty stdout, exit 0, existing stderr warning; discovery error (unreadable
     dir) → stderr message, exit 1; server-mode flags (`--port`, `--watch`,
-    `--api-key`, CORS) present alongside `--list-tools` → ignored, no
-    `ListenAndServe`, process exits after printing.
+    `--api-key`, CORS) present alongside `--list-tools` → ignored with the
+    single stderr notice naming them, no `ListenAndServe`, process exits
+    after printing.
 - [ ] **Task 3: `--call-tool` + `--params` debug invocation**
   - **Description:** Add `--call-tool` (string) and `--params` (string,
     default `{}`) flags and the mutual-exclusion check against `--list-tools`
@@ -189,7 +190,8 @@ and exits non-zero.
     validation message, code 1, script not executed; a `sleep 5` script under
     per-tool `Timeout: 1s` → timeout message, code 1, returns within ~2s;
     per-tool `Timeout: NONE` under a short global → completes (per-tool
-    wins); explicitly empty `--params=` ≡ `{}`.
+    wins); explicitly empty `--params=` ≡ `{}`; server-mode flags alongside
+    `--call-tool` → the single stderr notice, no server started.
 - [ ] **Task 4: Docs, usage text, version**
   - **Description:** README: new **Diagnostics** section in Usage —
     `--list-tools` (with the rendered example from the Objective) and
