@@ -2587,30 +2587,6 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	})
 }
 
-// captureStdout swaps os.Stdout to a pipe for the duration of d and returns
-// what was written (runCallTool writes result content to os.Stdout directly).
-func captureStdout(t *testing.T, d func()) string {
-	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe: %v", err)
-	}
-	os.Stdout = w
-	done := make(chan struct{})
-	var out bytes.Buffer
-	go func() {
-		_, _ = io.Copy(&out, r)
-		r.Close()
-		close(done)
-	}()
-	d()
-	w.Close()
-	<-done
-	os.Stdout = old
-	return out.String()
-}
-
 func TestRunCallTool(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptsDir := filepath.Join(tmpDir, "scripts")
@@ -2618,8 +2594,7 @@ func TestRunCallTool(t *testing.T) {
 		t.Fatalf("failed to create scripts dir: %v", err)
 	}
 	// A single marker shared by the marker scripts: subtests run in order
-	// and each clears it first (captureStdout swaps os.Stdout, so the
-	// subtests must not overlap), so a marker can only come from the run
+	// and each clears it first, so a marker can only come from the run
 	// under test.
 	marker := filepath.Join(tmpDir, "marker")
 
@@ -2643,11 +2618,25 @@ func TestRunCallTool(t *testing.T) {
 	}
 	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
 		os.Remove(marker)
-		stdout = captureStdout(t, func() {
-			code, err = runCallTool(scriptsDir, tmpDir, global, name, params)
-		})
+		var buf bytes.Buffer
+		code, err = runCallTool(&buf, scriptsDir, tmpDir, global, name, params)
+		stdout = buf.String()
 		return code, err, stdout
 	}
+
+	t.Run("unknown_tool_code_1_lists_available_names", func(t *testing.T) {
+		code, err, stdout := run("nope", "{}", 5*time.Minute)
+		if code != 1 || err == nil {
+			t.Fatalf("code = %d, err = %v, want code 1 and a non-nil error", code, err)
+		}
+		wantMsg := `unknown tool "nope"; available tools: badinterp, fail, ok, ok_param, sleep1, slow_none`
+		if !strings.Contains(err.Error(), wantMsg) {
+			t.Errorf("err = %q, want it to name the tool and list the available tools (%s)", err, wantMsg)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty (operational failures go to stderr)", stdout)
+		}
+	})
 
 	t.Run("success_code_0_stdout_carries_output", func(t *testing.T) {
 		code, err, stdout := run("ok", `{"x":"y"}`, 5*time.Minute)
@@ -2782,16 +2771,12 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 	})
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
-		var stderr bytes.Buffer
-		// runCallTool prints the result to os.Stdout (plan-fixed signature);
-		// capture it, and the notice goes to the stderr writer.
-		var code int
-		captured := captureStdout(t, func() {
-			code = runDiagnostic(nil, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
-		})
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}
+		captured := stdout.String()
 		if !strings.Contains(captured, "ran") {
 			t.Errorf("stdout = %q, want the script output", captured)
 		}

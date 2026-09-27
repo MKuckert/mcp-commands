@@ -217,7 +217,9 @@ The server translates JSON properties into CLI flags.
 Two self-contained diagnostic modes reuse the exact discovery, frontmatter
 parsing and validation of the server — and never start a server.
 
-**List tools** — preview what the MCP server would expose:
+**List tools** — prints exactly what the LLM sees (the same registered
+descriptions, timeout suffixes and parameter signatures the MCP server would
+expose):
 
 ```console
 $ mcp-commands --dir . --scripts ./scripts --list-tools
@@ -237,8 +239,12 @@ status()
 - The description comes from the frontmatter `Description:` line; the effective
   per-tool timeout is shown (a per-tool `Timeout:` wins over `--timeout`;
   `none` = no deadline).
-- Lines longer than 160 columns are wrapped (never mid-word); add `--watch`
-  to re-print the list live as the scripts directory changes.
+- Descriptions are word-wrapped (never mid-word) at the terminal window
+  width when stdout is a TTY — re-queried on every print, so resizes are
+  honored — falling back to a fixed 160-rune width when stdout is piped.
+- Add `--watch` for a live list: the list re-prints on every scripts-directory
+  change, with the screen cleared first only when stdout is a TTY (piped
+  output simply accumulates); the process runs until `Ctrl-C`.
 
 **Call one tool** — run it once, bypassing the MCP protocol:
 
@@ -253,15 +259,35 @@ $ mcp-commands --dir . --scripts ./scripts --call-tool build
 missing required parameter: profile
 ```
 
-- `--params` is a JSON object (default: `{}`); required-parameter validation
-  applies exactly as in server mode.
+The first example's `build.sh` parses the translated `--profile release` flag
+and echoes the value; the second runs with no `--params`, which fails
+required-parameter validation before the script starts.
+
+- `--params` is a JSON object (default: `{}`); an explicitly empty
+  `--params=` and a JSON `null` payload are both accepted as `{}`; anything
+  else that is not a JSON object is a startup error. Required-parameter
+  validation applies exactly as in server mode.
 - The tool's output is printed verbatim under `<stdout>`/`<stderr>` markers
   (markers appear only for streams that produced output).
 - Arguments are translated to CLI flags with the [rules above](#argument-translation-rules).
-- Exit code is 0 when the tool exits 0; 1 when it exits non-zero, times out,
-or fails validation.
-- Server-mode flags (`--host`, `--port`, …) are ignored in this mode; if you
-  pass them explicitly, a single notice is printed to stderr.
+- The timeout has the same precedence as in server mode: a per-tool
+  `Timeout:` wins over `--timeout`; `Timeout: NONE` means the debug call runs
+  with no deadline.
+- `--call-tool` is mutually exclusive with `--list-tools` (passing both is a
+  startup error), and an explicitly empty `--call-tool=` is a startup error —
+  it never falls through to server mode.
+- Exit code and streams:
+
+  | Outcome | Exit code | Output |
+  | --- | --- | --- |
+  | Tool succeeds | 0 | result on stdout |
+  | Missing required param, non-zero script exit, or timeout | 1 | tool's result on stdout |
+  | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
+
+- Server-mode flags (`--host`, `--port`, `--api-key`, and the CORS flags
+  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`;
+  plus `--watch`) are ignored in diagnostic mode; if you pass them
+  explicitly, a single notice is printed to stderr.
 
 Inherited quirk, same as server mode: a parameter name declared more than
 once is last-wins in the schema, but validation enforces *any* `required`

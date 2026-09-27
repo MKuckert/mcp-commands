@@ -971,7 +971,7 @@ func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, listTools, 
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
-	code, err := runCallTool(scriptsAbs, dirAbs, timeout, callTool, paramsRaw)
+	code, err := runCallTool(stdout, scriptsAbs, dirAbs, timeout, callTool, paramsRaw)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 	}
@@ -982,7 +982,8 @@ func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, listTools, 
 // through the same execution path as the MCP handler (required-param
 // validation, JSON→CLI-arg translation, timeout resolution identical to the
 // registry — a per-tool Timeout: wins, Timeout: NONE ⇒ no deadline) and
-// print the result text to stdout. It returns the process exit code: 0 on
+// print the result text to the given stdout writer (the dispatch passes
+// os.Stdout; tests pass a buffer). It returns the process exit code: 0 on
 // success; 1 on any failure. Execution failures (missing required param,
 // non-zero script exit, timeout) print the tool's result content to stdout
 // with a nil error; operational failures (discovery, unknown tool, --params
@@ -990,7 +991,7 @@ func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, listTools, 
 // line and never start the script. A non-object --params is rejected by
 // parseToolArguments, which maps an explicitly empty value and JSON null to
 // {} (same leniency as the MCP handler).
-func runCallTool(scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
+func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
 	tools, err := discoverTools(scriptsAbs)
 	if err != nil {
 		return 1, fmt.Errorf("failed to discover tools: %w", err)
@@ -1023,7 +1024,7 @@ func runCallTool(scriptsAbs, dirAbs string, globalTimeout time.Duration, name, p
 	}
 
 	if err := validateRequiredParams(args, tool.Params); err != nil {
-		fmt.Fprintln(os.Stdout, err.Error())
+		fmt.Fprintln(stdout, err.Error())
 		return 1, nil
 	}
 
@@ -1043,7 +1044,7 @@ func runCallTool(scriptsAbs, dirAbs string, globalTimeout time.Duration, name, p
 		}
 		b.WriteString(text.Text)
 	}
-	fmt.Fprintln(os.Stdout, b.String())
+	fmt.Fprintln(stdout, b.String())
 
 	if result.IsError {
 		return 1, nil
