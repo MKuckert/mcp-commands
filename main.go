@@ -948,16 +948,107 @@ var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context
 // separately.)
 var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection"}
 
-// runDiagnostic runs the --list-tools diagnostic and returns the process
-// exit code. Diagnostics never start the MCP server: the process exits after
-// the diagnostic completes, except the live --list-tools --watch mode, which
-// runs until SIGINT/SIGTERM. Result content goes to stdout; warnings and
-// operational errors go to stderr.
-func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, timeout time.Duration, ignoredFlags []string) int {
+// runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
+// returns the process exit code. Diagnostics never start the MCP server:
+// the process exits after the diagnostic completes, except the live
+// --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
+// goes to stdout; warnings and operational errors go to stderr.
+func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, listTools, watch bool, callTool string, callToolSet bool, paramsRaw string, timeout time.Duration, ignoredFlags []string) int {
 	if len(ignoredFlags) > 0 {
 		fmt.Fprintf(stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(ignoredFlags, ", "))
 	}
-	return runListTools(stdout, stderr, dir, scriptsDir, watch, timeout)
+	if listTools {
+		return runListTools(stdout, stderr, dir, scriptsDir, watch, timeout)
+	}
+	if callTool == "" {
+		// Only reachable when --call-tool= was explicitly passed (an
+		// omitted flag is handled by main and never reaches here).
+		fmt.Fprintln(stderr, "Error: --call-tool requires a non-empty tool name")
+		return 1
+	}
+	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	code, err := runCallTool(scriptsAbs, dirAbs, timeout, callTool, paramsRaw)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+	}
+	return code
+}
+
+// runCallTool is the --call-tool diagnostic: run a single discovered tool
+// through the same execution path as the MCP handler (required-param
+// validation, JSON→CLI-arg translation, timeout resolution identical to the
+// registry — a per-tool Timeout: wins, Timeout: NONE ⇒ no deadline) and
+// print the result text to stdout. It returns the process exit code: 0 on
+// success; 1 on any failure. Execution failures (missing required param,
+// non-zero script exit, timeout) print the tool's result content to stdout
+// with a nil error; operational failures (discovery, unknown tool, --params
+// parse, unstartable script) yield a non-nil error for the stderr "Error:"
+// line and never start the script. A non-object --params is rejected by
+// parseToolArguments, which maps an explicitly empty value and JSON null to
+// {} (same leniency as the MCP handler).
+func runCallTool(scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
+	tools, err := discoverTools(scriptsAbs)
+	if err != nil {
+		return 1, fmt.Errorf("failed to discover tools: %w", err)
+	}
+
+	var tool discoveredTool
+	found := false
+	for _, candidate := range tools {
+		if candidate.Name == name {
+			tool = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		msg := fmt.Sprintf("unknown tool %q", name)
+		if len(tools) > 0 {
+			names := make([]string, len(tools))
+			for i, candidate := range tools {
+				names[i] = candidate.Name
+			}
+			msg += "; available tools: " + strings.Join(names, ", ")
+		}
+		return 1, errors.New(msg)
+	}
+
+	args, err := parseToolArguments([]byte(paramsRaw))
+	if err != nil {
+		return 1, fmt.Errorf("invalid --params %q: %w", paramsRaw, err)
+	}
+
+	if err := validateRequiredParams(args, tool.Params); err != nil {
+		fmt.Fprintln(os.Stdout, err.Error())
+		return 1, nil
+	}
+
+	result, err := executeTool(context.Background(), tool.Path, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
+	if err != nil {
+		return 1, fmt.Errorf("failed to run tool %q: %w", name, err)
+	}
+
+	var b strings.Builder
+	for _, content := range result.Content {
+		text, ok := content.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text.Text)
+	}
+	fmt.Fprintln(os.Stdout, b.String())
+
+	if result.IsError {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // runListTools is the --list-tools diagnostic: discover and print the tool
@@ -1229,6 +1320,8 @@ func main() {
 	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
 	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
 	listToolsFlag := flag.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
+	callToolFlag := flag.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
+	paramsFlag := flag.String("params", "{}", "JSON object of arguments for --call-tool (an empty value or null is treated as {})")
 	flag.Parse()
 
 	if *versionFlag {
@@ -1245,6 +1338,7 @@ func main() {
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
 	timeoutSet := false
+	callToolSet := false
 	visited := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
 		visited[f.Name] = true
@@ -1253,6 +1347,8 @@ func main() {
 			allowAllSet = true
 		case "timeout":
 			timeoutSet = true
+		case "call-tool":
+			callToolSet = true
 		}
 	})
 	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
@@ -1268,15 +1364,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *listToolsFlag {
-		// --watch is honored (live list); the server-mode flags are not.
+	callToolActive := *callToolFlag != "" || callToolSet
+	if *listToolsFlag && callToolActive {
+		fmt.Fprintln(os.Stderr, "Error: --list-tools and --call-tool are mutually exclusive")
+		os.Exit(1)
+	}
+	if *listToolsFlag || callToolActive {
+		// --watch is honored with --list-tools (live list) and ignored with
+		// --call-tool; the server-mode flags are always ignored. Presence is
+		// visit-tracked, so default-valued forms (--port=0, --host=127.0.0.1,
+		// --watch=false) are noticed too.
 		var ignored []string
 		for _, name := range serverModeFlagNames {
 			if visited[name] {
 				ignored = append(ignored, "--"+name)
 			}
 		}
-		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *watchFlag, timeout, ignored))
+		if callToolActive && visited["watch"] {
+			ignored = append(ignored, "--watch")
+		}
+		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *listToolsFlag, *watchFlag, *callToolFlag, callToolSet, *paramsFlag, timeout, ignored))
 	}
 
 	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout); err != nil {

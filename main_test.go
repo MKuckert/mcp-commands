@@ -2470,7 +2470,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, false, 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, true, false, "", false, "", 5*time.Minute, nil)
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -2485,7 +2485,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		missing := filepath.Join(tmpDir, "no-such-scripts")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, false, 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, true, false, "", false, "", 5*time.Minute, nil)
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
@@ -2503,7 +2503,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			t.Fatalf("failed to create script: %v", err)
 		}
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, false, 5*time.Minute, []string{"--host", "--port"})
+		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, true, false, "", false, "", 5*time.Minute, []string{"--host", "--port"})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -2544,7 +2544,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, 5*time.Minute, nil)
+			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
 		}()
 
 		// Initial print.
@@ -2583,6 +2583,232 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		}
 		if clears.Load() == 0 {
 			t.Error("injected clearScreen was not called before the re-print")
+		}
+	})
+}
+
+// captureStdout swaps os.Stdout to a pipe for the duration of d and returns
+// what was written (runCallTool writes result content to os.Stdout directly).
+func captureStdout(t *testing.T, d func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	os.Stdout = w
+	done := make(chan struct{})
+	var out bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&out, r)
+		r.Close()
+		close(done)
+	}()
+	d()
+	w.Close()
+	<-done
+	os.Stdout = old
+	return out.String()
+}
+
+func TestRunCallTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptsDir := filepath.Join(tmpDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	// A single marker shared by the marker scripts: subtests run in order
+	// and each clears it first (captureStdout swaps os.Stdout, so the
+	// subtests must not overlap), so a marker can only come from the run
+	// under test.
+	marker := filepath.Join(tmpDir, "marker")
+
+	writeScript := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(scriptsDir, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("failed to create %s: %v", name, err)
+		}
+	}
+	markerBody := "#!/bin/bash\necho it-ran >> " + marker + "\necho ran\n"
+	writeScript("ok.sh", markerBody)
+	writeScript("ok_param.sh", "#!/bin/bash\n# Param: path string required \"Input path\"\n"+markerBody)
+	writeScript("fail.sh", "#!/bin/bash\necho boom\nexit 3\n")
+	writeScript("sleep1.sh", "#!/bin/bash\n# Timeout: 1s\nexec sleep 5\n")
+	writeScript("slow_none.sh", "#!/bin/bash\n# Timeout: NONE\nsleep 2\necho done-slow\n")
+	writeScript("badinterp", "#!/nonexistent/interpreter\necho never\n")
+
+	markerExists := func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}
+	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
+		os.Remove(marker)
+		stdout = captureStdout(t, func() {
+			code, err = runCallTool(scriptsDir, tmpDir, global, name, params)
+		})
+		return code, err, stdout
+	}
+
+	t.Run("success_code_0_stdout_carries_output", func(t *testing.T) {
+		code, err, stdout := run("ok", `{"x":"y"}`, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 0 {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "<stdout>") || !strings.Contains(stdout, "ran") || !strings.Contains(stdout, "</stdout>") {
+			t.Errorf("stdout = %q, want the script output", stdout)
+		}
+		if !markerExists() {
+			t.Error("marker missing: the script did not run")
+		}
+	})
+
+	t.Run("nonzero_exit_code_1_output_printed", func(t *testing.T) {
+		code, err, stdout := run("fail", "{}", 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stdout, "boom") {
+			t.Errorf("stdout = %q, want the script output", stdout)
+		}
+	})
+
+	t.Run("missing_required_param_not_executed", func(t *testing.T) {
+		code, err, stdout := run("ok_param", "{}", 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stdout, "missing required parameter: path") {
+			t.Errorf("stdout = %q, want the validation message", stdout)
+		}
+		if markerExists() {
+			t.Error("script was executed despite the validation failure")
+		}
+	})
+
+	t.Run("non_object_params_rejected_before_execution", func(t *testing.T) {
+		for _, params := range []string{"42", `["x"]`, `"str"`, `"{\"a\":1}"`} {
+			code, err, _ := run("ok", params, 5*time.Minute)
+			if code != 1 || err == nil {
+				t.Errorf("--params=%s: code = %d, err = %v, want code 1 and a non-nil error", params, code, err)
+			}
+			if markerExists() {
+				t.Errorf("--params=%s: script was executed", params)
+			}
+		}
+	})
+
+	t.Run("empty_and_null_params_equivalent_to_empty_object", func(t *testing.T) {
+		for _, params := range []string{"", "null", "{}"} {
+			code, err, _ := run("ok", params, 5*time.Minute)
+			if code != 0 || err != nil {
+				t.Errorf("--params=%q: code = %d, err = %v, want success", params, code, err)
+			}
+		}
+	})
+
+	t.Run("per_tool_timeout_wins_over_global", func(t *testing.T) {
+		// sleep1.sh declares `Timeout: 1s` in its frontmatter: the per-tool
+		// value must win over the long global.
+		start := time.Now()
+		code, err, stdout := run("sleep1", "{}", 5*time.Minute)
+		if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
+			t.Errorf("timeout case took %v, want ~1s", elapsed)
+		}
+		if err != nil || code != 1 {
+			t.Fatalf("sleep1: code = %d, err = %v, want timeout", code, err)
+		}
+		if !strings.Contains(stdout, "tool timed out after 1s") {
+			t.Errorf("stdout = %q, want the timeout message", stdout)
+		}
+
+		// slow_none.sh declares `Timeout: NONE` under a short global: it must
+		// run with no deadline and complete.
+		start = time.Now()
+		code, err, out := run("slow_none", "{}", time.Second)
+		if elapsed := time.Since(start); elapsed < time.Second || elapsed > 4*time.Second {
+			t.Errorf("NONE case took %v, want ~2s (no deadline)", elapsed)
+		}
+		if err != nil || code != 0 {
+			t.Fatalf("slow_none: code = %d, err = %v, want success", code, err)
+		}
+		if !strings.Contains(out, "done-slow") {
+			t.Errorf("stdout = %q, want the script output", out)
+		}
+	})
+
+	t.Run("unstartable_script_hard_error", func(t *testing.T) {
+		code, err, stdout := run("badinterp", "{}", 5*time.Minute)
+		if code != 1 || err == nil {
+			t.Fatalf("code = %d, err = %v, want code 1 and a non-nil error", code, err)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty (hard errors go to stderr)", stdout)
+		}
+	})
+}
+
+func TestRunDiagnosticCallTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptsDir := filepath.Join(tmpDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptsDir, "ok.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, false, "", true, "{}", 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "--call-tool requires a non-empty tool name") {
+			t.Errorf("stderr = %q, want the startup error", stderr.String())
+		}
+	})
+
+	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
+		var stderr bytes.Buffer
+		// runCallTool prints the result to os.Stdout (plan-fixed signature);
+		// capture it, and the notice goes to the stderr writer.
+		var code int
+		captured := captureStdout(t, func() {
+			code = runDiagnostic(nil, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
+		})
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
+		}
+		if !strings.Contains(captured, "ran") {
+			t.Errorf("stdout = %q, want the script output", captured)
+		}
+		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --watch"
+		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 || !strings.Contains(stderr.String(), wantNotice) {
+			t.Errorf("stderr = %q, want exactly one notice %q", stderr.String(), wantNotice)
+		}
+	})
+
+	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, filepath.Join(tmpDir, "no-such"), false, false, "ok", true, "{}", 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "scripts path inaccessible") {
+			t.Errorf("stderr = %q, want the path error", stderr.String())
 		}
 	})
 }

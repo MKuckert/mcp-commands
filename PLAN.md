@@ -216,7 +216,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
     file change (existing `TestWatchTools` pattern; `watchTools` itself stays
     behavior-identical — its tests green), screen-clear only on TTY (test
     injects the clear function), re-print uses the re-queried width.
-- [ ] **Task 3: `--call-tool` + `--params` debug invocation**
+- [/] **Task 3: `--call-tool` + `--params` debug invocation**
   - **Description:** Add `--call-tool` (string) and `--params` (string,
     default `{}`) flags and the mutual-exclusion check against `--list-tools`
     (both set → startup error). Implement `runCallTool(scriptsAbs, dirAbs
