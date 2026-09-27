@@ -153,7 +153,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [ ] **Task 1: Shared description helper + list rendering**
+- [/] **Task 1: Shared description helper + list rendering**
   - **Description:** Extract `registeredDescription(desc string, timeout
     time.Duration) string` (frontmatter desc + ` ` + `timeoutSuffix`; empty
     desc → suffix alone) from `toolRegistry.replace`, and
