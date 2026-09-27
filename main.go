@@ -46,7 +46,7 @@ const (
 	listIndent            = "     " // included in the wrap width budget
 )
 
-var serverVersion = "0.6.0"
+var serverVersion = "0.7.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
@@ -1309,7 +1309,7 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 func main() {
 	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
-	watchFlag := flag.Bool("watch", false, "Enable hot-reload on script directory changes")
+	watchFlag := flag.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
@@ -1321,7 +1321,7 @@ func main() {
 	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
 	listToolsFlag := flag.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
 	callToolFlag := flag.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
-	paramsFlag := flag.String("params", "{}", "JSON object of arguments for --call-tool (an empty value or null is treated as {})")
+	paramsFlag := flag.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
 	flag.Parse()
 
 	if *versionFlag {

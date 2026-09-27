@@ -243,7 +243,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
     mode; server-mode flags (`--host`, `--port`, `--watch`, `--api-key`,
     CORS) alongside `--call-tool` → the single stderr notice, no server
     started.
-- [ ] **Task 4: Docs, usage text, version**
+- [/] **Task 4: Docs, usage text, version**
   - **Description:** README: new **Diagnostics** section in Usage —
     `--list-tools` (with the rendered example from the Objective; wrap width
     = terminal window width on a TTY, 160 fallback when piped) and the live

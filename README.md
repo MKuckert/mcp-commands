@@ -212,6 +212,61 @@ The server translates JSON properties into CLI flags.
 - **Arrays:** `{"items": ["a", "b"]}` ➡️ `--items a --items b`
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
 
+### Diagnostics
+
+Two self-contained diagnostic modes reuse the exact discovery, frontmatter
+parsing and validation of the server — and never start a server.
+
+**List tools** — preview what the MCP server would expose:
+
+```console
+$ mcp-commands --dir . --scripts ./scripts --list-tools
+
+build(profile:str)
+     Build the project with the given profile. (timeout: 5m0s)
+
+run([args:str])
+     Run the project. (timeout: none)
+
+status()
+     Status of the demo app. (timeout: 10s)
+```
+
+- Names without parentheses declare no parameters. Parameters in brackets are
+  optional; unbracketed parameters are required.
+- The description comes from the frontmatter `Description:` line; the effective
+  per-tool timeout is shown (a per-tool `Timeout:` wins over `--timeout`;
+  `none` = no deadline).
+- Lines longer than 160 columns are wrapped (never mid-word); add `--watch`
+  to re-print the list live as the scripts directory changes.
+
+**Call one tool** — run it once, bypassing the MCP protocol:
+
+```console
+$ mcp-commands --dir . --scripts ./scripts --call-tool build --params '{"profile":"release"}'
+
+<stdout>
+building with release
+</stdout>
+
+$ mcp-commands --dir . --scripts ./scripts --call-tool build
+missing required parameter: profile
+```
+
+- `--params` is a JSON object (default: `{}`); required-parameter validation
+  applies exactly as in server mode.
+- The tool's output is printed verbatim under `<stdout>`/`<stderr>` markers
+  (markers appear only for streams that produced output).
+- Arguments are translated to CLI flags with the [rules above](#argument-translation-rules).
+- Exit code is 0 when the tool exits 0; 1 when it exits non-zero, times out,
+or fails validation.
+- Server-mode flags (`--host`, `--port`, …) are ignored in this mode; if you
+  pass them explicitly, a single notice is printed to stderr.
+
+Inherited quirk, same as server mode: a parameter name declared more than
+once is last-wins in the schema, but validation enforces *any* `required`
+declaration of that name.
+
 ## AI Usage
 
 The implementation of `mcp-commands` is completely done by an AI. The idea and guidance for the plan is mine, the plan writing and code is the AI. It wrote the entire server, including argument parsing, script discovery, and MCP protocol handling, I did the review.
