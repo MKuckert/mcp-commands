@@ -210,8 +210,8 @@ and exits non-zero.
     code; `--help` output and README consistent.
 - [ ] **Task 5: Commit & branch hygiene (cross-cutting)**
   - **Description:** Work lands on branch `feat/tool-diagnostics` off `main`.
-    Conventional commits in order: `feat: render tool list output`
-    (includes PLAN.md + archive), `feat: --list-tools flag`, `feat:
+    Conventional commits in order: `feat: render tool list output`,
+    `feat: --list-tools flag`, `feat:
     --call-tool and --params debug invocation`, `docs: diagnostics and version
     0.7.0`. `go build ./...`, `go vet ./...`, `go test ./...` green at every
     commit. Final manual smoke: build, then run `--list-tools` and
