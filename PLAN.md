@@ -187,7 +187,7 @@ in the `--call-tool` semantics above; this section only summarizes them):
     smoke, not unit tests). Existing watch/registry tests that assert
     exact description strings (e.g. `"beta updated (timeout: …)"`) stay green
     unchanged.
-- [ ] **Task 2: `--list-tools` flag, dispatch & live mode**
+- [/] **Task 2: `--list-tools` flag, dispatch & live mode**
   - **Description:** Add `--list-tools` bool flag. In `main()`, after the
     existing required-flag check and the fail-fast `resolveCORS` /
     `resolveTimeout`, branch: if `--list-tools`, discover (`discoverTools` on

@@ -748,34 +748,24 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
-// watchTools runs a continuous loop that watches the scripts directory for changes
-// using fsnotify for event-driven file watching. It implements a debounce mechanism
-// (500ms delay) to avoid excessive discoverTools calls from rapid file events,
-// which are common on macOS KVO. Errors from the watcher are logged but do not
-// crash the server, ensuring robust operation even if the watched directory is
-// deleted or permissions change.
-func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
+// watchChanges watches dir with fsnotify and invokes onChange once per
+// debounced burst of Create/Write/Remove/Rename events. Watcher errors are
+// logged to stderr but do not stop the loop, ensuring robust operation even
+// if the watched directory is deleted or permissions change. It returns when
+// ctx is done or the watcher channels close.
+func watchChanges(ctx context.Context, dir string, onChange func()) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
 	}
 	defer watcher.Close()
 
-	err = watcher.Add(scriptsDir)
-	if err != nil {
+	if err := watcher.Add(dir); err != nil {
 		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
-	// Initial discovery
-	tools, err := discoverTools(scriptsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: initial tool discovery failed: %v\n", err)
-	} else {
-		registry.replace(tools)
-	}
-
 	debounceTimer := time.NewTimer(watchDebounceDelay)
-	debounceTimer.Stop()
+	defer debounceTimer.Stop()
 	debounceActive := false
 
 	for {
@@ -807,16 +797,34 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 
 		case <-debounceTimer.C:
 			debounceActive = false
-			// After debounce delay, rediscover tools
-			tools, err := discoverTools(scriptsDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
-				continue
-			}
-
-			registry.replace(tools)
+			onChange()
 		}
 	}
+}
+
+// watchTools runs a continuous loop that watches the scripts directory for
+// changes, re-discovering and re-registering the tools on every debounced
+// change (built on watchChanges; the interval parameter is retained for the
+// existing call sites but the debounce is the fixed watchDebounceDelay).
+func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
+	// Initial discovery
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: initial tool discovery failed: %v\n", err)
+	} else {
+		registry.replace(tools)
+	}
+
+	return watchChanges(ctx, scriptsDir, func() {
+		// After debounce delay, rediscover tools
+		tools, err := discoverTools(scriptsDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
+			return
+		}
+
+		registry.replace(tools)
+	})
 }
 
 func validateRequiredParams(args map[string]any, params []paramSpec) error {
@@ -893,6 +901,112 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
 	}, nil
+}
+
+// resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
+// both are accessible. Shared by the server-mode run() and the diagnostic
+// branch so the resolution behavior and error text stay identical in all
+// modes.
+func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err error) {
+	scriptsAbs, err = filepath.Abs(scriptsDir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve scripts path: %w", err)
+	}
+	dirAbs, err = filepath.Abs(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve dir path: %w", err)
+	}
+	if _, err := os.Stat(scriptsAbs); err != nil {
+		return "", "", fmt.Errorf("scripts path inaccessible: %w", err)
+	}
+	if _, err := os.Stat(dirAbs); err != nil {
+		return "", "", fmt.Errorf("dir path inaccessible: %w", err)
+	}
+	return dirAbs, scriptsAbs, nil
+}
+
+// clearScreen clears the terminal (ANSI erase-screen + cursor-home). It is a
+// no-op when stdout is not a TTY, so piped output simply accumulates. It is
+// a package variable so tests can inject a recorder.
+var clearScreen = func(stdout io.Writer) {
+	file, ok := stdout.(*os.File)
+	if !ok || !term.IsTerminal(int(file.Fd())) {
+		return
+	}
+	_, _ = stdout.Write([]byte("\x1b[2J\x1b[H"))
+}
+
+// notifySignals wraps signal.NotifyContext as a package variable so tests can
+// inject a cancelable context in place of real SIGINT/SIGTERM.
+var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, sig...)
+}
+
+// serverModeFlagNames lists the flags that configure the MCP server, in a
+// stable order for the diagnostic-mode ignored-flags notice. (--watch is
+// honored in --list-tools mode; with --call-tool it is added to the notice
+// separately.)
+var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection"}
+
+// runDiagnostic runs the --list-tools diagnostic and returns the process
+// exit code. Diagnostics never start the MCP server: the process exits after
+// the diagnostic completes, except the live --list-tools --watch mode, which
+// runs until SIGINT/SIGTERM. Result content goes to stdout; warnings and
+// operational errors go to stderr.
+func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, timeout time.Duration, ignoredFlags []string) int {
+	if len(ignoredFlags) > 0 {
+		fmt.Fprintf(stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(ignoredFlags, ", "))
+	}
+	return runListTools(stdout, stderr, dir, scriptsDir, watch, timeout)
+}
+
+// runListTools is the --list-tools diagnostic: discover and print the tool
+// list (renderToolList, width re-queried at every print) to stdout, then
+// exit 0. With watch it becomes a live list: after the initial print, every
+// debounced change to the scripts directory clears the screen (TTY only) and
+// re-prints the full list with the existing per-scan stderr warnings, until
+// the process is signaled. Path resolution errors are a startup failure
+// (stderr, exit 1).
+func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, timeout time.Duration) int {
+	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+
+	printList := func(tools []discoveredTool) {
+		if len(tools) == 0 {
+			fmt.Fprintf(stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
+		}
+		fmt.Fprint(stdout, renderToolList(tools, timeout, resolveWrapWidth(stdout)))
+	}
+
+	tools, err := discoverTools(scriptsAbs)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	printList(tools)
+
+	if !watch {
+		return 0
+	}
+
+	sigCtx, cancel := notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := watchChanges(sigCtx, scriptsAbs, func() {
+		clearScreen(stdout)
+		tools, err := discoverTools(scriptsAbs)
+		if err != nil {
+			fmt.Fprintf(stderr, "Warning: failed to rediscover tools: %v\n", err)
+			return
+		}
+		printList(tools)
+	}); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(stderr, "Warning: watch loop stopped: %v\n", err)
+	}
+	return 0
 }
 
 // resolveAPIKey returns the token from the flag value if non-empty,
@@ -1114,6 +1228,7 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
 	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
+	listToolsFlag := flag.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
 	flag.Parse()
 
 	if *versionFlag {
@@ -1123,14 +1238,16 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--timeout <duration>] | [--no-timeout]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
 	timeoutSet := false
+	visited := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
 		switch f.Name {
 		case "allow-all-origins":
 			allowAllSet = true
@@ -1151,6 +1268,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *listToolsFlag {
+		// --watch is honored (live list); the server-mode flags are not.
+		var ignored []string
+		for _, name := range serverModeFlagNames {
+			if visited[name] {
+				ignored = append(ignored, "--"+name)
+			}
+		}
+		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *watchFlag, timeout, ignored))
+	}
+
 	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -1163,20 +1291,9 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 
 	apiKey = resolveAPIKey(apiKey)
 
-	scriptsAbs, err := filepath.Abs(scriptsDir)
+	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {
-		return fmt.Errorf("failed to resolve scripts path: %w", err)
-	}
-	dirAbs, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("failed to resolve dir path: %w", err)
-	}
-
-	if _, err := os.Stat(scriptsAbs); err != nil {
-		return fmt.Errorf("scripts path inaccessible: %w", err)
-	}
-	if _, err := os.Stat(dirAbs); err != nil {
-		return fmt.Errorf("dir path inaccessible: %w", err)
+		return err
 	}
 
 	tools, err := discoverTools(scriptsAbs)

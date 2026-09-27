@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2403,4 +2404,185 @@ func TestResolveToolTimeout(t *testing.T) {
 			t.Errorf("%s: resolveToolTimeout = %v, want %v", tt.name, got, tt.want)
 		}
 	}
+}
+
+func TestWatchChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+		t.Fatalf("failed to modify script: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("onChange did not fire on file change")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+}
+
+func TestResolveToolPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dirAbs, scriptsAbs, err := resolveToolPaths(tmpDir, tmpDir)
+	if err != nil {
+		t.Fatalf("resolveToolPaths failed: %v", err)
+	}
+	if dirAbs != tmpDir || scriptsAbs != tmpDir {
+		t.Errorf("resolveToolPaths = (%q, %q), want (%q, %q)", dirAbs, scriptsAbs, tmpDir, tmpDir)
+	}
+
+	if _, _, err := resolveToolPaths(tmpDir, filepath.Join(tmpDir, "no-such-scripts")); err == nil || !strings.Contains(err.Error(), "scripts path inaccessible") {
+		t.Errorf("expected 'scripts path inaccessible' error, got %v", err)
+	}
+	if _, _, err := resolveToolPaths(filepath.Join(tmpDir, "no-such-dir"), tmpDir); err == nil || !strings.Contains(err.Error(), "dir path inaccessible") {
+		t.Errorf("expected 'dir path inaccessible' error, got %v", err)
+	}
+}
+
+func TestRunDiagnosticListTools(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, false, 5*time.Minute, nil)
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "Warning: No executable scripts found in "+emptyDir) {
+			t.Errorf("stderr = %q, want the no-scripts warning", stderr.String())
+		}
+	})
+
+	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
+		missing := filepath.Join(tmpDir, "no-such-scripts")
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, false, 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "Error:") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
+			t.Errorf("stderr = %q, want the path error", stderr.String())
+		}
+	})
+
+	t.Run("prints_list_and_ignored_flags_notice", func(t *testing.T) {
+		scriptPath := filepath.Join(tmpDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha tool\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, false, 5*time.Minute, []string{"--host", "--port"})
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if !strings.Contains(stdout.String(), "alpha()") || !strings.Contains(stdout.String(), "alpha tool (timeout: 5m0s)") {
+			t.Errorf("stdout = %q, want the rendered tool", stdout.String())
+		}
+		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --port"
+		if !strings.Contains(stderr.String(), wantNotice) {
+			t.Errorf("stderr = %q, want notice %q", stderr.String(), wantNotice)
+		}
+		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 {
+			t.Errorf("stderr = %q, want exactly one notice", stderr.String())
+		}
+	})
+
+	t.Run("live_mode_reprints_on_change", func(t *testing.T) {
+		scriptsDir := t.TempDir()
+		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+
+		var clears atomic.Int32
+		var cancel context.CancelFunc
+		oldClear := clearScreen
+		clearScreen = func(io.Writer) { clears.Add(1) }
+		oldNotify := notifySignals
+		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+			c, c2 := context.WithCancel(ctx)
+			cancel = c2
+			return c, func() {}
+		}
+		defer func() {
+			clearScreen = oldClear
+			notifySignals = oldNotify
+		}()
+
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, 5*time.Minute, nil)
+		}()
+
+		// Initial print.
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") {
+			t.Fatalf("initial print missing: %q", stdout.String())
+		}
+
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+
+		deadline = time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "beta updated (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "beta updated (timeout: 5m0s)") {
+			t.Fatalf("live re-print missing after change: %q", stdout.String())
+		}
+		// The re-print uses the re-queried width (non-TTY buffer → 160).
+		if !strings.Contains(stdout.String(), "     beta updated (timeout: 5m0s)") {
+			t.Errorf("re-print not rendered at the 160-rune fallback: %q", stdout.String())
+		}
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("live mode exit code = %d, want 0", code)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("live mode did not stop after cancel")
+		}
+		if clears.Load() == 0 {
+			t.Error("injected clearScreen was not called before the re-print")
+		}
+	})
 }
