@@ -1,185 +1,369 @@
-# Plan: Configurable & Per-Tool Timeout Handling
+# Plan: Tool Diagnostics (`--list-tools` / `--call-tool`)
 
 ## Objective
 
-Make tool execution timeouts configurable at three levels, in precedence order
-(per-tool > CLI > default):
+Give users a way to inspect and exercise the tools **without an MCP client**:
 
-1. **Default:** 5 minutes (current behavior, unchanged).
-2. **Global:** new `--timeout <duration>` CLI flag (formatted duration string)
-   and `--no-timeout` boolean to disable the global timeout.
-3. **Per-tool:** new `Timeout: <duration>` line in a script's frontmatter
-   (first `scanHeaderLines` = 30 lines), using the same format string as the
-   flag, with the literal `NONE` meaning no timeout.
+1. **`--list-tools`** — discover the scripts directory, print every
+   discovered tool as `name(<signature>)` plus its full registered description
+   (word-wrapped). By itself this is one-shot and exits; the MCP server is
+   **not** started (no port, no stdio transport, no watcher). This shows
+   exactly what the LLM sees — including the `(timeout: …)` suffix.
+   With **`--list-tools --watch`** it becomes a **live list**: after the
+   initial print, every detected script change clears the screen (only when
+   stdout is a TTY) and re-prints the full list, warnings included — fast
+   iteration while developing tools.
+2. **`--call-tool=<name>`** with optional **`--params='<json object>'`** —
+   one-shot: run a single discovered tool through the *same* execution path as
+   the MCP handler (required-param validation, JSON→CLI-arg translation,
+   timeout resolution), print the result text to stdout, and map the outcome to
+   a process exit code. Debugging a misbehaving tool no longer needs a client.
 
-A script whose frontmatter declares `Timeout:` always wins over the global;
-a script without one inherits the global. `Timeout: 0s` and `Timeout: NONE`
-are equivalent (zero duration = no deadline).
+Example output (excerpt — the source toolset has 9 executables; this is the
+spec-correct rendering of the first two):
+
+```
+meridian_build([profile:str], [scope:str], [target:str], [timings:bool])
+     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then cached.
+     Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) — prefer scope=app
+     for incremental work. (timeout: none)
+
+meridian_fetch([commit:str])
+     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. Run first on a
+     remote host before any other meridian tool. (timeout: 2m0s)
+```
 
 ## Requirements & Decisions
 
-- **Frameworks:** None new — single-file Go app (`main.go`), existing deps only
-  (`modelcontextprotocol/go-sdk`, `fsnotify`). No new libraries; duration
-  parsing is a small stdlib-only helper (stdlib `time.ParseDuration` is rejected:
-  it accepts negatives, decimals, and space-less compounds only — see parser spec).
-- **Chosen Libraries:** n/a (stdlib only).
-- **Error Handling Strategy:**
-  - `--timeout` is parsed **at startup, before the server starts** (same fail-fast
-    pattern as `resolveCORS`). Invalid value → stderr error, exit 1. The server
-    never boots with a broken config.
-  - An invalid per-tool `Timeout:` value **does not** fail discovery or
-    registration. It logs `Warning: ignoring invalid Timeout in <file>: <reason>`
-    to stderr and falls back to the global timeout (visible degradation, same
-    behavior as invalid `Param:` annotations today). This keeps hot-reload robust:
-    a user editing a script's timeout mid-flight never breaks the tool.
-  - Timeout expiry at execution: unchanged — kill via `exec.CommandContext`,
-    return `IsError: true` result `"tool timed out after <d>\n<partial output>"`.
+- **Frameworks:** Single-file Go app (`main.go`), existing deps
+  (`modelcontextprotocol/go-sdk`, `fsnotify`) plus one new: **`golang.org/x/term`
+  (pure Go, no cgo)** — used only for `GetSize` to read the terminal window
+  width in wrapped output. Word wrapping itself is a small stdlib-only
+  helper (rune-based).
+- **Chosen Libraries:** `golang.org/x/term` (window width; see above).
 
-**Format spec (shared by flag and frontmatter):**
+**`--list-tools` output format (spec):**
 
-- Whitespace-separated list of tokens, each exactly `^<digits><unit>$` with unit
-  one of `s`, `m`, `h` (sub-second units are not meaningful for tool timeouts
-  and are rejected). At least one token required. Digits-only integers (no
-  decimals, no `+`/`-` signs, no bare unit). Examples: `5m`, `60s`,
-  `1h 30m 5s`. Whitespace between tokens is optional.
-- `NONE` (case-insensitive, leading/trailing whitespace trimmed) → no timeout.
-- Result of `0` (e.g. `0s`) → no timeout, identical to `NONE`.
-- Overflow guard: each term is checked for multiplication overflow
-  (`n > maxDuration/multiplier`) and the running sum for addition overflow
-  (`total > maxDuration-term`); a violating value is rejected with a clear
-  `overflows` error before any wraparound arithmetic can produce a positive
-  duration.
+- One block per tool, in discovery order (already sorted by filename),
+  separated by exactly one blank line.
+- Line 1: `name(<decls>)` — one `<decl>` per parameter in declaration order:
+  `key:shorttype` if required, `[key:shorttype]` if optional, joined by `, `.
+  Short types: `string`→`str`, `number`→`num`, `boolean`→`bool`.
+  A tool with no parameters renders as `name()`.
+- Duplicate parameter names: dedup **last-wins for type/required**, rendered
+  at the **first-occurrence position** (mirrors `buildInputSchema`, whose
+  `required` array keeps first-occurrence order) — so the signature always
+  matches the registered schema.
+- Lines 2…n: the **registered description** (frontmatter `Description:` plus
+  the `(timeout: <d>)` / `(timeout: none)` suffix) word-wrapped. The wrap
+  contract, deterministic: **width = the terminal window width (in runes)**
+  when stdout is a TTY (queried per print via `x/term.GetSize(1)`, so window
+  resizes are honored), falling back to the `listWrapWidth = 160` constant
+  when stdout is not a TTY (pipes, CI, tests) or the query fails; the width
+  always **INCLUDES the 5-space indent** (content budget = width − 5);
+  rune-based; greedy (fill each line as far as it fits); breaks at runs of
+  whitespace, which collapse to a single space; never splits a word. A
+  description that fits stays one line; a single unbreakable token longer than
+  the budget is emitted whole on its own line (visible, never truncated).
+- The per-tool timeout for the suffix resolves with the **same precedence as
+  the registry** (per-tool `Timeout:` > global `--timeout`/`--no-timeout` >
+  default): a shared helper `resolveToolTimeout(tool discoveredTool, global
+  time.Duration) time.Duration` is used by *both* `replace` and
+  `renderToolList` so the two call sites cannot drift.
+- Printed to **stdout**; discovery warnings (invalid `Param:`/`Timeout:`)
+  continue going to **stderr** exactly as today.
+- The description+suffix assembly is extracted from `toolRegistry.replace`
+  into a shared helper `registeredDescription(desc string, timeout
+  time.Duration) string` (DRY): the registry and the list renderer must never
+  drift apart.
+- When server-mode flags (`--host`, `--port`, `--api-key`, CORS) are
+  explicitly passed in diagnostic mode they are ignored (with `--watch`
+  additionally, in `--call-tool` mode), and the process prints a single stderr
+  notice naming the ignored flags (disclosed, per fail-loud — never silent).
 
-**Precedence decisions (recorded):**
+**`--call-tool` semantics:**
 
-- `--no-timeout` and `--timeout` are **mutually exclusive** (Round 2; the
-  earlier "no-timeout beats --timeout" decision is retired): passing both is a
-  startup error, mirroring the CORS `--allowed-origins` + `--allow-all-origins`
-  contradiction pattern. The `--timeout` flag visit is tracked via `flag.Visit`
-  so an explicitly empty `--timeout=` is distinguishable from the `""` default
-  and fails fast on parse (empty → error); the default 5m applies only when the
-  flag was omitted entirely.
-- Per-tool `Timeout:` **always** overrides the global, even if the global is
-  `--no-timeout`: an author who pinned `Timeout: 30s` gets 30s; authors get
-  predictable per-script behavior.
-- `Timeout:` uses **first occurrence wins** (same rule as `Description:`);
-  multiple lines are allowed, extras are silently ignored.
-- No env-var override for the global (YAGNI; flag + frontmatter cover the need).
-- When no timeout applies, the exec context is the request context *itself*
-  (client cancellation/abort still kills the script — "no timeout" means
-  "no deadline", never "uninterruptible").
+- `--params` is a string flag, default `{}`; an explicitly empty `--params=`
+  **and a JSON `null` payload** are both accepted as `{}` — the existing
+  `parseToolArguments` already maps `""`/`null` → `{}` and the diagnostic
+  call inherits that leniency verbatim (documented; no stricter diagnostic-
+  only check). Anything else must be a JSON object (non-objects and
+  double-encoded JSON are rejected by the same parser). Parse failure →
+  stderr message, **exit 1, the script is never started**.
+- `--call-tool` is a string flag and an explicit `--call-tool=` produces the
+  same empty value as omitting it; its explicit presence is tracked with
+  `flag.Visit` (the same pattern as `--timeout`/`--allow-all-origins`), and an
+  explicitly empty tool name is a **startup error** — it must never fall
+  through to server mode.
+- The tool name is looked up exactly among discovered tools. Unknown name →
+  stderr `Error: unknown tool "x"` listing the available names, **exit 1**.
+- Execution reuses the MCP handler body verbatim: `validateRequiredParams` →
+  `argumentsToCLIArgs` → `executeTool(ctx, path, args, resolvedTimeout,
+  dirAbs)`. Timeout resolution is identical to the registry: per-tool
+  `Timeout:` > global `--timeout`/`--no-timeout` > 5m default — so the debug
+  call honors the exact production budget, including `Timeout: NONE` ⇒ **no
+  deadline** (a long build can be re-called to completion; intentional and
+  documented).
+- Result reporting: every `TextContent` is written to **stdout** (newline-
+  separated). `IsError: true` (validation failure, non-zero script exit,
+  timeout) → content still printed to stdout, **exit 1**. Hard execution
+  errors (script unstartable) → stderr, **exit 1**. Success → **exit 0**.
+- Inherited quirk (document, do not change): `validateRequiredParams` iterates
+  *all* declarations, so a duplicate name declared `required` then `optional`
+  is still enforced by `--call-tool` although the schema marks it optional
+  (last-wins) — identical to the production handler.
+
+**Mode dispatch & flag rules:**
+
+- `--list-tools` and `--call-tool` are **mutually exclusive** — passing both is
+  a startup error (fail loud, mirrors the `--timeout`/`--no-timeout` pattern).
+- In diagnostic mode the process exits after the diagnostic runs (except the
+  live list mode below). **`--watch` is honored with `--list-tools`** (live
+  list); with `--call-tool` it is ignored. The remaining server-mode flags —
+  **`--host`, `--port`, `--api-key`**, and the CORS flags — are ignored in
+  diagnostic mode (with the stderr notice above, documented in the usage text
+  and README); they are still fail-fast-validated so a typo never masquerades
+  as a silent success. Explicit presence is detected with **`flag.Visit`
+  tracking, not value checks** — `--port=0`, `--host=127.0.0.1`, and
+  `--watch=false` (default-valued forms) are all "explicitly passed" and
+  surface in the notice. `--dir` and `--scripts` remain required in all modes
+  (`--dir` is only consumed by `--call-tool`). The diagnostic branch resolves
+  paths itself — the `filepath.Abs` + `os.Stat` pair is extracted from `run()`
+  into a shared helper so the resolution behavior and error text stay
+  identical in both modes.
+- Because `--call-tool` must resolve the tool timeout, `resolveTimeout` runs
+  (fail-fast, as today) before the diagnostic branch; `resolveCORS` likewise.
+  The MCP server, registry, and watcher are constructed only in server mode.
+- `serverVersion` bumps `0.6.0` → **`0.7.0`** (new user-facing capability).
+
+**Error handling strategy:** fail-loud-fail-fast, per the global directive —
+with the streams split by case (the authoritative per-case rules are the ones
+in the `--call-tool` semantics above; this section only summarizes them):
+
+- **Operational failures** — startup flag validation, `--params` parse
+  failure, unknown tool name, unstartable script → **stderr** reason, **exit
+  1**, the script is never started.
+- **Execution failures** — missing required param, non-zero script exit,
+  timeout expiry → the tool's result content on **stdout** (inspectable,
+  with the timeout/validation message), **exit 1**.
+- No fallbacks, no silent degradation: every non-success path is announced on
+  exactly one stream per the split above and exits non-zero.
 
 ## Implementation Steps
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [x] **Task 1: Duration parser + flag plumbing**
-  - **Description:** Add `parseTimeoutDuration(raw string) (time.Duration, error)`
-    in `main.go` implementing the format spec above (returns `0` for `NONE`;
-    rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI
-    flags `--timeout` (string, default `""` → `5 * time.Minute`) and `--no-timeout`
-    (bool). Resolve in `main()` before `run()` (fail-fast on parse error, like
-    CORS): `--timeout` + `--no-timeout` ⇒ mutual-exclusion error; `--no-timeout`
-    ⇒ 0; `--timeout` visited ⇒ parsed value (explicit empty ⇒ parse error);
-    else 5m. The `--timeout` visit is tracked with `flag.Visit` (pattern shared
-    with `--allow-all-origins`). The parser enforces the overflow guard above.
-    Thread the resolved `time.Duration` through `run(...)` into
-    `newToolRegistry(server, dir, globalTimeout)`
-    (new field on `toolRegistry`).
-  - **Review Criteria:** Table tests cover: `5m`, `60s`, `1h 30m 5s` (sums
-    correctly), `NONE`/`none`/` NONE `, `0s` → 0; accepts `5m 5m` (10m); rejects
-    sub-second `250ms`/`250us`/`250µs`/`1000ns`, `-5m`, `+5m`, `1.5h`, `m5`,
-    `h`, `""`, unknown units. Overflow: three ~max terms whose sum exceeds
-    `math.MaxInt64` (`876000h × 3`) and a single term whose seconds→nanoseconds
-    multiply overflows (`9223372037s`) are rejected with an `overflows` error.
-    `resolveTimeout`: `--no-timeout` + `--timeout` ⇒ mutual-exclusion error;
-    explicit empty `--timeout=` ⇒ parse error; `--no-timeout` alone ⇒ 0;
-    omitted ⇒ 5m. Startup with `--timeout bogus` exits 1 with a clear message.
-    `go vet` clean, no new deps in `go.mod`; the three existing
-    `newToolRegistry(server, dir)` call sites in main_test.go are updated to the
-    new signature in the same commit (reviewer advisory, round 1).
-- [x] **Task 2: Per-tool `Timeout:` frontmatter**
-  - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and timeout
-    extraction (first match within `scanHeaderLines`; `nil` when absent,
-    `&0` for `NONE`/`0`, `&d` when valid; invalid value → stderr warning,
-    `nil` so the global applies). Round 2: merged with `extractDescription`
-    and `extractParams` into a single-pass `extractFrontmatter(path)
-    (desc, params, timeout *time.Duration)` — one `os.Open` + scanner, first
-    `Description:`, all valid `Param:` lines, first `Timeout:`. `discoveredTool`
-    carries one `Timeout *time.Duration` (nil = undeclared, `&0` = NONE);
-    populated in `discoverTools`.
-  - **Review Criteria:** Tests assert via `extractFrontmatter`: present/absent
-    (pointer nil vs non-nil), `NONE` vs `0s` vs `30s`, value beyond line 30
-    ignored, first-of-multiple wins. The invalid-value case captures stderr via
-    a pipe (restoring `os.Stderr`) and asserts the warning names the script file
-    AND states the invalid value's reason. Hot reload of a script whose `Timeout:`
-    changed re-registers with the new value (covered by existing watch test
-    pattern).
-- [x] **Task 3: Apply resolved timeout at execution**
-  - **Description:** In `toolRegistry.replace`, handler resolves
-    `t := r.globalTimeout; if tool.Timeout != nil { t = *tool.Timeout }` and
-    passes `t` to `executeTool` (replacing the `defaultToolTimeout` argument).
-    In
-    `executeTool`, only call `context.WithTimeout(ctx, timeout)` when
-    `timeout > 0`; otherwise use `ctx` directly (cancellation preserved). Append
-    a short suffix to the registered tool description, e.g.
-    `(timeout: 30s)` / `(timeout: none)`, so the LLM knows the budget.
-  - **Review Criteria:** Registry-level test (pattern:
-    `TestRequiredParamValidationViaRegistry`): tool with `Timeout: &1s` running a
-    `sleep 5` script returns `IsError` + "timed out after 1s" within ~1–2s;
-    same script via a tool *without* `Timeout:` under `--timeout`-style global
-    of e.g. 2s gets the global; `Timeout: NONE` under a short global still
-    completes (short script). Zero/`NONE` path uses request ctx: cancelling the
-    caller ctx kills the script. Description suffix present and correct for
-    all three cases (set, none, inherited).
-- [x] **Task 4: Docs, usage text, README**
-  - **Description:** Update the `Usage:` line in `main.go` with `[--timeout <duration>] | [--no-timeout]`.
-    README: extend the Safety First bullet, the Usage section with both flags,
-    and add a frontmatter subsection documenting `Timeout: <duration>` / `NONE`
-    with the format spec, precedence rules, and a worked example script header.
-  - **Review Criteria:** README examples copy-pasteable; every documented
-    behavior matches implemented behavior (precedence, `NONE` case-insensitivity,
-    first-match rule, warning-on-invalid); usage text and `flag` help strings
-    consistent with README.
-
-- [x] **Task 5: Commit & branch hygiene (cross-cutting)**
-  - **Description:** Work lands on branch `feat/timeout-handling` off `main`.
-    One conventional commit per task in order: `feat: parse timeout duration
-    strings` (includes PLAN.md), `feat: --timeout and --no-timeout flags`,
-    `feat: per-tool Timeout: frontmatter`, `feat: apply resolved tool timeouts`,
-    `docs: timeout configuration`. `go build ./...`, `go vet ./...`,
-    `go test ./...` green at every commit; final manual smoke: stdio run with
-    a `sleep 10` script under `Timeout: 1s` and under `--no-timeout`.
-  - **Review Criteria:** `git log main..feat/timeout-handling` shows exactly the
-    five commits, all building/testing green; PR ready to open.
-    Reviewer advisory (round 1): the `newToolRegistry` signature change breaks
-    three existing call sites in main_test.go, and the exact-equality assertion
-    `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges`
-    (line ~352) must be updated for the suffix — update them in the same commit
-    as Task 3 so every commit builds green.
+- [x] **Task 1: Shared description helper + list rendering**
+  - **Description:** Extract `registeredDescription(desc string, timeout
+    time.Duration) string` (frontmatter desc + ` ` + `timeoutSuffix`; empty
+    desc → suffix alone) from `toolRegistry.replace`, and
+    `resolveToolTimeout(tool discoveredTool, global time.Duration)
+    time.Duration` (per-tool wins over global); update `replace` to call both
+    (registered descriptions byte-identical to today). Add `listParamDecl(p
+    paramSpec) string` (`str`/`num`/`bool`, brackets for optional) with
+    dedup: last-wins for type/required, **first-occurrence position** in the
+    joined signature. Add `renderToolList(tools []discoveredTool, globalTimeout
+    time.Duration, width int) string`: per tool, the signature line, the
+    word-wrapped description (width incl. the 5-space indent; the caller
+    supplies `resolveWrapWidth`'s result so the TTY query is re-run at every
+    print), and a trailing blank line between blocks. Add `wordWrap(s string, indent
+    string, width int) []string` per the contract above (rune-based, greedy,
+    whitespace runs collapse to one break, no word splitting, overlong tokens
+    pass through whole) and `resolveWrapWidth(stdout io.Writer) int`: stdout
+    is a TTY → the window width from `x/term.GetSize(1)` (re-queried at every
+    print so resizes are honored); non-TTY or query failure → `listWrapWidth`
+    (160). Add `golang.org/x/term` to `go.mod` (pure Go, no cgo).
+  - **Review Criteria:** Table tests: `renderToolList` on a fixture covering
+    no-params (`name()`), required-only, optional-only, mixed (`(a:str,
+    [b:num], [c:bool])`), duplicate param names (last wins); `wordWrap` on
+    short text (single line, no indent change), text forcing 3+ lines at the
+    160-col width, a >160-rune single token (one line, unsplit), and
+    multi-byte text (em-dashes — must never tear a rune mid-line).
+    `registeredDescription` covers empty desc (suffix alone) and both timeout
+    values; `resolveToolTimeout` covers per-tool-wins/global-fallback/nil.
+    `wordWrap` takes the width as a parameter (pure — table-testable at any
+    width; the 160 constant is only the non-TTY fallback in
+    `resolveWrapWidth`, whose TTY branch is covered by the Task 4 manual
+    smoke, not unit tests). Existing watch/registry tests that assert
+    exact description strings (e.g. `"beta updated (timeout: …)"`) stay green
+    unchanged.
+- [x] **Task 2: `--list-tools` flag, dispatch & live mode**
+  - **Description:** Add `--list-tools` bool flag. In `main()`, after the
+    existing required-flag check and the fail-fast `resolveCORS` /
+    `resolveTimeout`, branch: if `--list-tools`, discover (`discoverTools` on
+    `scriptsAbs`), print `renderToolList(...)` to stdout (width via
+    `resolveWrapWidth`, TTY-cleared between prints in live mode), then: without
+    `--watch` → `os.Exit(0)` (the discovery-failure error → stderr, exit 1);
+    with `--watch` → **live list**: run a watch loop that, on every debounced
+    directory change, clears the screen (ANSI `\x1b[2J\x1b[H`, **only when
+    stdout is a TTY**), re-discovers, re-prints the full list (re-queried
+    width), with the existing per-scan stderr warnings; runs until
+    SIGINT/SIGTERM (existing signal context). The fsnotify + debounce core is
+    extracted from `watchTools` into `watchChanges(ctx, dir, onChange)` and
+    `watchTools` is rewritten on top of it (behavior-identical for the
+    registry path; its existing tests stay green). `run(...)` is untouched by
+    this mode. Update the `Usage:` line to show `[--list-tools [--watch]] |
+    [--call-tool <name> --params <json>] | <server mode>`.
+  - **Review Criteria:** `go vet` clean. Tests exercise the dispatch via a
+    seam (extract the branch into e.g. `diagnose(...)` returning an exit
+    code, or capture the writer passed to `renderToolList`): zero tools →
+    empty stdout, exit 0, existing stderr warning; discovery error (unreadable
+    dir) → stderr message, exit 1; server-mode flags (`--host`, `--port`,
+    `--api-key`, CORS) present alongside `--list-tools` → the single stderr
+    notice naming them (detected via `flag.Visit`, so a default-valued form
+    like `--port=0` is caught too), no `ListenAndServe`, process exits after
+    printing; `--list-tools --watch` → the watch core fires `onChange` on a
+    file change (existing `TestWatchTools` pattern; `watchTools` itself stays
+    behavior-identical — its tests green), screen-clear only on TTY (test
+    injects the clear function), re-print uses the re-queried width.
+- [x] **Task 3: `--call-tool` + `--params` debug invocation**
+  - **Description:** Add `--call-tool` (string) and `--params` (string,
+    default `{}`) flags and the mutual-exclusion check against `--list-tools`
+    (both set → startup error). Implement `runCallTool(scriptsAbs, dirAbs
+    string, globalTimeout time.Duration, name, paramsRaw string) (exitCode
+    int, err error)`, taking already-resolved absolute paths (the branch uses
+    the shared Abs+Stat helper): discover; look up exact name (unknown → stderr listing
+    available names, code 1); `parseToolArguments([]byte(paramsRaw))` (failure
+    → stderr, code 1, nothing executed); same timeout resolution as
+    `toolRegistry.replace`; `validateRequiredParams` (failure → content to
+    stdout, code 1); `executeTool(...)`; print all `TextContent` to stdout;
+    `IsError` → code 1, else 0; hard `cmd.Start`-style error → stderr, code 1.
+    Wire into `main()` (branch after timeout/CORS resolution) and the
+    `Usage:` line.
+  - **Review Criteria:** Registry-pattern tests: unknown tool (error names the
+    tool and lists available names); `--params` `42`/`"x"`/double-encoded →
+    code 1 and the fixture script is **not** executed (marker file absent);
+    success run → stdout carries the script's `<stdout>`-tagged output, code
+    0; script `exit 3` → output printed, code 1; missing required param →
+    validation message, code 1, script not executed; a `sleep 5` script under
+    per-tool `Timeout: 1s` → timeout message, code 1, returns within ~2s;
+    per-tool `Timeout: NONE` under a short global → completes (per-tool
+    wins); explicitly empty `--params=` ≡ `{}` and `--params=null` ≡ `{}`;
+    explicit `--call-tool=` (visit-tracked) → startup error, never server
+    mode; server-mode flags (`--host`, `--port`, `--watch`, `--api-key`,
+    CORS) alongside `--call-tool` → the single stderr notice, no server
+    started.
+- [x] **Task 4: Docs, usage text, version**
+  - **Description:** README: new **Diagnostics** section in Usage —
+    `--list-tools` (with the rendered example from the Objective; wrap width
+    = terminal window width on a TTY, 160 fallback when piped) and the live
+    `--list-tools --watch` mode (re-print on change, TTY-only screen clear),
+    and `--call-tool` (with the `--params` JSON form, `null` ≡ `{}`,
+    explicit-empty → startup error, exit-code table: 0 success / 1 any
+    failure, output streams per the strategy split), the note that diagnostic
+    mode ignores server-mode flags (single stderr notice, `--host`/`--port`/
+    `--api-key`/CORS) and honors the full timeout precedence (`Timeout:`
+    NONE ⇒ the debug call has no deadline), a one-line note that this prints
+    exactly what the LLM sees, and the duplicate-`Param:`
+    `validateRequiredParams` quirk note (documented, inherited from the
+    handler). Flag help strings, `Usage:` text, and README kept consistent.
+    `serverVersion` → `0.7.0`.
+  - **Review Criteria:** README examples copy-pasteable and match actual
+    output (manual smoke: run the built binary against a fixture toolset and
+    paste the real output); every documented behavior (mutual exclusion,
+    ignored server flags + notice, live mode + clear rules, window-width
+    wrap, exit codes, timeout precedence) matches the code; `--help` output
+    and README consistent.
+_(Commit & branch-hygiene task removed per PR #7 feedback — the builder
+commits at its own cadence; the branch and PR already exist, and the smoke
+gate lives in Task 4's review criteria.)_
 
 ## Edge Case & Safety Checklist
 
-- `--no-timeout` and `--timeout` both passed → startup error, mutually exclusive (documented).
-- Explicitly empty `--timeout=` → startup error (parse of empty fails; `flag.Visit` distinguishes it from omitted).
-- `--timeout 0s` → valid, means no timeout (documented; consistent with `NONE`).
-- Sub-second units (`ms`/`us`/`ns`) → rejected (not meaningful for tool timeouts).
-- Duration sum/multiply overflow → rejected with an `overflows` error before wraparound can yield a positive duration.
-- Negative/decimal/malformed `--timeout` → exit 1 at startup, server never starts.
-- Invalid per-tool `Timeout:` → visible stderr warning + global fallback; never blocks discovery/hot-reload.
-- `Timeout:` on line > 30 → ignored, tool uses global.
-- No deadline (`Timeout: NONE`/`0s`, or `--no-timeout`/`--timeout 0s`) → no timeout; client abort still kills the script (request ctx).
-- Zero timeout ⇒ `context.WithTimeout(ctx, 0)` is NOT used — code path picks raw `ctx` (equivalent, but explicit).
-- Timeout expiry mid-output → partial stdout/stderr returned with the timeout message (existing behavior, unchanged).
-- Hot reload edits only `Timeout:` → tool re-registered with new value, no restart.
-- Symlinked scripts: `Timeout:` read from resolved target (same as `Description:` via `resolvedPath`).
-- Output cap (1 MB) unchanged and independent of timeout.
+- No executable scripts → `--list-tools` prints empty stdout, exit 0, the
+  existing `Warning: No executable scripts found in <dir>` on stderr.
+- Unreadable scripts directory → stderr error, exit 1 (both diagnostics).
+- Tool with empty frontmatter description → rendered line is the timeout
+  suffix alone (same rule the registry uses today).
+- Duplicate `Param:` names → single signature entry, last declaration wins,
+  first-occurrence position (matches `buildInputSchema`).
+- Word longer than the wrap width (long path/URL in a description) →
+  emitted whole on its own line; never split, never truncated.
+- Multi-byte text (em-dashes, accented characters) → wrap counts **runes**,
+  never tears a character.
+- `--params` non-object (`42`, `["x"]`, `"str"`, double-encoded) → exit 1
+  before any script starts.
+- `--params` explicitly empty (`--params=`) **or `null`** → treated as
+  `{}`, valid (same leniency as `parseToolArguments` / the MCP handler).
+- Explicit `--call-tool=` (visit-tracked) → startup error; never falls
+  through to server mode.
+- Unknown `--call-tool` name → exit 1, message lists available tool names.
+- Declared-required param missing → validation message to stdout, exit 1,
+  script not started (identical to the MCP handler result).
+- Script exits non-zero → its `<stdout>`/`<stderr>` content printed, exit 1.
+- Script unstartable (vanished file, exec bit removed) → stderr, exit 1.
+- Timeout expiry → the standard `tool timed out after <d>` result, exit 1.
+- `Timeout: NONE` / `--no-timeout` → the debug call runs with **no deadline**
+  (matches production; documented so a re-call of a slow build can complete).
+- Duplicate name declared `required` then `optional` → `--call-tool` still
+  enforces it (`validateRequiredParams` iterates all declarations) — inherited
+  handler quirk, documented, unchanged.
+- `--list-tools` and `--call-tool` both passed → startup error (mutually
+  exclusive).
+- `--list-tools --watch` (live list) → re-print on every debounced change,
+  warnings re-emitted; screen clear (`\x1b[2J\x1b[H`) only when stdout is a
+  TTY — piped output simply accumulates; width re-queried at every print
+  (resize honored).
+- Window-width query returns an error (non-TTY stdout) → 160 fallback, no
+  crash.
+- Server-mode flags (`--host`, `--port`, `--api-key`, CORS; `--watch`
+  additionally with `--call-tool`) in diagnostic mode → validated fail-fast,
+  then ignored with a single stderr notice; presence detected via
+  `flag.Visit`, so default-valued forms (`--port=0`, `--host=127.0.0.1`,
+  `--watch=false`) are noticed too; no port bound, no stdio server (the
+  live-list watcher excepted — it is the `--watch` behavior in list mode).
+- Hot-reload state irrelevant: diagnostics read the directory at call time;
+  a concurrent `--watch` server is a separate process and unaffected.
+- 1 MB output cap and arg-key injection guard apply unchanged (diagnostics
+  reuse `executeTool` / `parseToolArguments` wholesale).
 
 ## Review Log (Plan Review)
 
-- **Round 1:** Verified every claim against the current code: `defaultToolTimeout = 5 * time.Minute` (~line 30), `replace` hardcoding `defaultToolTimeout` (~line 470), `executeTool`'s unconditional `context.WithTimeout(ctx, timeout)` (~line 594), the `resolveCORS` fail-fast pattern in `main()`, the `extractDescription`/`extractParams` mirror targets, and the registry/watch test patterns (`TestRequiredParamValidationViaRegistry`, `TestWatchToolsDetectsContentChanges`). Precedence rules are self-consistent (per-tool > global; `--no-timeout` > `--timeout`; first-match-wins matches `Description:` semantics), error strategy follows fail-loud-fail-fast, format spec is stdlib-achievable, edge checklist covers expiry-mid-output, hot-reload, symlinks, and cancellation-with-no-deadline. Advisory notes (non-blocking): (1) three existing `newToolRegistry(server, dir)` call sites in main_test.go plus the exact-equality assertion `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges` (line 352) will need updates for the new constructor param and the registered-description suffix — Task 5's all-green-at-every-commit gate catches this; (2) define the suffix for empty frontmatter descriptions explicitly (e.g. description becomes `(timeout: 30s)` alone). Status: Approved
+- **Round 1:** Verified every claim against the current code. Confirmed: (1) `toolRegistry.replace` assembles the registered description exactly as the `registeredDescription` extraction assumes (`suffix := timeoutSuffix(toolTimeout); if description == "" { description = suffix } else { description += " " + suffix }`), so the extraction is behavior-identical and the existing exact-string tests (`"beta updated (timeout: 5m0s)"`, the `TestResolvedTimeoutViaRegistry` table, `"(timeout: 30s)"`) stay green; (2) `buildInputSchema` dedups param names last-wins (properties-map overwrite + `lastRequired`), so `listParamDecl`'s last-wins rule matches the registered schema; (3) `discoverTools` iterates `os.ReadDir` entries, i.e. sorted by filename; (4) `parseToolArguments` maps empty/`null` → `{}` and rejects non-objects and double-encoded JSON with `"arguments must be a JSON object"` (as `TestParseToolArgumentsRejectsDoubleEncodedJSON` documents), so the `--params` claims incl. lenient `--params=` are accurate; (5) `main()` is `--version` → required-flag check → `resolveCORS` → `resolveTimeout` → `run()`, so a dispatch branch after the two resolvers leaves every existing behavior — including `--version` priority — handled, and the `Usage:` rewrite is consistent. The proposed seams (pure helpers as table tests; `diagnose`/`runCallTool` returning exit codes) are all implementable in the existing single-file test setup, in the established registry-pattern style. The fail-loud-fail-fast strategy and the overall structure match the house style of the timeout-handling plan. **Defect (blocker, 1):** the Objective's example output is not what the spec produces against the real remote toolset — (a) the `meridian_build` wrap breaks ~8–10 runes early on every line (plan lines are 151/150/59 runes; a greedy 160-rune wrap with 5-space indent and space-only breaks yields 159/159/42: `cached.` fits on line 1, and line 2 ends `…prefer scope=app`, not the em-dash); (b) the `meridian_fetch` example omits the frontmatter sentence "Run first on a remote host before any other meridian tool." and renders one line, but the real registered description + ` (timeout: 2m0s)` wraps to two lines (158/53 runes). Because Task 4's criteria (README examples must match actual output) and Task 5's smoke gate (diff the listing against the Objective example) anchor acceptance on this block, it must be regenerated. **Corrections required before approval:** replace the Objective example with the spec-correct output below (generated by applying the plan's 160-col/5-space rune wrap to the actual frontmatter of `/workspace/games/experiment-settler2/tooling/remote`):
+
+```
+meridian_build([profile:str], [scope:str], [target:str], [timings:bool])
+     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then cached.
+     Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) — prefer scope=app
+     for incremental work. (timeout: none)
+
+meridian_fetch([commit:str])
+     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. Run first on a
+     remote host before any other meridian tool. (timeout: 2m0s)
+```
+
+**Advisory (non-blocking, 7):** (1) Task 1 should state that `renderToolList` resolves each tool's timeout with the same precedence as `replace` (per-tool `Timeout:` > global) before calling `registeredDescription`; a shared `resolveToolTimeout(tool, global)` helper keeps the two call sites from drifting. (2) Fix the deduped entry's *position* in the signature: first-occurrence position with last-occurrence type/required (mirrors `buildInputSchema`'s first-occurrence `required`-array order) — the plan says last-wins dedup but not the position. (3) State the `wordWrap` contract deterministically: the 160 total **includes** the 5-space indent (content budget 155), and runs of whitespace collapse to one break — needed so the multi-line table tests are unambiguous. (4) A one-line README/edge-checklist note on an inherited quirk: `validateRequiredParams` iterates *all* declarations, so a duplicate name declared `required` then `optional` is still enforced by `--call-tool` although the schema marks it optional (last-wins) — it is consistent with the production handler, so document, don't change. (5) QoL: when server-mode flags are explicitly passed in diagnostic mode, print a single stderr notice (disclosed, per fail-loud) rather than silently ignoring them. (6) Label the Objective example "(excerpt)" — the remote toolset contains 9 executable `meridian_*` scripts (`common.sh` is non-executable, `history` a dir); two is fine as an illustration. (7) Task 3's `runCallTool(scriptsAbs, dirAbs, …)`: path resolution + `os.Stat` currently live only in `run()`; note that the diagnostic branch does its own `filepath.Abs`/`os.Stat` (or extracts a shared helper) so the signature is honest. Advisories 1–7 at the planner's discretion; only the example replacement is mandatory. **Status: Rejected**
+
+- **Round 2:** Re-verified the `ca8ca2b` response. **(1) Mandatory correction — confirmed fixed:** re-derived the Objective example independently from the real frontmatter of `/workspace/games/experiment-settler2/tooling/remote` (greedy 155-rune content budget, 5-space indent, whitespace-run collapse, `time.Duration` String() suffix): byte-identical to the plan block (line rune lengths 159/159/42 and 158/64; line 2 correctly ends `…prefer scope=app` with the em-dash starting line 3). The "(excerpt — 9 executables)" label matches the directory (9 exec scripts; `common.sh` non-executable, `history` a dir) and the excerpt is the first two in discovery order. **(2) Advisories 1–7 — all incorporated into the plan body, not just acknowledged:** (1) `resolveToolTimeout(tool, global)` shared by `replace` and `renderToolList` — Requirements bullet + Task 1 description + review criteria (`per-tool-wins/global-fallback/nil`) + Task 3's "same timeout resolution as `toolRegistry.replace`"; consistent. (2) First-occurrence position / last-wins type/required — Requirements bullet + Task 1 description + edge checklist; three places agree. (3) Deterministic wrap contract (160 incl. indent, 155 budget, greedy, run-collapse, no word split, overlong whole) — Requirements + Task 1 `wordWrap` spec + table tests; edge checklist consistent. (4) `validateRequiredParams` duplicate quirk — Requirements bullet + Task 4 README note + edge checklist. (5) Ignored-server-flags stderr notice — Requirements bullet + mode dispatch ("the stderr notice above" now resolves — the earlier dangling reference is fixed) + edge checklist. (6) Excerpt label — done. (7) Shared Abs+Stat helper extracted from `run()` — mode dispatch bullet + Task 3 description ("the branch uses the shared Abs+Stat helper"); `run()` is untouched per Task 2. **(3) No regressions found:** Task 1's helper list (`registeredDescription`, `resolveToolTimeout`, `listParamDecl`, `renderToolList`, `wordWrap`) matches all usages in Tasks 2–4; `registeredDescription`'s "empty desc → suffix alone" still matches `replace`'s current code (re-confirmed); the Task 5 smoke gate (diff against Objective) is now sound because the Objective block is verified. **Advisory (non-blocking, 1):** Tasks 2/3 review criteria don't explicitly assert the ignored-flags stderr notice (Task 2's criteria say "ignored, no `ListenAndServe`" without the notice; Task 3's criteria omit it) — the behavior is mandated by the Requirements bullet and edge checklist, so a Builder is covered; adding the assertion to Task 2's criteria is a QoL improvement the Builder may include. **Status: Approved**
+
+- **PR #7 feedback (2026-09-27, Copilot ×4 + principal ×4) — all incorporated in the plan body:** (1) terminal **window width** replaces the static 160 as the wrap width (TTY → `x/term.GetSize`, re-queried per print; 160 stays as the non-TTY fallback) — new dep `golang.org/x/term` (principal); (2) **`--list-tools --watch` live list mode**: re-print on every debounced change (warnings included), screen cleared first only when stdout is a TTY — the fsnotify+debounce core is extracted from `watchTools` into a shared `watchChanges`; `--watch` is now honored in list mode (principal, issue comment); (3) ignored-server-flags notice now covers **`--host`** and is detected via **`flag.Visit`** so default-valued forms (`--port=0`, `--host=127.0.0.1`) count as explicit (Copilot); (4) `--params=null` documented as accepted ≡ `{}` (matches `parseToolArguments` verbatim — no stricter diagnostic check) (Copilot); (5) the error-strategy section rewritten as the operational/stderr vs execution/stdout split, removing the stream contradiction (Copilot); (6) explicit `--call-tool=` is visit-tracked and a startup error (Copilot); (7) Task 5 (commit & branch hygiene) **removed** per principal — builder commits at its own cadence; the smoke gate moved into Task 4's review criteria, which also resolves the stale four-commit expectation (Copilot).
 
 ## Final Status (Code Review)
 
-- **Round 1:** Verified against the diff and by execution: all 5 commits (65ff0d2…66d1493) build/vet/test green individually; parser, precedence (`--no-timeout` > `--timeout`; per-tool > global), first-match-wins, >30-line ignore, warning-on-invalid, description suffixes (incl. empty description → suffix alone, advisory #2), zero≡NONE raw-ctx path, call-site updates (advisory #1), README/usage consistency, and the full edge checklist all confirmed — tests include registry-level expiry, inheritance, NONE-under-short-global, and cancellation-kill. Only deviation: two plan-phase docs commits predate the 5 implementation commits (7 total on branch), which is acceptable and not a defect. Status: Approved
-- **Round 2: PR feedback (Copilot + principal 2026-09-26)** — all 8 items addressed in 2347f08…8e44d82 (build/vet/test green at every commit): (1) units restricted to `s`/`m`/`h` in the shared parser, doc comments, error messages, README, and tests (250ms/us/µs/1000ns now rejected) — 2347f08; (2) overflow guard: multiplication (`n > maxDuration/multiplier`) and addition (`total > maxDuration-term`) checked before each term, `overflows` error; tests cover 3×876000h sum and single-term multiply overflow — 2347f08; (3) `--no-timeout` + `--timeout` is now a startup error (mutually exclusive, not "no-timeout wins") and an explicitly empty `--timeout=` fails fast via `flag.Visit`-tracked `timeoutSet` in `resolveTimeout`; the retired "no-timeout beats --timeout" decision is rewritten in Requirements, the edge checklist, and README — 5af1535; (4) `discoveredTool.TimeoutSet`/`Timeout` replaced by a single `Timeout *time.Duration` (nil = undeclared, &0 = NONE) in the `replace` handler, description suffix, and tests — 85428d3; (5) the no-op `cancel = func(){}` path removed from `executeTool` (`execCtx := ctx`; cancel created and deferred only in the `timeout > 0` branch) — 85428d3; (6) `extractDescription`/`extractParams`/`extractTimeout` merged into a single-pass `extractFrontmatter` (one `os.Open` + scanner) with all tests asserting via the merged function — 8e44d82; (7) the invalid-timeout test captures stderr via a pipe (restoring `os.Stderr`) and asserts the warning contains both the script filename and the invalid-value reason — 8e44d82; (8) README frontmatter section now documents `Param:` (syntax + example in the worked script), and README/PLAN reflect s/m/h-only units, flag mutual exclusion, and explicit-empty failing — bbac358. Verified against `git diff c3c0a13..HEAD` and by execution (build/vet/gofmt/test green at tip): (1) `timeoutUnits` is s/m/h-only in the shared parser, error text, and docs — 250ms/us/µs/1000ns rejected in tests; (2) overflow guards precede each multiply (`n > maxDuration/multiplier`) and add (`total > maxDuration-term`), wrap-to-positive impossible, sum- and single-term-overflow tests assert `overflows`; (3) `resolveTimeout` errors on `--timeout`+`--no-timeout`, explicit-empty `--timeout=` fails via `flag.Visit`-tracked `timeoutSet`, retired "no-timeout beats" decision consistently rewritten in Requirements, checklist, README, and flag help; (4) `Timeout *time.Duration` everywhere (nil/`&0`), no `TimeoutSet` residue; (5) `executeTool` has no no-op cancel — cancel created+deferred only in the `timeout > 0` branch, `execCtx := ctx` otherwise; (6) single-pass `extractFrontmatter` (one open+scan, first Description/Timeout, all valid Params, 30-line window preserved), old extractors deleted, all tests (incl. `TestExtractParams`) route through it; (7) invalid-timeout test captures stderr and asserts filename AND reason; (8) README documents `Param:`, s/m/h, mutual exclusion, and explicit-empty. Merged scanner semantics behavior-identical to the old three passes (the pre-existing scanner.Err discard in extractDescription was the only nuance, unobservable for text files). PLAN text matches the code. All task boxes already ticked in round 1 and remain satisfied. Status: Approved
+- **Round 1:** Reviewed all four implementation commits (`dffc419`…`6026056`) on `feat/tool-diagnostics`. Verification: full `go test -count=1` green (6.9s, all pre-existing registry/watch tests included), `go vet` clean, `go mod verify` clean, binary built and manually smoked end-to-end (`--version` → `0.7.0`; list/call/notice/exclusion/live modes via a fixture toolset, piped and via the repo). Note: `go test -race` is unsupported in this sandbox (VMA limit) — the race-risk items below were reviewed by inspection instead.
+
+  **Task 1 — all criteria met, ticked.** (a) The `replace` diff is a pure helper extraction: `resolveToolTimeout` and `registeredDescription` are line-for-line the former inline logic (`*tool.Timeout` wins; empty desc → suffix alone; else `desc + " " + suffix`), so registered descriptions are byte-identical to pre-change and the exact-string tests (`"beta updated (timeout: …)"`, `"(timeout: 30s)"`, `TestResolvedTimeoutViaRegistry`) stay green — confirmed by the suite. (b) `toolListSignature`/`listParamDecl` implement last-wins type/required at first-occurrence position (map + order slice — matches `buildInputSchema`); `TestToolListSignature` covers no-params (`name()`), required-only, optional-only, mixed `(a:str, [b:num], [c:bool])`, and duplicates. (c) `wordWrap` is a pure function (width parameter, floor budget at 1) and rune-based: `TestWordWrap` covers single-line, whitespace-run collapse, 3-line 160-col case, 200-rune overlong token emitted whole, multi-byte (`wörld`) with per-line rune-length assertion, empty input, degenerate width. (d) `TestRegisteredDescription` covers empty-desc-both-timeouts; `TestResolveToolTimeout` covers per-tool-wins, NONE-wins, nil-global. (e) `TestRenderToolList` covers no-params, mixed, empty-desc, duplicates, zero-tools-empty, blank-line separators, and a **byte-exact reproduction of the spec's Objective example** at width 160 (passes). (f) `resolveWrapWidth`: non-`*os.File` / non-TTY / `GetSize`-error / `width<=0` all → 160; TTY branch is a re-query per print (called inside `printList` on every output — resize honored), per plan the TTY branch is smoke-covered, not unit-tested. (g) `golang.org/x/term v0.41.0` direct in `go.mod`, `go.sum` complete, indirect `x/sys` bump 0.41.0→0.42.0 consistent — verified.
+
+  **Task 2 — all criteria met, ticked.** (a) Dispatch seam: `runDiagnostic(stdout, stderr, …, ignoredFlags) int` — tests capture writers and assert exit codes; `run(...)` itself is untouched apart from the `resolveToolPaths` extraction, whose error text is byte-identical to the old inline `Abs`+`Stat` pair. (b) Zero tools → empty stdout, exit 0, existing `Warning: No executable scripts found in …` on stderr; unreadable dir → `scripts path inaccessible` on stderr, exit 1 — both tested. (c) Ignored-flags notice: single `Note: ignoring server-mode flags in diagnostic mode: …` line, exactly-once asserted; the `flag.Visit`→`visited` map in `main()` catches `--host`, `--port`, `--api-key`, all three CORS flags, and default-valued forms — smoke-verified (`--host=127.0.0.1 --port=0` → `Note: … --host, --port`); no server construction in the diagnostic branch (inspected: the branch `os.Exit`s before `run`). (d) Live mode: `watchChanges` core extracted, `watchTools` rewritten on top with behavior-identical semantics (same initial discovery, same `Warning:` texts, same 100ms debounce, same error handling; pre-existing `TestWatchTools` green); `TestWatchChanges` covers onChange-on-change + ctx cancellation; `clearScreen` is TTY-gated (`term.IsTerminal`) and injectable — `TestRunDiagnosticListTools/live_mode_reprints_on_change` asserts clear-before-reprint and re-print at the re-queried 160 width. (e) Screen-clear smoke: piped `--list-tools --watch` output contains no `\x1b[2J` sequences (accumulates), TTY behavior is the `clearScreen` branch. (f) Usage line updated exactly per spec; `--watch` help text documents the mode split.
+
+  **Task 3 — criteria NOT all met (box stays open).** Verified met: `--params` non-objects (`42`, `["x"]`, `"str"`, double-encoded) → code 1 + non-nil err + marker-file-absent; success → `<stdout>`-tagged output + code 0; `exit 3` → output printed + code 1; missing required param → validation message on stdout, code 1, marker absent; `sleep 5` under `Timeout: 1s` → `tool timed out after 1s`, code 1, ≤3.5s; `Timeout: NONE` under 1s global → completes, code 0; `""`/`null`/`{}` params ≡ `{}`; explicit `--call-tool=` (callToolSet) → `Error: --call-tool requires a non-empty tool name`, code 1, empty stdout; server-mode flags + `--watch` alongside → single notice, no server; unreadable dir → exit 1; hard `cmd.Start` error (bad interpreter) → stderr, code 1, empty stdout. **Defect (blocker 1):** the plan's first registry-pattern test — *unknown tool: error names the tool and lists available names* — is absent from `main_test.go` (no test anywhere asserts the `unknown tool %q; available tools: …` path in `runCallTool`, main.go:1009). The behavior itself is correct (smoke-verified: `Error: unknown tool "nope"; available tools: build, run, status`, exit 1), but the criterion requires the test.
+
+  **Task 4 — criteria NOT all met (box stays open).** Verified met: `serverVersion` 0.7.0; `--help` strings and Usage line consistent with behavior; the list-tools README example is **byte-exact** — reproduced it with a built binary against a fixture toolset (build/run/status, 5m0s/none/10s); the `Timeout:` NONE quirk note is present and accurate. **Defect (blocker 2):** README Diagnostics, "Lines longer than 160 columns are wrapped (never mid-word)" is factually wrong — the implemented behavior is window-width wrap on a TTY (re-queried per print) with 160 only as the non-TTY/piped fallback, exactly the PR-feedback change the plan records. **Defect (blocker 3):** the Diagnostics section omits five plan-mandated behaviors: (i) `--list-tools`/`--call-tool` mutual exclusion as a startup error; (ii) explicit `--call-tool=` → startup error; (iii) `--params null` (and explicit-empty) ≡ `{}`; (iv) the exit-code table with the stream split (0 = success; 1 = any failure, with execution failures on stdout vs operational failures incl. unstartable scripts on stderr); (v) `--call-tool` timeout precedence (per-tool `Timeout:` wins over `--timeout`; `NONE` ⇒ the debug call has no deadline); plus the live-mode note that the screen clear is TTY-only (piped output accumulates).
+
+  **Code quality:** no races found by inspection (live-mode print/clear run in the single `watchChanges` callback; registry mutex unchanged; `resolveWrapWidth`/`clearScreen` are read-only package vars in production); `watchChanges` closes its watcher and timer via `defer`; no silent-fallback smells (`resolveWrapWidth`'s 160 fallback is the documented non-TTY behavior). Race detector run was impossible in this sandbox (noted above). Advisory 1 (non-blocking): the README's `--call-tool` example prints `building with release`, which the implied fixture script (`echo "building with $profile"`) would not produce — paste real captured output per the smoke criterion. Advisory 2: the ignored-flags bullet says `(--host, --port, …)` — name `--api-key` and the CORS flags explicitly as the plan does. Advisory 3: "preview what the MCP server would expose" vs the plan's "prints exactly what the LLM sees" — near-equivalent, align the phrasing. Advisory 4: `runCallTool` writes results to `os.Stdout` directly, forcing the `captureStdout` os-Pipe swap in tests; the plan fixed this signature, so not required — a writer param would be cleaner.
+
+  **Corrections required for approval:** (1) add the missing unknown-tool test to `TestRunCallTool` (unknown name → code 1, error contains the name and the available-tools list); (2) fix the README wrap bullet to: window width on a TTY, 160-rune fallback when piped/non-TTY, never mid-word; (3) add the five missing README items from blocker 3. **Status: Rejected**
+
+- **Round 2:** Verified the `55083ff` response (diff touches only `README.md`, `main.go`, `main_test.go`).
+
+  **(1) Unknown-tool test — met.** New first subtest `unknown_tool_code_1_lists_available_names` in `TestRunCallTool`: runs `run("nope", "{}", 5m)`, asserts code 1, non-nil error, exact message `unknown tool "nope"; available tools: badinterp, fail, ok, ok_param, sleep1, slow_none` (the full fixture set in `discoverTools`'s filename-sorted order — I re-verified the sort against the six fixtures) and empty stdout (operational → stderr split). Matches the criterion verbatim.
+
+  **(2) README wrap bullet — met.** Now reads: word-wrapped (never mid-word) at the terminal window width when stdout is a TTY — re-queried on every print, resizes honored — falling back to a fixed 160-rune width when piped. All three required facts present and accurate against `resolveWrapWidth`.
+
+  **(3) The five omitted items + TTY-only clear — all present and factually correct.** (i) mutual exclusion as a startup error ✓ (matches the `main()` `--list-tools`/`--call-tool` check); (ii) explicit `--call-tool=` → startup error, never server mode ✓ (`callToolSet` visit-tracking); (iii) explicit-empty `--params=` and JSON `null` ≡ `{}` ✓ (`parseToolArguments` leniency); (iv) exit-code table ✓ — re-verified each row against `executeTool`/`runCallTool`: success → 0/stdout; missing param, non-zero exit, timeout → 1 with result on stdout (all three set `IsError` and are printed before the code-1 return); unknown tool, invalid `--params`, unstartable script, other operational failures → 1, reason on stderr, script never started (`cmd.Start` failure returns an error, not a result); (v) timeout precedence incl. `NONE` ⇒ no deadline ✓; live-mode bullet states screen clear is TTY-only and piped output accumulates ✓ (`clearScreen` is `term.IsTerminal`-gated), runs until `Ctrl-C` ✓ (`notifySignals` SIGINT/SIGTERM).
+
+  **(4) Round-1 advisories — all incorporated.** (1) Real captured output: I rebuilt the binary and re-ran both `--call-tool` examples against the implied fixture (`build.sh` parsing `--profile release` and echoing it, `Timeout:`/`Param:` frontmatter per the rendered list) — the `--list-tools` block, the `--call-tool build --params …` block, and the missing-param line (`missing required parameter: profile`, exit 1) are all byte-exact against actual output; the new prose explains what the examples do. (2) Ignored-flags bullet now names `--host`, `--port`, `--api-key`, the three CORS flags and `--watch` — matches `serverModeFlagNames` + the `--watch` addition exactly. (3) List-tools intro now says "prints exactly what the LLM sees" — plan phrasing. (4) `runCallTool` takes a `stdout io.Writer` (dispatch passes `os.Stdout`; the updated doc comment says so); the `captureStdout` os-Pipe helper is deleted and both call sites in `TestRunCallTool`/`TestRunDiagnosticCallTool` use `bytes.Buffer` — the fragile swap is gone.
+
+  **Regression sweep:** `go build ./...`, `go vet ./...`, `go test . -count=1` all green (7.3s, full suite). The diff contains no changes to Task 1/2 code (helpers, rendering, dispatch seam, live mode, notice, `run()` untouched); the only production change is the `runCallTool` writer parameter + two `Fprintln` targets, which is backward-compatible and covered by the rewritten tests. (Reminder of standing note: `go test -race` is unsupported in this sandbox — race risk was reviewed by inspection in Round 1 and is unchanged.)
+
+  **Task 3 — all criteria met, ticked. Task 4 — all criteria met, ticked.** No new defects; no new advisories. **Status: Approved**

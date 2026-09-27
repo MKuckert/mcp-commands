@@ -212,6 +212,89 @@ The server translates JSON properties into CLI flags.
 - **Arrays:** `{"items": ["a", "b"]}` ➡️ `--items a --items b`
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
 
+### Diagnostics
+
+Two self-contained diagnostic modes reuse the exact discovery, frontmatter
+parsing and validation of the server — and never start a server.
+
+**List tools** — prints exactly what the LLM sees (the same registered
+descriptions, timeout suffixes and parameter signatures the MCP server would
+expose):
+
+```console
+$ mcp-commands --dir . --scripts ./scripts --list-tools
+
+build(profile:str)
+     Build the project with the given profile. (timeout: 5m0s)
+
+run([args:str])
+     Run the project. (timeout: none)
+
+status()
+     Status of the demo app. (timeout: 10s)
+```
+
+- Names without parentheses declare no parameters. Parameters in brackets are
+  optional; unbracketed parameters are required.
+- The description comes from the frontmatter `Description:` line; the effective
+  per-tool timeout is shown (a per-tool `Timeout:` wins over `--timeout`;
+  `none` = no deadline).
+- Descriptions are word-wrapped (never mid-word) at the terminal window
+  width when stdout is a TTY — re-queried on every print, so resizes are
+  honored — falling back to a fixed 160-rune width when stdout is piped.
+- Add `--watch` for a live list: the list re-prints on every scripts-directory
+  change, with the screen cleared first only when stdout is a TTY (piped
+  output simply accumulates); the process runs until `Ctrl-C`.
+
+**Call one tool** — run it once, bypassing the MCP protocol:
+
+```console
+$ mcp-commands --dir . --scripts ./scripts --call-tool build --params '{"profile":"release"}'
+
+<stdout>
+building with release
+</stdout>
+
+$ mcp-commands --dir . --scripts ./scripts --call-tool build
+missing required parameter: profile
+```
+
+The first example's `build.sh` parses the translated `--profile release` flag
+and echoes the value; the second runs with no `--params`, which fails
+required-parameter validation before the script starts.
+
+- `--params` is a JSON object (default: `{}`); an explicitly empty
+  `--params=` and a JSON `null` payload are both accepted as `{}`; anything
+  else that is not a JSON object is a startup error. Required-parameter
+  validation applies exactly as in server mode.
+- The tool's output is printed verbatim under `<stdout>`/`<stderr>` markers
+  (markers appear only for streams that produced output).
+- Arguments are translated to CLI flags with the [rules above](#argument-translation-rules).
+- The timeout has the same precedence as in server mode: a per-tool
+  `Timeout:` wins over `--timeout`; `Timeout: NONE` means the debug call runs
+  with no deadline.
+- `--call-tool` is mutually exclusive with `--list-tools` (passing both is a
+  startup error), and an explicitly empty `--call-tool=` is a startup error —
+  it never falls through to server mode.
+- Exit code and streams:
+
+  | Outcome | Exit code | Output |
+  | --- | --- | --- |
+  | Tool succeeds | 0 | result on stdout |
+  | Missing required param, non-zero script exit, or timeout | 1 | tool's result on stdout |
+  | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
+
+- Server-mode flags (`--host`, `--port`, `--api-key`, and the CORS flags
+  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`)
+  are ignored in both diagnostic modes, and `--watch` is ignored with
+  `--call-tool` as well; if you pass any of them explicitly, a single notice
+  is printed to stderr. `--watch` is *honored* with `--list-tools` — it is
+  the live-list mode described above and never listed as ignored there.
+
+Inherited quirk, same as server mode: a parameter name declared more than
+once is last-wins in the schema, but validation enforces *any* `required`
+declaration of that name.
+
 ## AI Usage
 
 The implementation of `mcp-commands` is completely done by an AI. The idea and guidance for the plan is mine, the plan writing and code is the AI. It wrote the entire server, including argument parsing, script discovery, and MCP protocol handling, I did the review.

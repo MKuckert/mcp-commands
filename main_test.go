@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2089,4 +2090,809 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	if !strings.Contains(text, "missing required parameter: path") {
 		t.Fatalf("expected error message containing 'missing required parameter: path', got %q", text)
 	}
+}
+
+func TestListParamDecl(t *testing.T) {
+	tests := []struct {
+		param paramSpec
+		want  string
+	}{
+		{paramSpec{Name: "a", Type: "string", Required: true}, "a:str"},
+		{paramSpec{Name: "b", Type: "number"}, "[b:num]"},
+		{paramSpec{Name: "c", Type: "boolean", Required: true}, "c:bool"},
+		{paramSpec{Name: "d", Type: "string"}, "[d:str]"},
+	}
+	for _, tt := range tests {
+		if got := listParamDecl(tt.param); got != tt.want {
+			t.Errorf("listParamDecl(%#v) = %q, want %q", tt.param, got, tt.want)
+		}
+	}
+}
+
+func TestToolListSignature(t *testing.T) {
+	tests := []struct {
+		name   string
+		params []paramSpec
+		want   string
+	}{
+		{"none", nil, "none()"},
+		{"none", []paramSpec{}, "none()"},
+		{"required_only", []paramSpec{
+			{Name: "a", Type: "string", Required: true},
+			{Name: "b", Type: "number", Required: true},
+		}, "required_only(a:str, b:num)"},
+		{"optional_only", []paramSpec{
+			{Name: "a", Type: "string"},
+			{Name: "b", Type: "number"},
+		}, "optional_only([a:str], [b:num])"},
+		{"mixed", []paramSpec{
+			{Name: "a", Type: "string", Required: true},
+			{Name: "b", Type: "number"},
+			{Name: "c", Type: "boolean"},
+		}, "mixed(a:str, [b:num], [c:bool])"},
+		// Duplicate name: last declaration wins for type/required, rendered
+		// at the first-occurrence position (mirrors buildInputSchema).
+		{"duplicate", []paramSpec{
+			{Name: "x", Type: "string", Required: true},
+			{Name: "a", Type: "string", Required: true},
+			{Name: "y", Type: "number"},
+			{Name: "a", Type: "number"},
+			{Name: "z", Type: "boolean"},
+		}, "duplicate(x:str, [a:num], [y:num], [z:bool])"},
+	}
+	for _, tt := range tests {
+		if got := toolListSignature(tt.name, tt.params); got != tt.want {
+			t.Errorf("toolListSignature(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestWordWrap(t *testing.T) {
+	indent := "     "
+
+	t.Run("short_text_single_line", func(t *testing.T) {
+		got := wordWrap("hello world", indent, 160)
+		want := []string{"     hello world"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("wordWrap = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("whitespace_runs_collapse_to_one_space", func(t *testing.T) {
+		got := wordWrap("a\t\t  b\n\nc", indent, 160)
+		want := []string{"     a b c"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("wordWrap = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("leading_trailing_whitespace_stripped", func(t *testing.T) {
+		got := wordWrap("  a b  ", indent, 160)
+		want := []string{"     a b"}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("wordWrap = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("three_lines_at_160", func(t *testing.T) {
+		// 35 words of 8 runes: 17 words fit per 155-rune budget
+		// (17*8+16=152; the 18th needs 161), so 35 words → 17+17+1.
+		var b strings.Builder
+		for i := 0; i < 35; i++ {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString("wordword")
+		}
+		word := "wordword"
+		want := []string{
+			"     " + strings.Repeat(word+" ", 16) + word,
+			"     " + strings.Repeat(word+" ", 16) + word,
+			"     " + word,
+		}
+		got := wordWrap(b.String(), indent, 160)
+		if len(got) != 3 {
+			t.Fatalf("wordWrap returned %d lines, want 3: %#v", len(got), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+			}
+			if n := len([]rune(got[i])); n > 160 {
+				t.Errorf("line %d exceeds the 160-rune width: %d runes", i, n)
+			}
+		}
+	})
+
+	t.Run("overlong_token_emitted_whole_unsplit", func(t *testing.T) {
+		long := strings.Repeat("x", 200)
+		got := wordWrap("a "+long+" b", indent, 160)
+		want := []string{"     a", "     " + long, "     b"}
+		if len(got) != 3 {
+			t.Fatalf("wordWrap returned %d lines, want 3: %q...", len(got), got[:min(len(got), 1)])
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("line %d = %q (len %d), want %q (len %d)", i, got[i], len(got[i]), want[i], len(want[i]))
+			}
+		}
+	})
+
+	t.Run("multibyte_runes_never_torn", func(t *testing.T) {
+		// Em-dashes (—) and accented chars; each "word" is 3 runes.
+		var b strings.Builder
+		for i := 0; i < 60; i++ {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			b.WriteString("wörld")
+		}
+		got := wordWrap(b.String(), indent, 160)
+		for i, l := range got {
+			if n := len([]rune(l)); n > 160 {
+				t.Errorf("line %d exceeds the 160-RUNE width: %d runes", i, n)
+			}
+		}
+		joined := strings.Join(strings.Fields(strings.Join(got, " ")), " ")
+		if joined != b.String() {
+			t.Error("wrapped text lost multibyte content")
+		}
+	})
+
+	t.Run("empty_input_yields_single_indent_line", func(t *testing.T) {
+		got := wordWrap("", indent, 160)
+		want := []string{"     "}
+		if len(got) != 1 || got[0] != want[0] {
+			t.Fatalf("wordWrap(\"\") = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("width_smaller_than_indent", func(t *testing.T) {
+		// Degenerate width must not crash; budget floors at 1 rune.
+		got := wordWrap("ab cd", "     ", 3)
+		if len(got) == 0 {
+			t.Fatal("wordWrap returned no lines for non-empty input")
+		}
+	})
+}
+
+func TestRenderToolList(t *testing.T) {
+	t.Run("no_params_short_description", func(t *testing.T) {
+		none := time.Duration(0)
+		tools := []discoveredTool{
+			{Name: "hello", Description: "Say hello", Timeout: &none},
+		}
+		got := renderToolList(tools, 5*time.Minute, 160)
+		want := "hello()\n     Say hello (timeout: none)\n"
+		if got != want {
+			t.Fatalf("renderToolList = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("mixed_params_and_inherited_global_timeout", func(t *testing.T) {
+		tools := []discoveredTool{
+			{Name: "mixed", Description: "Does things", Params: []paramSpec{
+				{Name: "a", Type: "string", Required: true},
+				{Name: "b", Type: "number"},
+				{Name: "c", Type: "boolean"},
+			}},
+		}
+		got := renderToolList(tools, 5*time.Minute, 160)
+		want := "mixed(a:str, [b:num], [c:bool])\n     Does things (timeout: 5m0s)\n"
+		if got != want {
+			t.Fatalf("renderToolList = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty_description_suffix_alone", func(t *testing.T) {
+		none := time.Duration(0)
+		tools := []discoveredTool{{Name: "bare", Timeout: &none}}
+		got := renderToolList(tools, 5*time.Minute, 160)
+		want := "bare()\n     (timeout: none)\n"
+		if got != want {
+			t.Fatalf("renderToolList = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("duplicate_param_name_last_wins_first_position", func(t *testing.T) {
+		tools := []discoveredTool{
+			{Name: "dup", Description: "d", Params: []paramSpec{
+				{Name: "x", Type: "string", Required: true},
+				{Name: "a", Type: "string", Required: true},
+				{Name: "y", Type: "number"},
+				{Name: "a", Type: "number"},
+				{Name: "z", Type: "boolean"},
+			}},
+		}
+		got := renderToolList(tools, 5*time.Minute, 160)
+		want := "dup(x:str, [a:num], [y:num], [z:bool])\n     d (timeout: 5m0s)\n"
+		if got != want {
+			t.Fatalf("renderToolList = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("plan_example_byte_exact", func(t *testing.T) {
+		none := time.Duration(0)
+		twoMin := 2 * time.Minute
+		tools := []discoveredTool{
+			{
+				Name:        "meridian_build",
+				Description: "Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then cached. Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) — prefer scope=app for incremental work.",
+				Timeout:     &none,
+				Params: []paramSpec{
+					{Name: "profile", Type: "string"},
+					{Name: "scope", Type: "string"},
+					{Name: "target", Type: "string"},
+					{Name: "timings", Type: "boolean"},
+				},
+			},
+			{
+				Name:        "meridian_fetch",
+				Description: "Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. Run first on a remote host before any other meridian tool.",
+				Timeout:     &twoMin,
+				Params:      []paramSpec{{Name: "commit", Type: "string"}},
+			},
+		}
+		want := "meridian_build([profile:str], [scope:str], [target:str], [timings:bool])\n" +
+			"     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then cached.\n" +
+			"     Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) — prefer scope=app\n" +
+			"     for incremental work. (timeout: none)\n" +
+			"\n" +
+			"meridian_fetch([commit:str])\n" +
+			"     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. Run first on a\n" +
+			"     remote host before any other meridian tool. (timeout: 2m0s)\n"
+		if got := renderToolList(tools, 5*time.Minute, 160); got != want {
+			t.Fatalf("renderToolList did not match the spec example:\ngot:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("blank_line_between_blocks", func(t *testing.T) {
+		tools := []discoveredTool{
+			{Name: "a", Description: "one"},
+			{Name: "b", Description: "two"},
+			{Name: "c", Description: "three"},
+		}
+		got := renderToolList(tools, 5*time.Minute, 160)
+		want := "a()\n     one (timeout: 5m0s)\n\nb()\n     two (timeout: 5m0s)\n\nc()\n     three (timeout: 5m0s)\n"
+		if got != want {
+			t.Fatalf("renderToolList = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("zero_tools_empty_output", func(t *testing.T) {
+		if got := renderToolList(nil, 5*time.Minute, 160); got != "" {
+			t.Fatalf("renderToolList(nil) = %q, want empty", got)
+		}
+	})
+}
+
+func TestRegisteredDescription(t *testing.T) {
+	tests := []struct {
+		desc    string
+		timeout time.Duration
+		want    string
+	}{
+		{"do things", 30 * time.Second, "do things (timeout: 30s)"},
+		{"do things", 5 * time.Minute, "do things (timeout: 5m0s)"},
+		{"do things", 0, "do things (timeout: none)"},
+		{"", 30 * time.Second, "(timeout: 30s)"},
+		{"", 0, "(timeout: none)"},
+	}
+	for _, tt := range tests {
+		if got := registeredDescription(tt.desc, tt.timeout); got != tt.want {
+			t.Errorf("registeredDescription(%q, %v) = %q, want %q", tt.desc, tt.timeout, got, tt.want)
+		}
+	}
+}
+
+func TestResolveToolTimeout(t *testing.T) {
+	perTool := 30 * time.Second
+	none := time.Duration(0)
+	tests := []struct {
+		name   string
+		tool   discoveredTool
+		global time.Duration
+		want   time.Duration
+	}{
+		{"per_tool_wins_over_global", discoveredTool{Timeout: &perTool}, 5 * time.Minute, 30 * time.Second},
+		{"per_tool_none_wins_over_global", discoveredTool{Timeout: &none}, 5 * time.Minute, 0},
+		{"nil_inherits_global", discoveredTool{}, 5 * time.Minute, 5 * time.Minute},
+		{"nil_inherits_no_timeout_global", discoveredTool{}, 0, 0},
+	}
+	for _, tt := range tests {
+		if got := resolveToolTimeout(tt.tool, tt.global); got != tt.want {
+			t.Errorf("%s: resolveToolTimeout = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestWatchChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	// Re-write until the change is observed: the first write can race the
+	// watcher registration (a lost event is legal for fsnotify), and only
+	// writes landing after Add is guaranteed to produce a debounced fire.
+	for i := 0; i < 40; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+			t.Fatalf("failed to modify script: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if calls.Load() > 0 {
+			break
+		}
+	}
+	if calls.Load() == 0 {
+		t.Fatal("onChange did not fire on file change")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+}
+
+// TestWatchChangesNoSpuriousFire guards the debounce arming: with zero
+// filesystem events the timer must stay disarmed (regression — NewTimer
+// arms the clock immediately, so the first debounce window elapsed without
+// any event).
+func TestWatchChangesNoSpuriousFire(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	time.Sleep(500 * time.Millisecond) // several debounce windows, no events
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("onChange fired %d times with zero events, want 0", n)
+	}
+}
+
+func TestResolveToolPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dirAbs, scriptsAbs, err := resolveToolPaths(tmpDir, tmpDir)
+	if err != nil {
+		t.Fatalf("resolveToolPaths failed: %v", err)
+	}
+	if dirAbs != tmpDir || scriptsAbs != tmpDir {
+		t.Errorf("resolveToolPaths = (%q, %q), want (%q, %q)", dirAbs, scriptsAbs, tmpDir, tmpDir)
+	}
+
+	if _, _, err := resolveToolPaths(tmpDir, filepath.Join(tmpDir, "no-such-scripts")); err == nil || !strings.Contains(err.Error(), "scripts path inaccessible") {
+		t.Errorf("expected 'scripts path inaccessible' error, got %v", err)
+	}
+	if _, _, err := resolveToolPaths(filepath.Join(tmpDir, "no-such-dir"), tmpDir); err == nil || !strings.Contains(err.Error(), "dir path inaccessible") {
+		t.Errorf("expected 'dir path inaccessible' error, got %v", err)
+	}
+}
+
+func TestRunDiagnosticListTools(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
+		emptyDir := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, true, false, "", false, "", 5*time.Minute, nil)
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "Warning: No executable scripts found in "+emptyDir) {
+			t.Errorf("stderr = %q, want the no-scripts warning", stderr.String())
+		}
+	})
+
+	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
+		missing := filepath.Join(tmpDir, "no-such-scripts")
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, true, false, "", false, "", 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "Error:") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
+			t.Errorf("stderr = %q, want the path error", stderr.String())
+		}
+	})
+
+	t.Run("prints_list_and_ignored_flags_notice", func(t *testing.T) {
+		scriptPath := filepath.Join(tmpDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha tool\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, true, false, "", false, "", 5*time.Minute, []string{"--host", "--port"})
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		if !strings.Contains(stdout.String(), "alpha()") || !strings.Contains(stdout.String(), "alpha tool (timeout: 5m0s)") {
+			t.Errorf("stdout = %q, want the rendered tool", stdout.String())
+		}
+		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --port"
+		if !strings.Contains(stderr.String(), wantNotice) {
+			t.Errorf("stderr = %q, want notice %q", stderr.String(), wantNotice)
+		}
+		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 {
+			t.Errorf("stderr = %q, want exactly one notice", stderr.String())
+		}
+	})
+
+	t.Run("live_mode_reprints_on_change", func(t *testing.T) {
+		scriptsDir := t.TempDir()
+		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+
+		var clears atomic.Int32
+		var cancel context.CancelFunc
+		oldClear := clearScreen
+		clearScreen = func(io.Writer) { clears.Add(1) }
+		oldNotify := notifySignals
+		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+			c, c2 := context.WithCancel(ctx)
+			cancel = c2
+			return c, func() {}
+		}
+		defer func() {
+			clearScreen = oldClear
+			notifySignals = oldNotify
+		}()
+
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+		}()
+
+		// Initial print.
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") {
+			t.Fatalf("initial print missing: %q", stdout.String())
+		}
+
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+
+		deadline = time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "beta updated (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "beta updated (timeout: 5m0s)") {
+			t.Fatalf("live re-print missing after change: %q", stdout.String())
+		}
+		// The re-print uses the re-queried width (non-TTY buffer → 160).
+		if !strings.Contains(stdout.String(), "     beta updated (timeout: 5m0s)") {
+			t.Errorf("re-print not rendered at the 160-rune fallback: %q", stdout.String())
+		}
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("live mode exit code = %d, want 0", code)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("live mode did not stop after cancel")
+		}
+		if clears.Load() == 0 {
+			t.Error("injected clearScreen was not called before the re-print")
+		}
+	})
+
+	t.Run("live_mode_stays_quiet_without_changes", func(t *testing.T) {
+		scriptsDir := t.TempDir()
+		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to create script: %v", err)
+		}
+
+		var clears atomic.Int32
+		var cancel context.CancelFunc
+		oldClear := clearScreen
+		clearScreen = func(io.Writer) { clears.Add(1) }
+		oldNotify := notifySignals
+		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+			c, c2 := context.WithCancel(ctx)
+			cancel = c2
+			return c, func() {}
+		}
+		defer func() {
+			clearScreen = oldClear
+			notifySignals = oldNotify
+		}()
+
+		var stdout, stderr bytes.Buffer
+		done := make(chan int, 1)
+		go func() {
+			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+		}()
+
+		// Initial print.
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "alpha (timeout: 5m0s)") {
+			t.Fatalf("initial print missing: %q", stdout.String())
+		}
+
+		// Several debounce windows with zero events: the debounce timer must
+		// not fire on its own (regression: it was armed at creation, causing
+		// an unsolicited clear + full re-print ~100 ms after start).
+		time.Sleep(500 * time.Millisecond)
+
+		if n := strings.Count(stdout.String(), "alpha (timeout: 5m0s)"); n != 1 {
+			t.Errorf("list printed %d times with no changes, want exactly 1: %q", n, stdout.String())
+		}
+		if n := clears.Load(); n != 0 {
+			t.Errorf("clearScreen called %d times with no changes, want 0", n)
+		}
+
+		cancel()
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Fatalf("live mode exit code = %d, want 0", code)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("live mode did not stop after cancel")
+		}
+	})
+}
+
+func TestRunCallTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptsDir := filepath.Join(tmpDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	// A single marker shared by the marker scripts: subtests run in order
+	// and each clears it first, so a marker can only come from the run
+	// under test.
+	marker := filepath.Join(tmpDir, "marker")
+
+	writeScript := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(scriptsDir, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("failed to create %s: %v", name, err)
+		}
+	}
+	markerBody := "#!/bin/bash\necho it-ran >> " + marker + "\necho ran\n"
+	writeScript("ok.sh", markerBody)
+	writeScript("ok_param.sh", "#!/bin/bash\n# Param: path string required \"Input path\"\n"+markerBody)
+	writeScript("fail.sh", "#!/bin/bash\necho boom\nexit 3\n")
+	writeScript("sleep1.sh", "#!/bin/bash\n# Timeout: 1s\nexec sleep 5\n")
+	writeScript("slow_none.sh", "#!/bin/bash\n# Timeout: NONE\nsleep 2\necho done-slow\n")
+	writeScript("badinterp", "#!/nonexistent/interpreter\necho never\n")
+
+	markerExists := func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}
+	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
+		os.Remove(marker)
+		var buf bytes.Buffer
+		code, err = runCallTool(&buf, scriptsDir, tmpDir, global, name, params)
+		stdout = buf.String()
+		return code, err, stdout
+	}
+
+	t.Run("unknown_tool_code_1_lists_available_names", func(t *testing.T) {
+		code, err, stdout := run("nope", "{}", 5*time.Minute)
+		if code != 1 || err == nil {
+			t.Fatalf("code = %d, err = %v, want code 1 and a non-nil error", code, err)
+		}
+		wantMsg := `unknown tool "nope"; available tools: badinterp, fail, ok, ok_param, sleep1, slow_none`
+		if !strings.Contains(err.Error(), wantMsg) {
+			t.Errorf("err = %q, want it to name the tool and list the available tools (%s)", err, wantMsg)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty (operational failures go to stderr)", stdout)
+		}
+	})
+
+	t.Run("success_code_0_stdout_carries_output", func(t *testing.T) {
+		code, err, stdout := run("ok", `{"x":"y"}`, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 0 {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if !strings.Contains(stdout, "<stdout>") || !strings.Contains(stdout, "ran") || !strings.Contains(stdout, "</stdout>") {
+			t.Errorf("stdout = %q, want the script output", stdout)
+		}
+		if !markerExists() {
+			t.Error("marker missing: the script did not run")
+		}
+	})
+
+	t.Run("nonzero_exit_code_1_output_printed", func(t *testing.T) {
+		code, err, stdout := run("fail", "{}", 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stdout, "boom") {
+			t.Errorf("stdout = %q, want the script output", stdout)
+		}
+	})
+
+	t.Run("missing_required_param_not_executed", func(t *testing.T) {
+		code, err, stdout := run("ok_param", "{}", 5*time.Minute)
+		if err != nil {
+			t.Fatalf("runCallTool returned error: %v", err)
+		}
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stdout, "missing required parameter: path") {
+			t.Errorf("stdout = %q, want the validation message", stdout)
+		}
+		if markerExists() {
+			t.Error("script was executed despite the validation failure")
+		}
+	})
+
+	t.Run("non_object_params_rejected_before_execution", func(t *testing.T) {
+		for _, params := range []string{"42", `["x"]`, `"str"`, `"{\"a\":1}"`} {
+			code, err, _ := run("ok", params, 5*time.Minute)
+			if code != 1 || err == nil {
+				t.Errorf("--params=%s: code = %d, err = %v, want code 1 and a non-nil error", params, code, err)
+			}
+			if markerExists() {
+				t.Errorf("--params=%s: script was executed", params)
+			}
+		}
+	})
+
+	t.Run("empty_and_null_params_equivalent_to_empty_object", func(t *testing.T) {
+		for _, params := range []string{"", "null", "{}"} {
+			code, err, _ := run("ok", params, 5*time.Minute)
+			if code != 0 || err != nil {
+				t.Errorf("--params=%q: code = %d, err = %v, want success", params, code, err)
+			}
+		}
+	})
+
+	t.Run("per_tool_timeout_wins_over_global", func(t *testing.T) {
+		// sleep1.sh declares `Timeout: 1s` in its frontmatter: the per-tool
+		// value must win over the long global.
+		start := time.Now()
+		code, err, stdout := run("sleep1", "{}", 5*time.Minute)
+		if elapsed := time.Since(start); elapsed > 3500*time.Millisecond {
+			t.Errorf("timeout case took %v, want ~1s", elapsed)
+		}
+		if err != nil || code != 1 {
+			t.Fatalf("sleep1: code = %d, err = %v, want timeout", code, err)
+		}
+		if !strings.Contains(stdout, "tool timed out after 1s") {
+			t.Errorf("stdout = %q, want the timeout message", stdout)
+		}
+
+		// slow_none.sh declares `Timeout: NONE` under a short global: it must
+		// run with no deadline and complete.
+		start = time.Now()
+		code, err, out := run("slow_none", "{}", time.Second)
+		if elapsed := time.Since(start); elapsed < time.Second || elapsed > 4*time.Second {
+			t.Errorf("NONE case took %v, want ~2s (no deadline)", elapsed)
+		}
+		if err != nil || code != 0 {
+			t.Fatalf("slow_none: code = %d, err = %v, want success", code, err)
+		}
+		if !strings.Contains(out, "done-slow") {
+			t.Errorf("stdout = %q, want the script output", out)
+		}
+	})
+
+	t.Run("unstartable_script_hard_error", func(t *testing.T) {
+		code, err, stdout := run("badinterp", "{}", 5*time.Minute)
+		if code != 1 || err == nil {
+			t.Fatalf("code = %d, err = %v, want code 1 and a non-nil error", code, err)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty (hard errors go to stderr)", stdout)
+		}
+	})
+}
+
+func TestRunDiagnosticCallTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptsDir := filepath.Join(tmpDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("failed to create scripts dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptsDir, "ok.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, false, "", true, "{}", 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "--call-tool requires a non-empty tool name") {
+			t.Errorf("stderr = %q, want the startup error", stderr.String())
+		}
+	})
+
+	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
+		}
+		captured := stdout.String()
+		if !strings.Contains(captured, "ran") {
+			t.Errorf("stdout = %q, want the script output", captured)
+		}
+		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --watch"
+		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 || !strings.Contains(stderr.String(), wantNotice) {
+			t.Errorf("stderr = %q, want exactly one notice %q", stderr.String(), wantNotice)
+		}
+	})
+
+	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runDiagnostic(&stdout, &stderr, tmpDir, filepath.Join(tmpDir, "no-such"), false, false, "ok", true, "{}", 5*time.Minute, nil)
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "scripts path inaccessible") {
+			t.Errorf("stderr = %q, want the path error", stderr.String())
+		}
+	})
 }
