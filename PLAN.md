@@ -15,16 +15,18 @@ Give users a way to inspect and exercise the tools **without an MCP client**:
    timeout resolution), print the result text to stdout, and map the outcome to
    a process exit code. Debugging a misbehaving tool no longer needs a client.
 
-Example output (scripts from a remote-build toolset):
+Example output (excerpt — the source toolset has 9 executables; this is the
+spec-correct rendering of the first two):
 
 ```
 meridian_build([profile:str], [scope:str], [target:str], [timings:bool])
-     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then
-     cached. Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) —
-     prefer scope=app for incremental work. (timeout: none)
+     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then cached.
+     Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) — prefer scope=app
+     for incremental work. (timeout: none)
 
 meridian_fetch([commit:str])
-     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. (timeout: 2m0s)
+     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. Run first on a
+     remote host before any other meridian tool. (timeout: 2m0s)
 ```
 
 ## Requirements & Decisions
@@ -42,21 +44,33 @@ meridian_fetch([commit:str])
   `key:shorttype` if required, `[key:shorttype]` if optional, joined by `, `.
   Short types: `string`→`str`, `number`→`num`, `boolean`→`bool`.
   A tool with no parameters renders as `name()`.
-- Duplicate parameter names: **last declaration wins** — identical rule to
-  `buildInputSchema`, so the signature always matches the registered schema.
+- Duplicate parameter names: dedup **last-wins for type/required**, rendered
+  at the **first-occurrence position** (mirrors `buildInputSchema`, whose
+  `required` array keeps first-occurrence order) — so the signature always
+  matches the registered schema.
 - Lines 2…n: the **registered description** (frontmatter `Description:` plus
-  the `(timeout: <d>)` / `(timeout: none)` suffix) word-wrapped at **160
-  columns total** (wrap constant), with every line indented 5 spaces
-  (`listWrapIndent`). Wrapping is rune-based, breaks at spaces only, and never
-  splits a word. A description shorter than the width stays one line; a single
-  unbreakable token longer than the width is emitted on its own line (visible,
-  never truncated).
+  the `(timeout: <d>)` / `(timeout: none)` suffix) word-wrapped. The wrap
+  contract, deterministic: width **160 runes total INCLUDING the 5-space
+  indent** (so the content budget is 155); rune-based; greedy (fill each line
+  as far as it fits); breaks at runs of whitespace, which collapse to a single
+  space; never splits a word. A description that fits stays one line; a single
+  unbreakable token longer than the budget is emitted whole on its own line
+  (visible, never truncated).
+- The per-tool timeout for the suffix resolves with the **same precedence as
+  the registry** (per-tool `Timeout:` > global `--timeout`/`--no-timeout` >
+  default): a shared helper `resolveToolTimeout(tool discoveredTool, global
+  time.Duration) time.Duration` is used by *both* `replace` and
+  `renderToolList` so the two call sites cannot drift.
 - Printed to **stdout**; discovery warnings (invalid `Param:`/`Timeout:`)
   continue going to **stderr** exactly as today.
 - The description+suffix assembly is extracted from `toolRegistry.replace`
   into a shared helper `registeredDescription(desc string, timeout
   time.Duration) string` (DRY): the registry and the list renderer must never
   drift apart.
+- When server-mode flags (`--watch`, `--port`, `--api-key`, CORS) are
+  explicitly passed in diagnostic mode they are ignored, and the process prints
+  a single stderr notice naming the ignored flags (disclosed, per fail-loud —
+  never silent).
 
 **`--call-tool` semantics:**
 
@@ -78,6 +92,10 @@ meridian_fetch([commit:str])
   separated). `IsError: true` (validation failure, non-zero script exit,
   timeout) → content still printed to stdout, **exit 1**. Hard execution
   errors (script unstartable) → stderr, **exit 1**. Success → **exit 0**.
+- Inherited quirk (document, do not change): `validateRequiredParams` iterates
+  *all* declarations, so a duplicate name declared `required` then `optional`
+  is still enforced by `--call-tool` although the schema marks it optional
+  (last-wins) — identical to the production handler.
 
 **Mode dispatch & flag rules:**
 
@@ -85,10 +103,13 @@ meridian_fetch([commit:str])
   a startup error (fail loud, mirrors the `--timeout`/`--no-timeout` pattern).
 - In diagnostic mode the process exits after the diagnostic runs. `--watch`,
   `--port`, `--api-key`, and the CORS flags are server-mode options and are
-  **ignored** in diagnostic mode (documented in the usage text and README);
-  they are still fail-fast-validated so a typo never masquerades as a silent
-  success. `--dir` and `--scripts` remain required in all modes (`--dir` is
-  only consumed by `--call-tool`).
+  **ignored** in diagnostic mode (with the stderr notice above, and documented
+  in the usage text and README); they are still fail-fast-validated so a typo
+  never masquerades as a silent success. `--dir` and `--scripts` remain
+  required in all modes (`--dir` is only consumed by `--call-tool`). The
+  diagnostic branch resolves paths itself — the `filepath.Abs` + `os.Stat`
+  pair is extracted from `run()` into a shared helper so the resolution
+  behavior and error text stay identical in both modes.
 - Because `--call-tool` must resolve the tool timeout, `resolveTimeout` runs
   (fail-fast, as today) before the diagnostic branch; `resolveCORS` likewise.
   The MCP server, registry, and watcher are constructed only in server mode.
@@ -107,16 +128,19 @@ and exits non-zero.
 
 - [ ] **Task 1: Shared description helper + list rendering**
   - **Description:** Extract `registeredDescription(desc string, timeout
-    time.Duration) string` (frontmatter desc + ` ` + `timeoutSuffix`) from
-    `toolRegistry.replace`; update `replace` to call it (registered
-    descriptions are byte-identical to today — the suffix-joining logic moves
-    unchanged). Add `listParamDecl(p paramSpec) string` (`str`/`num`/`bool`,
-    brackets for optional, last-wins dedup by name) and
-    `renderToolList(tools []discoveredTool, globalTimeout time.Duration)
-    string`: per tool, the signature line, the rune word-wrapped description
-    (5-space indent, 160-col constant `listWrapWidth`), and a trailing blank
-    line between blocks. Add `wordWrap(s string, indent string, width int)
-    []string` (rune-based, break at spaces, no word splitting, overlong tokens
+    time.Duration) string` (frontmatter desc + ` ` + `timeoutSuffix`; empty
+    desc → suffix alone) from `toolRegistry.replace`, and
+    `resolveToolTimeout(tool discoveredTool, global time.Duration)
+    time.Duration` (per-tool wins over global); update `replace` to call both
+    (registered descriptions byte-identical to today). Add `listParamDecl(p
+    paramSpec) string` (`str`/`num`/`bool`, brackets for optional) with
+    dedup: last-wins for type/required, **first-occurrence position** in the
+    joined signature. Add `renderToolList(tools []discoveredTool, globalTimeout
+    time.Duration) string`: per tool, the signature line, the word-wrapped
+    description (160-rune total width incl. 5-space indent, `listWrapWidth`),
+    and a trailing blank line between blocks. Add `wordWrap(s string, indent
+    string, width int) []string` per the contract above (rune-based, greedy,
+    whitespace runs collapse to one break, no word splitting, overlong tokens
     pass through whole).
   - **Review Criteria:** Table tests: `renderToolList` on a fixture covering
     no-params (`name()`), required-only, optional-only, mixed (`(a:str,
@@ -125,7 +149,8 @@ and exits non-zero.
     160-col width, a >160-rune single token (one line, unsplit), and
     multi-byte text (em-dashes — must never tear a rune mid-line).
     `registeredDescription` covers empty desc (suffix alone) and both timeout
-    values. Existing watch/registry tests that assert exact description strings
+    values; `resolveToolTimeout` covers per-tool-wins/global-fallback/nil.
+    Existing watch/registry tests that assert exact description strings
     (e.g. `"beta updated (timeout: …)"`) stay green unchanged.
 - [ ] **Task 2: `--list-tools` flag & dispatch**
   - **Description:** Add `--list-tools` bool flag. In `main()`, after the
@@ -147,7 +172,8 @@ and exits non-zero.
     default `{}`) flags and the mutual-exclusion check against `--list-tools`
     (both set → startup error). Implement `runCallTool(scriptsAbs, dirAbs
     string, globalTimeout time.Duration, name, paramsRaw string) (exitCode
-    int, err error)`: discover; look up exact name (unknown → stderr listing
+    int, err error)`, taking already-resolved absolute paths (the branch uses
+    the shared Abs+Stat helper): discover; look up exact name (unknown → stderr listing
     available names, code 1); `parseToolArguments([]byte(paramsRaw))` (failure
     → stderr, code 1, nothing executed); same timeout resolution as
     `toolRegistry.replace`; `validateRequiredParams` (failure → content to
@@ -170,8 +196,10 @@ and exits non-zero.
     `--call-tool` (with the `--params` JSON form, exit-code table: 0
     success / 1 any failure, output streams), the note that diagnostic mode
     ignores server-mode flags and honors the full timeout precedence
-    (`Timeout: NONE` ⇒ the debug call has no deadline), and a one-line note
-    that this prints exactly what the LLM sees. Flag help strings, `Usage:`
+    (`Timeout: NONE` ⇒ the debug call has no deadline), a one-line note that
+    this prints exactly what the LLM sees, the ignored-server-flags stderr
+    notice, and the duplicate-`Param:` `validateRequiredParams` quirk note
+    (documented, inherited from the handler). Flag help strings, `Usage:`
     text, and README kept consistent. `serverVersion` → `0.7.0`.
   - **Review Criteria:** README examples copy-pasteable and match actual
     output (run the built binary against the example scripts and paste the
@@ -188,7 +216,8 @@ and exits non-zero.
     `--call-tool` against the meridian remote toolset
     (`/workspace/games/experiment-settler2/tooling/remote` with `--dir` set to
     the settler2 checkout) and diff the listing against the example in the
-    Objective.
+    Objective (PLAN.md + archive already landed on `main` in the planner
+    commit; the branch commits touch code/docs only).
   - **Review Criteria:** `git log main..feat/tool-diagnostics` shows exactly
     the four commits, all green; smoke output matches the documented format
     byte-for-byte (modulo the 160-col wrap); PR ready to open.
@@ -200,8 +229,8 @@ and exits non-zero.
 - Unreadable scripts directory → stderr error, exit 1 (both diagnostics).
 - Tool with empty frontmatter description → rendered line is the timeout
   suffix alone (same rule the registry uses today).
-- Duplicate `Param:` names → single signature entry, last declaration wins
-  (matches `buildInputSchema`).
+- Duplicate `Param:` names → single signature entry, last declaration wins,
+  first-occurrence position (matches `buildInputSchema`).
 - Word longer than 160 columns (long path/URL in a description) → emitted
   whole on its own line; never split, never truncated.
 - Multi-byte text (em-dashes, accented characters) → wrap counts **runes**,
@@ -217,11 +246,14 @@ and exits non-zero.
 - Timeout expiry → the standard `tool timed out after <d>` result, exit 1.
 - `Timeout: NONE` / `--no-timeout` → the debug call runs with **no deadline**
   (matches production; documented so a re-call of a slow build can complete).
+- Duplicate name declared `required` then `optional` → `--call-tool` still
+  enforces it (`validateRequiredParams` iterates all declarations) — inherited
+  handler quirk, documented, unchanged.
 - `--list-tools` and `--call-tool` both passed → startup error (mutually
   exclusive).
 - Server-mode flags (`--watch`, `--port`, `--api-key`, CORS) in diagnostic
-  mode → validated fail-fast, then ignored; no port bound, no watcher, no
-  stdio server.
+  mode → validated fail-fast, then ignored with a single stderr notice naming
+  the ignored flags; no port bound, no watcher, no stdio server.
 - Hot-reload state irrelevant: diagnostics read the directory at call time;
   a concurrent `--watch` server is a separate process and unaffected.
 - 1 MB output cap and arg-key injection guard apply unchanged (diagnostics
