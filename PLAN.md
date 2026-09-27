@@ -1,185 +1,236 @@
-# Plan: Configurable & Per-Tool Timeout Handling
+# Plan: Tool Diagnostics (`--list-tools` / `--call-tool`)
 
 ## Objective
 
-Make tool execution timeouts configurable at three levels, in precedence order
-(per-tool > CLI > default):
+Give users a way to inspect and exercise the tools **without an MCP client**:
 
-1. **Default:** 5 minutes (current behavior, unchanged).
-2. **Global:** new `--timeout <duration>` CLI flag (formatted duration string)
-   and `--no-timeout` boolean to disable the global timeout.
-3. **Per-tool:** new `Timeout: <duration>` line in a script's frontmatter
-   (first `scanHeaderLines` = 30 lines), using the same format string as the
-   flag, with the literal `NONE` meaning no timeout.
+1. **`--list-tools`** — one-shot: discover the scripts directory, print every
+   discovered tool as `name(<signature>)` plus its full registered description
+   (word-wrapped), then exit. The server is **not** started (no port, no stdio
+   transport, no watcher). This shows exactly what the LLM sees — including the
+   `(timeout: …)` suffix.
+2. **`--call-tool=<name>`** with optional **`--params='<json object>'`** —
+   one-shot: run a single discovered tool through the *same* execution path as
+   the MCP handler (required-param validation, JSON→CLI-arg translation,
+   timeout resolution), print the result text to stdout, and map the outcome to
+   a process exit code. Debugging a misbehaving tool no longer needs a client.
 
-A script whose frontmatter declares `Timeout:` always wins over the global;
-a script without one inherits the global. `Timeout: 0s` and `Timeout: NONE`
-are equivalent (zero duration = no deadline).
+Example output (scripts from a remote-build toolset):
+
+```
+meridian_build([profile:str], [scope:str], [target:str], [timings:bool])
+     Compile the Meridian workspace (or just meridian-app) on the remote host — the offload target; the long pole is the Bevy dep tree, built once then
+     cached. Timeout is NONE (a full clean build of the Bevy dep tree can far exceed the 5-minute MCP default; re-call to see a slow build's result) —
+     prefer scope=app for incremental work. (timeout: none)
+
+meridian_fetch([commit:str])
+     Check out the pinned commit of the Meridian repo on the remote host (idempotent) and report HEAD/branch, rustc, cargo and Cargo.lock info. (timeout: 2m0s)
+```
 
 ## Requirements & Decisions
 
 - **Frameworks:** None new — single-file Go app (`main.go`), existing deps only
-  (`modelcontextprotocol/go-sdk`, `fsnotify`). No new libraries; duration
-  parsing is a small stdlib-only helper (stdlib `time.ParseDuration` is rejected:
-  it accepts negatives, decimals, and space-less compounds only — see parser spec).
+  (`modelcontextprotocol/go-sdk`, `fsnotify`); word wrapping is a small
+  stdlib-only helper (rune-based). No new libraries.
 - **Chosen Libraries:** n/a (stdlib only).
-- **Error Handling Strategy:**
-  - `--timeout` is parsed **at startup, before the server starts** (same fail-fast
-    pattern as `resolveCORS`). Invalid value → stderr error, exit 1. The server
-    never boots with a broken config.
-  - An invalid per-tool `Timeout:` value **does not** fail discovery or
-    registration. It logs `Warning: ignoring invalid Timeout in <file>: <reason>`
-    to stderr and falls back to the global timeout (visible degradation, same
-    behavior as invalid `Param:` annotations today). This keeps hot-reload robust:
-    a user editing a script's timeout mid-flight never breaks the tool.
-  - Timeout expiry at execution: unchanged — kill via `exec.CommandContext`,
-    return `IsError: true` result `"tool timed out after <d>\n<partial output>"`.
 
-**Format spec (shared by flag and frontmatter):**
+**`--list-tools` output format (spec):**
 
-- Whitespace-separated list of tokens, each exactly `^<digits><unit>$` with unit
-  one of `s`, `m`, `h` (sub-second units are not meaningful for tool timeouts
-  and are rejected). At least one token required. Digits-only integers (no
-  decimals, no `+`/`-` signs, no bare unit). Examples: `5m`, `60s`,
-  `1h 30m 5s`. Whitespace between tokens is optional.
-- `NONE` (case-insensitive, leading/trailing whitespace trimmed) → no timeout.
-- Result of `0` (e.g. `0s`) → no timeout, identical to `NONE`.
-- Overflow guard: each term is checked for multiplication overflow
-  (`n > maxDuration/multiplier`) and the running sum for addition overflow
-  (`total > maxDuration-term`); a violating value is rejected with a clear
-  `overflows` error before any wraparound arithmetic can produce a positive
-  duration.
+- One block per tool, in discovery order (already sorted by filename),
+  separated by exactly one blank line.
+- Line 1: `name(<decls>)` — one `<decl>` per parameter in declaration order:
+  `key:shorttype` if required, `[key:shorttype]` if optional, joined by `, `.
+  Short types: `string`→`str`, `number`→`num`, `boolean`→`bool`.
+  A tool with no parameters renders as `name()`.
+- Duplicate parameter names: **last declaration wins** — identical rule to
+  `buildInputSchema`, so the signature always matches the registered schema.
+- Lines 2…n: the **registered description** (frontmatter `Description:` plus
+  the `(timeout: <d>)` / `(timeout: none)` suffix) word-wrapped at **160
+  columns total** (wrap constant), with every line indented 5 spaces
+  (`listWrapIndent`). Wrapping is rune-based, breaks at spaces only, and never
+  splits a word. A description shorter than the width stays one line; a single
+  unbreakable token longer than the width is emitted on its own line (visible,
+  never truncated).
+- Printed to **stdout**; discovery warnings (invalid `Param:`/`Timeout:`)
+  continue going to **stderr** exactly as today.
+- The description+suffix assembly is extracted from `toolRegistry.replace`
+  into a shared helper `registeredDescription(desc string, timeout
+  time.Duration) string` (DRY): the registry and the list renderer must never
+  drift apart.
 
-**Precedence decisions (recorded):**
+**`--call-tool` semantics:**
 
-- `--no-timeout` and `--timeout` are **mutually exclusive** (Round 2; the
-  earlier "no-timeout beats --timeout" decision is retired): passing both is a
-  startup error, mirroring the CORS `--allowed-origins` + `--allow-all-origins`
-  contradiction pattern. The `--timeout` flag visit is tracked via `flag.Visit`
-  so an explicitly empty `--timeout=` is distinguishable from the `""` default
-  and fails fast on parse (empty → error); the default 5m applies only when the
-  flag was omitted entirely.
-- Per-tool `Timeout:` **always** overrides the global, even if the global is
-  `--no-timeout`: an author who pinned `Timeout: 30s` gets 30s; authors get
-  predictable per-script behavior.
-- `Timeout:` uses **first occurrence wins** (same rule as `Description:`);
-  multiple lines are allowed, extras are silently ignored.
-- No env-var override for the global (YAGNI; flag + frontmatter cover the need).
-- When no timeout applies, the exec context is the request context *itself*
-  (client cancellation/abort still kills the script — "no timeout" means
-  "no deadline", never "uninterruptible").
+- `--params` is a string flag, default `{}`; an explicitly empty `--params=` is
+  accepted as `{}` (lenient). Anything non-empty must be a JSON object —
+  parsed by the existing `parseToolArguments` (rejects non-objects,
+  double-encoded JSON). Parse failure → stderr message, **exit 1, the script
+  is never started**.
+- The tool name is looked up exactly among discovered tools. Unknown name →
+  stderr `Error: unknown tool "x"` listing the available names, **exit 1**.
+- Execution reuses the MCP handler body verbatim: `validateRequiredParams` →
+  `argumentsToCLIArgs` → `executeTool(ctx, path, args, resolvedTimeout,
+  dirAbs)`. Timeout resolution is identical to the registry: per-tool
+  `Timeout:` > global `--timeout`/`--no-timeout` > 5m default — so the debug
+  call honors the exact production budget, including `Timeout: NONE` ⇒ **no
+  deadline** (a long build can be re-called to completion; intentional and
+  documented).
+- Result reporting: every `TextContent` is written to **stdout** (newline-
+  separated). `IsError: true` (validation failure, non-zero script exit,
+  timeout) → content still printed to stdout, **exit 1**. Hard execution
+  errors (script unstartable) → stderr, **exit 1**. Success → **exit 0**.
+
+**Mode dispatch & flag rules:**
+
+- `--list-tools` and `--call-tool` are **mutually exclusive** — passing both is
+  a startup error (fail loud, mirrors the `--timeout`/`--no-timeout` pattern).
+- In diagnostic mode the process exits after the diagnostic runs. `--watch`,
+  `--port`, `--api-key`, and the CORS flags are server-mode options and are
+  **ignored** in diagnostic mode (documented in the usage text and README);
+  they are still fail-fast-validated so a typo never masquerades as a silent
+  success. `--dir` and `--scripts` remain required in all modes (`--dir` is
+  only consumed by `--call-tool`).
+- Because `--call-tool` must resolve the tool timeout, `resolveTimeout` runs
+  (fail-fast, as today) before the diagnostic branch; `resolveCORS` likewise.
+  The MCP server, registry, and watcher are constructed only in server mode.
+- `serverVersion` bumps `0.6.0` → **`0.7.0`** (new user-facing capability).
+
+**Error handling strategy:** fail-loud-fail-fast, per the global directive.
+Invalid flags/values exit 1 at startup; a bad `--params` payload exits 1 before
+spawning anything; a failing tool run exits 1 with the full tool output on
+stdout (so the failure is inspectable, not hidden). No fallbacks, no silent
+degradation: every non-success path prints a human-readable reason to stderr
+and exits non-zero.
 
 ## Implementation Steps
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
 
-- [x] **Task 1: Duration parser + flag plumbing**
-  - **Description:** Add `parseTimeoutDuration(raw string) (time.Duration, error)`
-    in `main.go` implementing the format spec above (returns `0` for `NONE`;
-    rejects negatives/decimals/invalid tokens with a descriptive error). Add CLI
-    flags `--timeout` (string, default `""` → `5 * time.Minute`) and `--no-timeout`
-    (bool). Resolve in `main()` before `run()` (fail-fast on parse error, like
-    CORS): `--timeout` + `--no-timeout` ⇒ mutual-exclusion error; `--no-timeout`
-    ⇒ 0; `--timeout` visited ⇒ parsed value (explicit empty ⇒ parse error);
-    else 5m. The `--timeout` visit is tracked with `flag.Visit` (pattern shared
-    with `--allow-all-origins`). The parser enforces the overflow guard above.
-    Thread the resolved `time.Duration` through `run(...)` into
-    `newToolRegistry(server, dir, globalTimeout)`
-    (new field on `toolRegistry`).
-  - **Review Criteria:** Table tests cover: `5m`, `60s`, `1h 30m 5s` (sums
-    correctly), `NONE`/`none`/` NONE `, `0s` → 0; accepts `5m 5m` (10m); rejects
-    sub-second `250ms`/`250us`/`250µs`/`1000ns`, `-5m`, `+5m`, `1.5h`, `m5`,
-    `h`, `""`, unknown units. Overflow: three ~max terms whose sum exceeds
-    `math.MaxInt64` (`876000h × 3`) and a single term whose seconds→nanoseconds
-    multiply overflows (`9223372037s`) are rejected with an `overflows` error.
-    `resolveTimeout`: `--no-timeout` + `--timeout` ⇒ mutual-exclusion error;
-    explicit empty `--timeout=` ⇒ parse error; `--no-timeout` alone ⇒ 0;
-    omitted ⇒ 5m. Startup with `--timeout bogus` exits 1 with a clear message.
-    `go vet` clean, no new deps in `go.mod`; the three existing
-    `newToolRegistry(server, dir)` call sites in main_test.go are updated to the
-    new signature in the same commit (reviewer advisory, round 1).
-- [x] **Task 2: Per-tool `Timeout:` frontmatter**
-  - **Description:** Add `scanTimeoutPrefix = "Timeout:"` const and timeout
-    extraction (first match within `scanHeaderLines`; `nil` when absent,
-    `&0` for `NONE`/`0`, `&d` when valid; invalid value → stderr warning,
-    `nil` so the global applies). Round 2: merged with `extractDescription`
-    and `extractParams` into a single-pass `extractFrontmatter(path)
-    (desc, params, timeout *time.Duration)` — one `os.Open` + scanner, first
-    `Description:`, all valid `Param:` lines, first `Timeout:`. `discoveredTool`
-    carries one `Timeout *time.Duration` (nil = undeclared, `&0` = NONE);
-    populated in `discoverTools`.
-  - **Review Criteria:** Tests assert via `extractFrontmatter`: present/absent
-    (pointer nil vs non-nil), `NONE` vs `0s` vs `30s`, value beyond line 30
-    ignored, first-of-multiple wins. The invalid-value case captures stderr via
-    a pipe (restoring `os.Stderr`) and asserts the warning names the script file
-    AND states the invalid value's reason. Hot reload of a script whose `Timeout:`
-    changed re-registers with the new value (covered by existing watch test
-    pattern).
-- [x] **Task 3: Apply resolved timeout at execution**
-  - **Description:** In `toolRegistry.replace`, handler resolves
-    `t := r.globalTimeout; if tool.Timeout != nil { t = *tool.Timeout }` and
-    passes `t` to `executeTool` (replacing the `defaultToolTimeout` argument).
-    In
-    `executeTool`, only call `context.WithTimeout(ctx, timeout)` when
-    `timeout > 0`; otherwise use `ctx` directly (cancellation preserved). Append
-    a short suffix to the registered tool description, e.g.
-    `(timeout: 30s)` / `(timeout: none)`, so the LLM knows the budget.
-  - **Review Criteria:** Registry-level test (pattern:
-    `TestRequiredParamValidationViaRegistry`): tool with `Timeout: &1s` running a
-    `sleep 5` script returns `IsError` + "timed out after 1s" within ~1–2s;
-    same script via a tool *without* `Timeout:` under `--timeout`-style global
-    of e.g. 2s gets the global; `Timeout: NONE` under a short global still
-    completes (short script). Zero/`NONE` path uses request ctx: cancelling the
-    caller ctx kills the script. Description suffix present and correct for
-    all three cases (set, none, inherited).
-- [x] **Task 4: Docs, usage text, README**
-  - **Description:** Update the `Usage:` line in `main.go` with `[--timeout <duration>] | [--no-timeout]`.
-    README: extend the Safety First bullet, the Usage section with both flags,
-    and add a frontmatter subsection documenting `Timeout: <duration>` / `NONE`
-    with the format spec, precedence rules, and a worked example script header.
-  - **Review Criteria:** README examples copy-pasteable; every documented
-    behavior matches implemented behavior (precedence, `NONE` case-insensitivity,
-    first-match rule, warning-on-invalid); usage text and `flag` help strings
-    consistent with README.
-
-- [x] **Task 5: Commit & branch hygiene (cross-cutting)**
-  - **Description:** Work lands on branch `feat/timeout-handling` off `main`.
-    One conventional commit per task in order: `feat: parse timeout duration
-    strings` (includes PLAN.md), `feat: --timeout and --no-timeout flags`,
-    `feat: per-tool Timeout: frontmatter`, `feat: apply resolved tool timeouts`,
-    `docs: timeout configuration`. `go build ./...`, `go vet ./...`,
-    `go test ./...` green at every commit; final manual smoke: stdio run with
-    a `sleep 10` script under `Timeout: 1s` and under `--no-timeout`.
-  - **Review Criteria:** `git log main..feat/timeout-handling` shows exactly the
-    five commits, all building/testing green; PR ready to open.
-    Reviewer advisory (round 1): the `newToolRegistry` signature change breaks
-    three existing call sites in main_test.go, and the exact-equality assertion
-    `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges`
-    (line ~352) must be updated for the suffix — update them in the same commit
-    as Task 3 so every commit builds green.
+- [ ] **Task 1: Shared description helper + list rendering**
+  - **Description:** Extract `registeredDescription(desc string, timeout
+    time.Duration) string` (frontmatter desc + ` ` + `timeoutSuffix`) from
+    `toolRegistry.replace`; update `replace` to call it (registered
+    descriptions are byte-identical to today — the suffix-joining logic moves
+    unchanged). Add `listParamDecl(p paramSpec) string` (`str`/`num`/`bool`,
+    brackets for optional, last-wins dedup by name) and
+    `renderToolList(tools []discoveredTool, globalTimeout time.Duration)
+    string`: per tool, the signature line, the rune word-wrapped description
+    (5-space indent, 160-col constant `listWrapWidth`), and a trailing blank
+    line between blocks. Add `wordWrap(s string, indent string, width int)
+    []string` (rune-based, break at spaces, no word splitting, overlong tokens
+    pass through whole).
+  - **Review Criteria:** Table tests: `renderToolList` on a fixture covering
+    no-params (`name()`), required-only, optional-only, mixed (`(a:str,
+    [b:num], [c:bool])`), duplicate param names (last wins); `wordWrap` on
+    short text (single line, no indent change), text forcing 3+ lines at the
+    160-col width, a >160-rune single token (one line, unsplit), and
+    multi-byte text (em-dashes — must never tear a rune mid-line).
+    `registeredDescription` covers empty desc (suffix alone) and both timeout
+    values. Existing watch/registry tests that assert exact description strings
+    (e.g. `"beta updated (timeout: …)"`) stay green unchanged.
+- [ ] **Task 2: `--list-tools` flag & dispatch**
+  - **Description:** Add `--list-tools` bool flag. In `main()`, after the
+    existing required-flag check and the fail-fast `resolveCORS` /
+    `resolveTimeout`, branch: if `--list-tools`, discover (`discoverTools` on
+    `scriptsAbs`), print `renderToolList(...)` to stdout, `os.Exit(0)` (the
+    discovery-failure error → stderr, exit 1). `run(...)` is untouched by
+    this mode. Update the `Usage:` line to show `[--list-tools] |
+    [--call-tool <name> --params <json>] | <server mode>`.
+  - **Review Criteria:** `go vet` clean. Tests exercise the dispatch via a
+    seam (extract the branch into e.g. `diagnose(...)` returning an exit
+    code, or capture the writer passed to `renderToolList`): zero tools →
+    empty stdout, exit 0, existing stderr warning; discovery error (unreadable
+    dir) → stderr message, exit 1; server-mode flags (`--port`, `--watch`,
+    `--api-key`, CORS) present alongside `--list-tools` → ignored, no
+    `ListenAndServe`, process exits after printing.
+- [ ] **Task 3: `--call-tool` + `--params` debug invocation**
+  - **Description:** Add `--call-tool` (string) and `--params` (string,
+    default `{}`) flags and the mutual-exclusion check against `--list-tools`
+    (both set → startup error). Implement `runCallTool(scriptsAbs, dirAbs
+    string, globalTimeout time.Duration, name, paramsRaw string) (exitCode
+    int, err error)`: discover; look up exact name (unknown → stderr listing
+    available names, code 1); `parseToolArguments([]byte(paramsRaw))` (failure
+    → stderr, code 1, nothing executed); same timeout resolution as
+    `toolRegistry.replace`; `validateRequiredParams` (failure → content to
+    stdout, code 1); `executeTool(...)`; print all `TextContent` to stdout;
+    `IsError` → code 1, else 0; hard `cmd.Start`-style error → stderr, code 1.
+    Wire into `main()` (branch after timeout/CORS resolution) and the
+    `Usage:` line.
+  - **Review Criteria:** Registry-pattern tests: unknown tool (error names the
+    tool and lists available names); `--params` `42`/`"x"`/double-encoded →
+    code 1 and the fixture script is **not** executed (marker file absent);
+    success run → stdout carries the script's `<stdout>`-tagged output, code
+    0; script `exit 3` → output printed, code 1; missing required param →
+    validation message, code 1, script not executed; a `sleep 5` script under
+    per-tool `Timeout: 1s` → timeout message, code 1, returns within ~2s;
+    per-tool `Timeout: NONE` under a short global → completes (per-tool
+    wins); explicitly empty `--params=` ≡ `{}`.
+- [ ] **Task 4: Docs, usage text, version**
+  - **Description:** README: new **Diagnostics** section in Usage —
+    `--list-tools` (with the rendered example from the Objective) and
+    `--call-tool` (with the `--params` JSON form, exit-code table: 0
+    success / 1 any failure, output streams), the note that diagnostic mode
+    ignores server-mode flags and honors the full timeout precedence
+    (`Timeout: NONE` ⇒ the debug call has no deadline), and a one-line note
+    that this prints exactly what the LLM sees. Flag help strings, `Usage:`
+    text, and README kept consistent. `serverVersion` → `0.7.0`.
+  - **Review Criteria:** README examples copy-pasteable and match actual
+    output (run the built binary against the example scripts and paste the
+    real output); every documented behavior (mutual exclusion, ignored
+    server flags, exit codes, timeout precedence, 160-col wrap) matches the
+    code; `--help` output and README consistent.
+- [ ] **Task 5: Commit & branch hygiene (cross-cutting)**
+  - **Description:** Work lands on branch `feat/tool-diagnostics` off `main`.
+    Conventional commits in order: `feat: render tool list output`
+    (includes PLAN.md + archive), `feat: --list-tools flag`, `feat:
+    --call-tool and --params debug invocation`, `docs: diagnostics and version
+    0.7.0`. `go build ./...`, `go vet ./...`, `go test ./...` green at every
+    commit. Final manual smoke: build, then run `--list-tools` and
+    `--call-tool` against the meridian remote toolset
+    (`/workspace/games/experiment-settler2/tooling/remote` with `--dir` set to
+    the settler2 checkout) and diff the listing against the example in the
+    Objective.
+  - **Review Criteria:** `git log main..feat/tool-diagnostics` shows exactly
+    the four commits, all green; smoke output matches the documented format
+    byte-for-byte (modulo the 160-col wrap); PR ready to open.
 
 ## Edge Case & Safety Checklist
 
-- `--no-timeout` and `--timeout` both passed → startup error, mutually exclusive (documented).
-- Explicitly empty `--timeout=` → startup error (parse of empty fails; `flag.Visit` distinguishes it from omitted).
-- `--timeout 0s` → valid, means no timeout (documented; consistent with `NONE`).
-- Sub-second units (`ms`/`us`/`ns`) → rejected (not meaningful for tool timeouts).
-- Duration sum/multiply overflow → rejected with an `overflows` error before wraparound can yield a positive duration.
-- Negative/decimal/malformed `--timeout` → exit 1 at startup, server never starts.
-- Invalid per-tool `Timeout:` → visible stderr warning + global fallback; never blocks discovery/hot-reload.
-- `Timeout:` on line > 30 → ignored, tool uses global.
-- No deadline (`Timeout: NONE`/`0s`, or `--no-timeout`/`--timeout 0s`) → no timeout; client abort still kills the script (request ctx).
-- Zero timeout ⇒ `context.WithTimeout(ctx, 0)` is NOT used — code path picks raw `ctx` (equivalent, but explicit).
-- Timeout expiry mid-output → partial stdout/stderr returned with the timeout message (existing behavior, unchanged).
-- Hot reload edits only `Timeout:` → tool re-registered with new value, no restart.
-- Symlinked scripts: `Timeout:` read from resolved target (same as `Description:` via `resolvedPath`).
-- Output cap (1 MB) unchanged and independent of timeout.
+- No executable scripts → `--list-tools` prints empty stdout, exit 0, the
+  existing `Warning: No executable scripts found in <dir>` on stderr.
+- Unreadable scripts directory → stderr error, exit 1 (both diagnostics).
+- Tool with empty frontmatter description → rendered line is the timeout
+  suffix alone (same rule the registry uses today).
+- Duplicate `Param:` names → single signature entry, last declaration wins
+  (matches `buildInputSchema`).
+- Word longer than 160 columns (long path/URL in a description) → emitted
+  whole on its own line; never split, never truncated.
+- Multi-byte text (em-dashes, accented characters) → wrap counts **runes**,
+  never tears a character.
+- `--params` non-object (`42`, `["x"]`, `"str"`, double-encoded) → exit 1
+  before any script starts.
+- `--params` explicitly empty (`--params=`) → treated as `{}`, valid.
+- Unknown `--call-tool` name → exit 1, message lists available tool names.
+- Declared-required param missing → validation message to stdout, exit 1,
+  script not started (identical to the MCP handler result).
+- Script exits non-zero → its `<stdout>`/`<stderr>` content printed, exit 1.
+- Script unstartable (vanished file, exec bit removed) → stderr, exit 1.
+- Timeout expiry → the standard `tool timed out after <d>` result, exit 1.
+- `Timeout: NONE` / `--no-timeout` → the debug call runs with **no deadline**
+  (matches production; documented so a re-call of a slow build can complete).
+- `--list-tools` and `--call-tool` both passed → startup error (mutually
+  exclusive).
+- Server-mode flags (`--watch`, `--port`, `--api-key`, CORS) in diagnostic
+  mode → validated fail-fast, then ignored; no port bound, no watcher, no
+  stdio server.
+- Hot-reload state irrelevant: diagnostics read the directory at call time;
+  a concurrent `--watch` server is a separate process and unaffected.
+- 1 MB output cap and arg-key injection guard apply unchanged (diagnostics
+  reuse `executeTool` / `parseToolArguments` wholesale).
 
 ## Review Log (Plan Review)
 
-- **Round 1:** Verified every claim against the current code: `defaultToolTimeout = 5 * time.Minute` (~line 30), `replace` hardcoding `defaultToolTimeout` (~line 470), `executeTool`'s unconditional `context.WithTimeout(ctx, timeout)` (~line 594), the `resolveCORS` fail-fast pattern in `main()`, the `extractDescription`/`extractParams` mirror targets, and the registry/watch test patterns (`TestRequiredParamValidationViaRegistry`, `TestWatchToolsDetectsContentChanges`). Precedence rules are self-consistent (per-tool > global; `--no-timeout` > `--timeout`; first-match-wins matches `Description:` semantics), error strategy follows fail-loud-fail-fast, format spec is stdlib-achievable, edge checklist covers expiry-mid-output, hot-reload, symlinks, and cancellation-with-no-deadline. Advisory notes (non-blocking): (1) three existing `newToolRegistry(server, dir)` call sites in main_test.go plus the exact-equality assertion `res.Tools[0].Description == "beta updated"` in `TestWatchToolsDetectsContentChanges` (line 352) will need updates for the new constructor param and the registered-description suffix — Task 5's all-green-at-every-commit gate catches this; (2) define the suffix for empty frontmatter descriptions explicitly (e.g. description becomes `(timeout: 30s)` alone). Status: Approved
+_(pending)_
 
 ## Final Status (Code Review)
 
-- **Round 1:** Verified against the diff and by execution: all 5 commits (65ff0d2…66d1493) build/vet/test green individually; parser, precedence (`--no-timeout` > `--timeout`; per-tool > global), first-match-wins, >30-line ignore, warning-on-invalid, description suffixes (incl. empty description → suffix alone, advisory #2), zero≡NONE raw-ctx path, call-site updates (advisory #1), README/usage consistency, and the full edge checklist all confirmed — tests include registry-level expiry, inheritance, NONE-under-short-global, and cancellation-kill. Only deviation: two plan-phase docs commits predate the 5 implementation commits (7 total on branch), which is acceptable and not a defect. Status: Approved
-- **Round 2: PR feedback (Copilot + principal 2026-09-26)** — all 8 items addressed in 2347f08…8e44d82 (build/vet/test green at every commit): (1) units restricted to `s`/`m`/`h` in the shared parser, doc comments, error messages, README, and tests (250ms/us/µs/1000ns now rejected) — 2347f08; (2) overflow guard: multiplication (`n > maxDuration/multiplier`) and addition (`total > maxDuration-term`) checked before each term, `overflows` error; tests cover 3×876000h sum and single-term multiply overflow — 2347f08; (3) `--no-timeout` + `--timeout` is now a startup error (mutually exclusive, not "no-timeout wins") and an explicitly empty `--timeout=` fails fast via `flag.Visit`-tracked `timeoutSet` in `resolveTimeout`; the retired "no-timeout beats --timeout" decision is rewritten in Requirements, the edge checklist, and README — 5af1535; (4) `discoveredTool.TimeoutSet`/`Timeout` replaced by a single `Timeout *time.Duration` (nil = undeclared, &0 = NONE) in the `replace` handler, description suffix, and tests — 85428d3; (5) the no-op `cancel = func(){}` path removed from `executeTool` (`execCtx := ctx`; cancel created and deferred only in the `timeout > 0` branch) — 85428d3; (6) `extractDescription`/`extractParams`/`extractTimeout` merged into a single-pass `extractFrontmatter` (one `os.Open` + scanner) with all tests asserting via the merged function — 8e44d82; (7) the invalid-timeout test captures stderr via a pipe (restoring `os.Stderr`) and asserts the warning contains both the script filename and the invalid-value reason — 8e44d82; (8) README frontmatter section now documents `Param:` (syntax + example in the worked script), and README/PLAN reflect s/m/h-only units, flag mutual exclusion, and explicit-empty failing — bbac358. Verified against `git diff c3c0a13..HEAD` and by execution (build/vet/gofmt/test green at tip): (1) `timeoutUnits` is s/m/h-only in the shared parser, error text, and docs — 250ms/us/µs/1000ns rejected in tests; (2) overflow guards precede each multiply (`n > maxDuration/multiplier`) and add (`total > maxDuration-term`), wrap-to-positive impossible, sum- and single-term-overflow tests assert `overflows`; (3) `resolveTimeout` errors on `--timeout`+`--no-timeout`, explicit-empty `--timeout=` fails via `flag.Visit`-tracked `timeoutSet`, retired "no-timeout beats" decision consistently rewritten in Requirements, checklist, README, and flag help; (4) `Timeout *time.Duration` everywhere (nil/`&0`), no `TimeoutSet` residue; (5) `executeTool` has no no-op cancel — cancel created+deferred only in the `timeout > 0` branch, `execCtx := ctx` otherwise; (6) single-pass `extractFrontmatter` (one open+scan, first Description/Timeout, all valid Params, 30-line window preserved), old extractors deleted, all tests (incl. `TestExtractParams`) route through it; (7) invalid-timeout test captures stderr and asserts filename AND reason; (8) README documents `Param:`, s/m/h, mutual exclusion, and explicit-empty. Merged scanner semantics behavior-identical to the old three passes (the pre-existing scanner.Err discard in extractDescription was the only nuance, unobservable for text files). PLAN text matches the code. All task boxes already ticked in round 1 and remain satisfied. Status: Approved
+_(pending)_
