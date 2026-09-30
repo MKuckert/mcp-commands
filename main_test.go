@@ -2917,6 +2917,11 @@ func TestBoundedWriter(t *testing.T) {
 	if !w.Truncated() {
 		t.Fatal("Truncated() = false, want true after overflow")
 	}
+	// A write landing exactly on the limit drops nothing.
+	w2 := newBoundedWriter(10)
+	if n, err := w2.Write([]byte("0123456789")); n != 10 || err != nil || w2.Truncated() {
+		t.Fatalf("exact-limit Write = (%d, %v), Truncated = %v, want (10, nil), false", n, err, w2.Truncated())
+	}
 	// Writes after the limit are consumed, not stored.
 	if n, err := w.Write([]byte("garbage")); n != 7 || err != nil || len(w.Bytes()) != 10 {
 		t.Fatalf("post-overflow Write = (%d, %v), len = %d, want (7, nil), 10", n, err, len(w.Bytes()))
@@ -3011,12 +3016,14 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 		wantWarning    string // substring expected when a warning is returned
 	}{
 		{host: "127.0.0.1", apiKey: "", insecureNoAuth: false, wantErr: false},
+		{host: "127.0.0.2", apiKey: "", insecureNoAuth: false, wantErr: false},
 		{host: "::1", apiKey: "", insecureNoAuth: false, wantErr: false},
 		{host: "localhost", apiKey: "", insecureNoAuth: false, wantErr: false},
 		{host: "0.0.0.0", apiKey: "s3cret", insecureNoAuth: false, wantErr: false},
 		// The F-1 case: remote bind, no key, no escape hatch → refuse.
 		{host: "0.0.0.0", apiKey: "", insecureNoAuth: false, wantErr: true},
 		{host: "192.168.1.10", apiKey: "", insecureNoAuth: false, wantErr: true},
+		{host: "10.0.0.5", apiKey: "", insecureNoAuth: false, wantErr: true},
 		// Unparseable host → treated as non-loopback (conservative).
 		{host: "not-an-ip", apiKey: "", insecureNoAuth: false, wantErr: true},
 		// Escape hatch: starts, but loudly.
@@ -3094,8 +3101,17 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 		firstDone <- res
 	}()
 
-	// Give the subprocess time to start and take the slot.
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the first call to take the only slot: a bounded poll of the
+	// slot itself (package-internal) instead of a fixed sleep, so the test
+	// cannot flake on a slow scheduler.
+	deadline := time.Now().Add(5 * time.Second)
+	for registry.slot.tryAcquire() {
+		registry.slot.release()
+		if time.Now().After(deadline) {
+			t.Fatal("first call never acquired the slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	res, err := handler(context.Background(), makeReq())
 	if err != nil {

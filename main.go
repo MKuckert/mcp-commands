@@ -490,16 +490,20 @@ func newBoundedWriter(limit int) *boundedWriter {
 }
 
 func (b *boundedWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if b.remaining <= 0 {
 		b.truncated = true
 		return len(p), nil
 	}
-	if len(p) >= b.remaining {
+	if len(p) > b.remaining {
 		b.buf.Write(p[:b.remaining])
 		b.remaining = 0
 		b.truncated = true
 		return len(p), nil
 	}
+	// A write that lands exactly on the limit drops nothing: truncated stays false.
 	b.buf.Write(p)
 	b.remaining -= len(p)
 	return len(p), nil
@@ -1211,9 +1215,9 @@ func resolveAPIKey(flagValue string) string {
 	return os.Getenv(apiKeyEnvVar)
 }
 
-// isLoopbackHost reports whether host addresses only the local machine: the
-// loopback ranges (127.0.0.0/8, ::1) and the name "localhost". Anything else
-// — including unparseable values and non-IP hostnames — is treated as
+// isLoopbackHost reports whether host binds only to the local machine: the
+// 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
+// including unparseable values and non-IP hostnames — is treated as
 // non-loopback, the conservative choice: a hostname that resolves outside
 // loopback binds externally.
 func isLoopbackHost(host string) bool {
@@ -1221,7 +1225,13 @@ func isLoopbackHost(host string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 127
+	}
+	return ip.Equal(net.ParseIP("::1"))
 }
 
 // checkHTTPSecurityPolicy validates the auth posture of an HTTP bind. It
