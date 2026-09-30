@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -250,7 +251,7 @@ func TestWatchTools(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -315,7 +316,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -1863,7 +1864,7 @@ func TestResolvedTimeoutViaRegistry(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir, 2*time.Second)
+	registry := newToolRegistry(server, tmpDir, 2*time.Second, 16)
 	oneSecond := time.Second
 	noTimeout := time.Duration(0)
 	registry.replace([]discoveredTool{
@@ -1989,7 +1990,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 2*time.Second)
+	registry := newToolRegistry(server, "", 2*time.Second, 16)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -2054,7 +2055,7 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir, defaultToolTimeout)
+	registry := newToolRegistry(server, tmpDir, defaultToolTimeout, 16)
 
 	registry.replace([]discoveredTool{
 		{
@@ -2895,4 +2896,226 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 			t.Errorf("stderr = %q, want the path error", stderr.String())
 		}
 	})
+}
+
+// --- Tier 1 hardening tests (REVIEW.md F-6 and the F-1/F-2/F-4 behaviors) ---
+
+func TestBoundedWriter(t *testing.T) {
+	w := newBoundedWriter(10)
+	// 7 bytes fit, the next 8-byte write overflows the limit.
+	n1, err := w.Write([]byte("0123456"))
+	if n1 != 7 || err != nil {
+		t.Fatalf("Write(7 bytes) = (%d, %v), want (7, nil)", n1, err)
+	}
+	n2, err := w.Write([]byte("89012345"))
+	if n2 != 8 || err != nil {
+		t.Fatalf("Write past limit = (%d, %v), want (8, nil): the subprocess must see a healthy pipe", n2, err)
+	}
+	if got := w.Bytes(); string(got) != "0123456890" {
+		t.Fatalf("captured = %q, want exactly the first 10 bytes", got)
+	}
+	if !w.Truncated() {
+		t.Fatal("Truncated() = false, want true after overflow")
+	}
+	// Writes after the limit are consumed, not stored.
+	if n, err := w.Write([]byte("garbage")); n != 7 || err != nil || len(w.Bytes()) != 10 {
+		t.Fatalf("post-overflow Write = (%d, %v), len = %d, want (7, nil), 10", n, err, len(w.Bytes()))
+	}
+}
+
+func TestCombineToolOutputTruncation(t *testing.T) {
+	// The 1 MiB branch of combineToolOutput was previously untested (F-6).
+	suffixLen := len(fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes))
+
+	t.Run("2MiB_stdout_is_capped_and_tagged", func(t *testing.T) {
+		got := combineToolOutput(bytes.Repeat([]byte("a"), 2<<20), nil)
+		if !strings.HasPrefix(got, "<stdout>\n") {
+			t.Fatalf("lost the stdout tag: %q…", got[:20])
+		}
+		if !strings.HasSuffix(got, fmt.Sprintf("[output truncated after %d bytes]", maxToolOutputBytes)) {
+			t.Fatalf("missing truncation suffix: …%q", got[len(got)-40:])
+		}
+		// The cut plus suffix stays at or just under the cap + suffix.
+		if len(got) > maxToolOutputBytes+suffixLen {
+			t.Fatalf("len = %d, want <= %d", len(got), maxToolOutputBytes+suffixLen)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatal("result is not valid UTF-8")
+		}
+	})
+
+	t.Run("below_limit_is_untouched", func(t *testing.T) {
+		got := combineToolOutput(bytes.Repeat([]byte("b"), 512), nil)
+		if strings.Contains(got, "truncated") {
+			t.Fatalf("no truncation expected under the limit: %q…", got[:40])
+		}
+		if len(got) != len("<stdout>\n")+512+1+len("</stdout>") {
+			t.Fatalf("len = %d, want %d (512 payload + tags/newline)", len(got), len("<stdout>\n")+512+1+len("</stdout>"))
+		}
+	})
+
+	t.Run("rune_splitting_cut_backs_off", func(t *testing.T) {
+		// Combined = "<stdout>\n" + payload [+ "\n" if no trailing newline] +
+		// "</stdout>". Craft the payload so the 1 MiB cut lands inside the first 3-byte rune (tag + pad ends 2 bytes before the cap)
+		// then verify the back-off yields valid UTF-8.
+		payload := make([]byte, 0, maxToolOutputBytes)
+		payload = append(payload, bytes.Repeat([]byte("a"), maxToolOutputBytes-10)...)
+		payload = append(payload, bytes.Repeat([]byte("€"), 8)...) // 24 bytes
+		got := combineToolOutput(payload, nil)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncation split a rune; got invalid UTF-8 (len %d)", len(got))
+		}
+		if !strings.HasSuffix(got, "bytes]") {
+			t.Fatalf("missing truncation suffix: …%q", got[len(got)-40:])
+		}
+	})
+}
+
+func TestExecuteToolHugeStdout(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "spew.sh")
+	// 5 MiB of 'a' — well past the 1 MiB cap, cheap to generate.
+	body := "#!/bin/sh\nhead -c 5242880 /dev/zero | tr '\\0' a\n"
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 30*time.Second, tmpDir)
+	if err != nil {
+		t.Fatalf("executeTool returned unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got IsError result")
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("unexpected content type %T", result.Content[0])
+	}
+	if len(text.Text) > maxToolOutputBytes+64 {
+		t.Fatalf("result text is %d bytes, want <= ~%d", len(text.Text), maxToolOutputBytes)
+	}
+	if !strings.Contains(text.Text, "truncated after") {
+		t.Fatalf("expected a truncation notice, got tail: …%q", text.Text[len(text.Text)-60:])
+	}
+	if !utf8.ValidString(text.Text) {
+		t.Fatal("result text is not valid UTF-8")
+	}
+}
+
+func TestHTTPSecurityPolicy(t *testing.T) {
+	tests := []struct {
+		host           string
+		apiKey         string
+		insecureNoAuth bool
+		wantErr        bool
+		wantWarning    string // substring expected when a warning is returned
+	}{
+		{host: "127.0.0.1", apiKey: "", insecureNoAuth: false, wantErr: false},
+		{host: "::1", apiKey: "", insecureNoAuth: false, wantErr: false},
+		{host: "localhost", apiKey: "", insecureNoAuth: false, wantErr: false},
+		{host: "0.0.0.0", apiKey: "s3cret", insecureNoAuth: false, wantErr: false},
+		// The F-1 case: remote bind, no key, no escape hatch → refuse.
+		{host: "0.0.0.0", apiKey: "", insecureNoAuth: false, wantErr: true},
+		{host: "192.168.1.10", apiKey: "", insecureNoAuth: false, wantErr: true},
+		// Unparseable host → treated as non-loopback (conservative).
+		{host: "not-an-ip", apiKey: "", insecureNoAuth: false, wantErr: true},
+		// Escape hatch: starts, but loudly.
+		{host: "0.0.0.0", apiKey: "", insecureNoAuth: true, wantWarning: "UNAUTHENTICATED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.insecureNoAuth)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(err.Error(), "--insecure-no-auth") {
+					t.Errorf("error should mention the escape hatch: %v", err)
+				}
+				if !strings.Contains(err.Error(), tt.host) {
+					t.Errorf("error should name the host: %v", err)
+				}
+			}
+			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
+				t.Fatalf("warning = %q, want it to contain %q", warning, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestExecSlot(t *testing.T) {
+	s := newExecSlot(2)
+	if !s.tryAcquire() || !s.tryAcquire() {
+		t.Fatal("expected two acquisitions to succeed with limit 2")
+	}
+	if s.tryAcquire() {
+		t.Fatal("expected the third acquisition to fail at capacity")
+	}
+	s.release()
+	if !s.tryAcquire() {
+		t.Fatal("expected an acquisition to succeed after release")
+	}
+	// Non-positive limits fall back to the default.
+	if got := newExecSlot(0).limit; got != defaultMaxConcurrentTools {
+		t.Fatalf("newExecSlot(0).limit = %d, want %d", got, defaultMaxConcurrentTools)
+	}
+}
+
+func TestToolCapacityViaRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	slowPath := filepath.Join(tmpDir, "slow.sh")
+	if err := os.WriteFile(slowPath, []byte("#!/bin/bash\nsleep 3\n"), 0o755); err != nil {
+		t.Fatalf("failed to create slow script: %v", err)
+	}
+	noTimeout := time.Duration(0)
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 30*time.Second, 1) // capacity 1
+	registry.replace([]discoveredTool{
+		{Name: "slow", Path: slowPath, Description: "slow tool", Timeout: &noTimeout},
+	})
+	handler := registry.lastHandler
+	if handler == nil {
+		t.Fatal("lastHandler is nil after replace")
+	}
+
+	makeReq := func() *mcp.CallToolRequest {
+		return &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "slow"}}
+	}
+
+	// First call holds the only slot.
+	firstDone := make(chan *mcp.CallToolResult, 1)
+	go func() {
+		res, err := handler(context.Background(), makeReq())
+		if err != nil {
+			t.Errorf("first call returned error: %v", err)
+		}
+		firstDone <- res
+	}()
+
+	// Give the subprocess time to start and take the slot.
+	time.Sleep(300 * time.Millisecond)
+
+	res, err := handler(context.Background(), makeReq())
+	if err != nil {
+		t.Fatalf("second call returned an error: %v (want a clean at-capacity result)", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected IsError at-capacity result, got %#v", res)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "at capacity") || !strings.Contains(text, "1 concurrent") {
+		t.Fatalf("at-capacity text = %q, want it to name the limit", text)
+	}
+
+	// The first call must eventually finish (nothing was blocked or killed).
+	select {
+	case res1 := <-firstDone:
+		if res1.IsError {
+			t.Fatalf("first call failed: %v", res1.Content[0])
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("first call did not finish")
+	}
 }
