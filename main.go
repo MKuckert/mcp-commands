@@ -1239,11 +1239,11 @@ func isLoopbackHost(host string) bool {
 // error when it would start unauthenticated on a non-loopback host without
 // the explicit --insecure-no-auth escape hatch (an unguarded remote
 // command-execution endpoint).
-func checkHTTPSecurityPolicy(host, apiKey string, insecureNoAuth bool) (warning string, err error) {
+func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning string, err error) {
 	if apiKey != "" || isLoopbackHost(host) {
 		return "", nil
 	}
-	if !insecureNoAuth {
+	if !acceptsRisk {
 		return "", fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
 	}
 	return fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host), nil

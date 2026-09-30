@@ -3009,30 +3009,30 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 
 func TestHTTPSecurityPolicy(t *testing.T) {
 	tests := []struct {
-		host           string
-		apiKey         string
-		insecureNoAuth bool
-		wantErr        bool
-		wantWarning    string // substring expected when a warning is returned
+		host        string
+		apiKey      string
+		acceptsRisk bool
+		wantErr     bool
+		wantWarning string // substring expected when a warning is returned
 	}{
-		{host: "127.0.0.1", apiKey: "", insecureNoAuth: false, wantErr: false},
-		{host: "127.0.0.2", apiKey: "", insecureNoAuth: false, wantErr: false},
-		{host: "::1", apiKey: "", insecureNoAuth: false, wantErr: false},
-		{host: "localhost", apiKey: "", insecureNoAuth: false, wantErr: false},
-		{host: "0.0.0.0", apiKey: "s3cret", insecureNoAuth: false, wantErr: false},
+		{host: "127.0.0.1", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "127.0.0.2", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
 		// The F-1 case: remote bind, no key, no escape hatch → refuse.
-		{host: "0.0.0.0", apiKey: "", insecureNoAuth: false, wantErr: true},
-		{host: "192.168.1.10", apiKey: "", insecureNoAuth: false, wantErr: true},
-		{host: "10.0.0.5", apiKey: "", insecureNoAuth: false, wantErr: true},
+		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
+		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
+		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
 		// Unparseable host → treated as non-loopback (conservative).
-		{host: "not-an-ip", apiKey: "", insecureNoAuth: false, wantErr: true},
+		{host: "not-an-ip", apiKey: "", acceptsRisk: false, wantErr: true},
 		// Escape hatch: starts, but loudly.
-		{host: "0.0.0.0", apiKey: "", insecureNoAuth: true, wantWarning: "UNAUTHENTICATED"},
+		{host: "0.0.0.0", apiKey: "", acceptsRisk: true, wantWarning: "UNAUTHENTICATED"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
-			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.insecureNoAuth)
+			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.acceptsRisk)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
