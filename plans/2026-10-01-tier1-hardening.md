@@ -9,14 +9,14 @@ Status: **In progress** — Plan Reviewer / Code Reviewer tick checkboxes as tas
 
 Close every High finding so v0.8.0 is release-safe in HTTP mode:
 
-- [ ] F-1: refuse unauthenticated HTTP on non-loopback host (or explicit `--insecure-no-auth`, with loud warning)
-- [ ] F-2 (+F-12): per-stream bounded stdout/stderr capture (no ~3× RSS amplification) + UTF-8-safe final truncation
-- [ ] F-3: HTTP server `ReadHeaderTimeout`/`IdleTimeout` + `MaxBytesReader` body cap
-- [ ] F-4: concurrency cap on tool executions (`--max-concurrent`, default 16); saturated calls → clean `IsError` result
-- [ ] F-5: remove `opencode.jsonc` from VCS + `.gitignore` (key rotation = user action, called out in summary)
-- [ ] F-6: tests for truncation branch + huge-stdout `executeTool` + capacity + auth guard
-- [ ] Version bump `serverVersion` → `0.8.0`
-- [ ] README: document the two new flags + non-loopback auth behavior
+- [x] F-1: refuse unauthenticated HTTP on non-loopback host (or explicit `--insecure-no-auth`, with loud warning)
+- [x] F-2 (+F-12): per-stream bounded stdout/stderr capture (no ~3× RSS amplification) + UTF-8-safe final truncation
+- [x] F-3: HTTP server `ReadHeaderTimeout`/`IdleTimeout` + `MaxBytesReader` body cap
+- [x] F-4: concurrency cap on tool executions (`--max-concurrent`, default 16); saturated calls → clean `IsError` result
+- [x] F-5: remove `opencode.jsonc` from VCS + `.gitignore` (key rotation = user action, called out in summary)
+- [x] F-6: tests for truncation branch + huge-stdout `executeTool` + capacity + auth guard
+- [x] Version bump `serverVersion` → `0.8.0`
+- [x] README: document the two new flags + non-loopback auth behavior
 
 ## Design decisions (deviations/choices vs REVIEW proposal)
 
