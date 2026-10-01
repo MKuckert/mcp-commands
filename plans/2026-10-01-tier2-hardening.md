@@ -29,15 +29,15 @@ Status: **Done** (quality pass 2026-10-01: one confirmed bug — `replace()` lea
 
 ## Tasks
 
-- [ ] T1: plan file (this document) — commit `docs`
-- [ ] T2: F-7 process-group kill + `TestExecuteToolKillsProcessGroup` — commit `fix`
-- [ ] T3: F-8 `--api-key-file` + warning + `TestResolveAPIKey` update + README — commit `feat`
-- [ ] T4: F-9 four fsnotify failure-mode tests — commit `test`
-- [ ] T5: F-10 `serverConfig`/`parseCLI` extraction + branch tests + `run()` e2e — commit `refactor`
-- [ ] T6: F-11 registry diff + debounce re-arm + `TestRegistryReplaceSkipsIdenticalSet` — commit `perf`
-- [ ] T7: F-13 exec-time re-validation + `O_NOFOLLOW` + README trust boundary + tests — commit `fix`
-- [ ] T8: version 0.8.1 + Makefile (F-23) + REVIEW.md status marks — commit `chore`
-- [ ] T9: quality pass (subagent), findings fixed, plan status → Done
+- [x] T1: plan file (this document) — `36e5cac`
+- [x] T2: F-7 process-group kill + `TestExecuteToolKillsProcessGroup` — `791681d`
+- [x] T3: F-8 `--api-key-file` + warning + `TestResolveAPIKey` update + README — `126d9f2`
+- [x] T4: F-9 four fsnotify failure-mode tests — `9b8f6e7`
+- [x] T5: F-10 `serverConfig`/`parseCLI` extraction + branch tests + `run()` e2e — `827825f`
+- [x] T6: F-11 registry diff + debounce re-arm + `TestRegistryReplaceSkipsIdenticalSet` — `d51291d`
+- [x] T7: F-13 exec-time re-validation + `O_NOFOLLOW` + README trust boundary + tests — `be28e33`
+- [x] T8: version 0.8.1 + Makefile (F-23) + REVIEW.md status marks — `40f673c`
+- [x] T9: quality pass (subagent): gofmt fix `155d8bc`, anchor-fd lifecycle fix `d9763ae` (fd leak per reload), README flag list `39f8d91`, stale `entry.tool` refresh `eed150d` — plan status → Done
 
 ## Verification
 
