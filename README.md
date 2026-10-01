@@ -314,6 +314,18 @@ Inherited quirk, same as server mode: a parameter name declared more than
 once is last-wins in the schema, but validation enforces *any* `required`
 declaration of that name.
 
+## Security
+
+**Trust boundary.** The `--scripts` directory is a *trusted* input: every script found in it runs with the server user's full privileges, and a symlink in the directory that resolves to a regular executable file is accepted (it registers under the symlink's name, pointing at the resolved target). Nothing here sandboxes script execution — keep the directory writable only by users you trust, and prefer loopback HTTP + `--api-key`/`--api-key-file` so that only authenticated clients can trigger executions.
+
+**Exec-time pinning.** A script that is *swapped* after discovery cannot redirect a running server's tool calls:
+
+- **Server mode (unix):** at registration, mcp-commands opens each script (with `O_NOFOLLOW`) and keeps the file descriptor; a tool call execs *that opened inode* via `/dev/fd/3`. Renaming the file, replacing it, or re-pointing a symlink afterwards changes nothing — the discovered inode is what runs (or the call is refused if the descriptor is unusable). File descriptors are refcounted so an in-flight call is never starved, and they close when the tool is re-registered or removed.
+- **Server mode (Windows):** no `/dev/fd` exec; the path is re-verified at exec time (resolves, regular file, executable bit). A narrow window between check and exec remains — treat a concurrently writable scripts directory as unsafe there.
+- **`--call-tool` diagnostics:** the file is opened at exec time with `O_NOFOLLOW` and must still be the same regular, executable `(device, inode)` as at discovery; mismatches (relink, replacement) are refused with an explicit error.
+
+The `(device, inode)` identity is the anchor where descriptors are not available; on filesystems that aggressively reuse inode numbers after deletion (e.g. tmpfs), a delete-and-recreate *at the same path* can in principle match the recorded identity in diagnostic mode — the registration-time descriptor above is what closes that gap for the server.
+
 ## AI Usage
 
 The implementation of `mcp-commands` is completely done by an AI. The idea and guidance for the plan is mine, the plan writing and code is the AI. It wrote the entire server, including argument parsing, script discovery, and MCP protocol handling, I did the review.

@@ -645,7 +645,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), discoveredTool{Path: scriptPath}, nil, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, scriptPath, map[string]any{}, 5*time.Second, workDir)
+	result, err := executeTool(ctx, discoveredTool{Path: scriptPath}, nil, map[string]any{}, 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -3282,7 +3282,7 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 30*time.Second, tmpDir)
+	result, err := executeTool(context.Background(), discoveredTool{Path: scriptPath}, nil, map[string]any{}, 30*time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -3324,7 +3324,7 @@ func TestExecuteToolKillsProcessGroup(t *testing.T) {
 		t.Fatalf("failed to create grandchild script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, time.Second, tmpDir)
+	result, err := executeTool(context.Background(), discoveredTool{Path: scriptPath}, nil, map[string]any{}, time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -3823,4 +3823,188 @@ func TestRegistryReplaceSkipsIdenticalSet(t *testing.T) {
 	// A real change notifies again (the mechanism is alive).
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha v2", Params: []paramSpec{}}})
 	waitForChange()
+}
+
+// TestExecuteToolIdentity covers F-13's exec-time recheck: the path must
+// still be the same regular, executable inode as at discovery. An in-place
+// rewrite (same inode) must keep working; a swap to a different inode, a
+// re-plant as a symlink, or a lost exec bit must be refused.
+func TestExecuteToolIdentity(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "tool.sh")
+
+	makeTool := func() discoveredTool {
+		fi, err := os.Stat(scriptPath)
+		if err != nil {
+			t.Fatalf("stat failed: %v", err)
+		}
+		tool := discoveredTool{Name: "tool", Path: scriptPath}
+		tool.dev, tool.ino = statIdentity(fi)
+		if tool.dev == 0 && tool.ino == 0 {
+			t.Fatal("no identity available; this test requires unix")
+		}
+		return tool
+	}
+	write := func(content string, perm os.FileMode) {
+		if err := os.WriteFile(scriptPath, []byte(content), perm); err != nil {
+			t.Fatalf("write failed: %v", err)
+		}
+	}
+	execute := func(t *testing.T, tool discoveredTool) (string, bool) {
+		t.Helper()
+		result, err := executeTool(context.Background(), tool, nil, map[string]any{}, time.Second, tmpDir)
+		if err != nil {
+			t.Fatalf("executeTool returned error: %v", err)
+		}
+		text := result.Content[0].(*mcp.TextContent).Text
+		return text, result.IsError
+	}
+
+	// 1. Normal execution works, including via the /dev/fd open-inode path.
+	write("#!/bin/sh\necho original\n", 0o755)
+	out, isError := execute(t, makeTool())
+	if isError || !strings.Contains(out, "original") {
+		t.Fatalf("normal exec failed: %q isErr=%v", out, isError)
+	}
+
+	// 2. In-place rewrite (same inode) keeps working and runs the new body.
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho rewritten\n"), 0o755); err != nil {
+		t.Fatalf("in-place rewrite failed: %v", err)
+	}
+	tool := makeTool()
+	out, isError = execute(t, tool)
+	if isError || !strings.Contains(out, "rewritten") {
+		t.Fatalf("in-place rewrite exec failed: %q isErr=%v", out, isError)
+	}
+
+	// 3. Swapping the path for a different inode is refused.
+	if err := os.Remove(scriptPath); err != nil {
+		t.Fatalf("remove failed: %v", err)
+	}
+	write("#!/bin/sh\necho impostor\n", 0o755) // new file
+	if fi, err := os.Stat(scriptPath); err == nil {
+		if dev, ino := statIdentity(fi); dev == tool.dev && ino == tool.ino {
+			// This filesystem (e.g. tmpfs) reused the deleted file's
+			// inode, so layer 2 cannot distinguish a swap from an
+			// in-place edit — the registry anchor (layer 1) is the
+			// protection there.
+			t.Log("filesystem reused the deleted inode; skipping layer-2 swap assertion")
+		} else {
+			out, isError = execute(t, tool)
+			if !isError || !strings.Contains(out, "inode changed") {
+				t.Fatalf("swapped file was not refused: %q isErr=%v", out, isError)
+			}
+			if strings.Contains(out, "impostor") {
+				t.Fatal("impostor script was executed")
+			}
+		}
+	}
+
+	// 4. Re-planting the path as a symlink is refused at the open stage.
+	if err := os.Remove(scriptPath); err != nil {
+		t.Fatalf("remove failed: %v", err)
+	}
+	write("#!/bin/sh\necho target\n", 0o755) // new inode
+	if err := os.Symlink(scriptPath, scriptPath+".lnk"); err != nil {
+		t.Fatalf("symlink failed: %v", err)
+	}
+	if err := os.Rename(scriptPath, scriptPath+".real"); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if err := os.Rename(scriptPath+".lnk", scriptPath); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	out, isError = execute(t, tool)
+	if !isError || !strings.Contains(out, "cannot open") {
+		t.Fatalf("symlinked path was not refused: %q isErr=%v", out, isError)
+	}
+	if strings.Contains(out, "target") {
+		t.Fatal("symlink target was executed")
+	}
+
+	// 5. Losing the exec bit is refused with a clear message.
+	if err := os.Remove(scriptPath); err != nil {
+		t.Fatalf("remove failed: %v", err)
+	}
+	if err := os.Rename(scriptPath+".real", scriptPath); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	tool = makeTool()
+	if err := os.Chmod(scriptPath, 0o644); err != nil {
+		t.Fatalf("chmod failed: %v", err)
+	}
+	out, isError = execute(t, tool)
+	if !isError || !strings.Contains(out, "not executable") {
+		t.Fatalf("non-executable file was not refused: %q isErr=%v", out, isError)
+	}
+}
+
+// TestRegistryPinsDiscoveredFile covers F-13 layer 1 end to end: the
+// registry anchors the discovered inode with a registration-time fd, and a
+// call execs THAT inode via /dev/fd — so a swap of the resolved target
+// (delete + recreate, even with a reused inode) cannot redirect the call.
+func TestRegistryPinsDiscoveredFile(t *testing.T) {
+	scriptsDir := t.TempDir()
+	targetPath := filepath.Join(scriptsDir, "real.sh")
+	if err := os.WriteFile(targetPath, []byte("#!/bin/sh\necho real\n"), 0o755); err != nil {
+		t.Fatalf("failed to create target: %v", err)
+	}
+	if err := os.Symlink(targetPath, filepath.Join(scriptsDir, "link.sh")); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, scriptsDir, 5*time.Second, 16)
+	registry.replace(tools)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	var entry *toolEntry
+	for _, e := range registry.entries {
+		if e.tool.Name == "link" {
+			entry = e
+		}
+	}
+	if entry == nil {
+		t.Fatal("link tool not registered")
+	}
+	if entry.fd == nil {
+		t.Fatal("expected a registration-time anchor fd on this platform")
+	}
+
+	// Swap the resolved target: delete + recreate at the same path.
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatalf("remove failed: %v", err)
+	}
+	if err := os.WriteFile(targetPath, []byte("#!/bin/sh\necho impostor\n"), 0o755); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "link"})
+	if err != nil {
+		t.Fatalf("CallTool failed: %v", err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if result.IsError {
+		t.Fatalf("call errored: %q", text)
+	}
+	if !strings.Contains(text, "real") || strings.Contains(text, "impostor") {
+		t.Fatalf("pinned inode was not executed: %q", text)
+	}
 }

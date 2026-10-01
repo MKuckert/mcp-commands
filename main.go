@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -71,10 +72,17 @@ type paramSpec struct {
 
 type discoveredTool struct {
 	Name        string
-	Path        string
+	Path        string // resolved (canonical) path to the executable
 	Description string
 	Params      []paramSpec
 	Timeout     *time.Duration // valid per-tool Timeout: value; nil when undeclared (global applies), &0 for NONE/0
+	// Identity anchor (F-13): the (device, inode) of the file at discovery
+	// time. executeTool re-verifies it at exec time and refuses a path that
+	// now resolves to a different inode (swapped/relinked). (0, 0) means
+	// "unknown identity" (synthesized tools in tests, platforms without
+	// inodes) and skips the identity check.
+	dev uint64
+	ino uint64
 }
 
 // discoverTools scans the given directory for executable files and symlinks
@@ -113,13 +121,15 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 		description, params, timeout := extractFrontmatter(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
-		tools = append(tools, discoveredTool{
+		tool := discoveredTool{
 			Name:        name,
 			Path:        resolvedPath,
 			Description: description,
 			Params:      params,
 			Timeout:     timeout,
-		})
+		}
+		tool.dev, tool.ino = statIdentity(fileInfo)
+		tools = append(tools, tool)
 	}
 
 	return tools, nil
@@ -574,6 +584,7 @@ type toolRegistry struct {
 	mu            sync.Mutex
 	names         []string
 	current       []discoveredTool // last registered set (F-11 change-diff)
+	entries       map[string]*toolEntry
 	lastHandler   mcp.ToolHandler
 }
 
@@ -583,7 +594,34 @@ func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration
 		dirAbs:        dir,
 		globalTimeout: globalTimeout,
 		slot:          newExecSlot(maxConcurrent),
+		entries:       make(map[string]*toolEntry),
 	}
+}
+
+// toolEntry is a registered tool plus its exec anchor (F-13). On unix the
+// anchor is a file descriptor opened at registration: the child execs THAT
+// inode via /dev/fd, so a later swap of the path (relink, replace) cannot
+// change what runs — the strongest pin the (dev, inode) recheck can give.
+// inFlight/removed keep the fd alive until the last in-flight call is done.
+type toolEntry struct {
+	tool     discoveredTool
+	fd       *os.File // nil on platforms without fd exec, or if the anchor open failed
+	inFlight int32
+	removed  int32
+}
+
+func (e *toolEntry) acquire() { atomic.AddInt32(&e.inFlight, 1) }
+
+// release drops the in-flight count; the last releaser of a REMOVED entry
+// closes the anchor fd (replace() closes immediately when the entry is idle).
+func (e *toolEntry) release() {
+	if atomic.AddInt32(&e.inFlight, -1) > 0 {
+		return
+	}
+	if atomic.LoadInt32(&e.removed) == 0 || e.fd == nil {
+		return
+	}
+	e.fd.Close()
 }
 
 // execSlot bounds how many tool subprocesses may run at once. It is a
@@ -630,14 +668,30 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	}
 	r.current = tools
 
+	// F-13 anchor lifecycle: mark disappearing entries removed; close their
+	// anchor fds while idle — the last in-flight call closes them otherwise.
+	newSet := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		newSet[tool.Name] = true
+	}
+	for name, entry := range r.entries {
+		if newSet[name] {
+			continue
+		}
+		atomic.StoreInt32(&entry.removed, 1)
+		if atomic.LoadInt32(&entry.inFlight) == 0 && entry.fd != nil {
+			entry.fd.Close()
+		}
+	}
+
 	if len(r.names) > 0 {
 		r.server.RemoveTools(r.names...)
 	}
 
 	r.names = make([]string, 0, len(tools))
+	r.entries = make(map[string]*toolEntry, len(tools))
 	for _, discoveredTool := range tools {
 		toolName := discoveredTool.Name
-		toolPath := discoveredTool.Path
 		toolParams := discoveredTool.Params
 
 		// A per-tool Timeout: always wins over the global, even --no-timeout.
@@ -645,7 +699,15 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 		description := registeredDescription(discoveredTool.Description, toolTimeout)
 
+		entry := &toolEntry{tool: discoveredTool, fd: openToolAnchor(discoveredTool)}
+
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			// Pin the anchor fd for the whole call (F-13): replace() will not
+			// close it while in-flight, so /dev/fd always names the file that
+			// was discovered.
+			entry.acquire()
+			defer entry.release()
+
 			parsedArgs, err := parseToolArguments(req.Params.Arguments)
 			if err != nil {
 				return nil, err
@@ -667,7 +729,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 				}, nil
 			}
 			defer r.slot.release()
-			return executeTool(ctx, toolPath, parsedArgs, toolTimeout, r.dirAbs)
+			return executeTool(ctx, entry.tool, entry.fd, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
 		r.server.AddTool(&mcp.Tool{
@@ -678,6 +740,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
+		r.entries[toolName] = entry
 	}
 }
 
@@ -961,11 +1024,23 @@ func validateRequiredParams(args map[string]any, params []paramSpec) error {
 // cancellation (deadline or client abort) the whole tool process group is
 // killed, so shell-script grandchildren die with the budget (F-7). The output
 // is captured, combined, and returned as an MCP CallToolResult.
-func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
+func executeTool(ctx context.Context, tool discoveredTool, anchorFD *os.File, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil
+	}
+
+	// Exec-time identity recheck (F-13). With a registry anchor (the fd
+	// opened at registration) the child execs THAT inode via /dev/fd, so a
+	// later swap of the path cannot change what runs; without one (diagnostic
+	// mode, anchor open failed) the path is re-opened and re-verified.
+	scriptArg, scriptFD, opened, err := prepareExec(tool, anchorFD)
+	if err != nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Error: refusing to execute tool %q: %v", tool.Name, err)}},
 			IsError: true,
 		}, nil
 	}
@@ -980,7 +1055,16 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	// cancellation/abort still kills the script, so "no timeout" means
 	// "no deadline", never "uninterruptible".
 
-	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
+	cmd := exec.CommandContext(execCtx, scriptArg, cliArgs...)
+	if scriptFD != nil {
+		// The child inherits the tool file as fd 3 and execs it. Only fds
+		// opened HERE are closed on return: the registry anchor is owned by
+		// its entry (refcounted), which outlives any single call.
+		cmd.ExtraFiles = []*os.File{scriptFD}
+		if opened {
+			defer scriptFD.Close()
+		}
+	}
 	cmd.Dir = dir
 
 	// A deadline is a budget for the whole process tree, not just the direct
@@ -1154,7 +1238,9 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 		return 1, nil
 	}
 
-	result, err := executeTool(context.Background(), tool.Path, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
+	// No registry anchor in diagnostic mode: the exec-time open recheck
+	// (F-13 layer 2) applies.
+	result, err := executeTool(context.Background(), tool, nil, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
 	if err != nil {
 		return 1, fmt.Errorf("failed to run tool %q: %w", name, err)
 	}
