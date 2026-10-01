@@ -1518,6 +1518,44 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	}
 }
 
+// TestBuildHTTPHandlerRejectsOversizedBody covers F-3's maxHTTPBodyBytes cap
+// end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
+// rejected (400) without being read into memory. Chunked (ContentLength -1)
+// so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
+// the multi-GB-chunked-body exhaustion vector from the review.
+func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	// Valid JSON-RPC initialize prefix, then enough padding to cross the cap.
+	prefix := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	body := io.NopCloser(io.MultiReader(
+		strings.NewReader(prefix),
+		strings.NewReader(strings.Repeat("a", maxHTTPBodyBytes+1<<10)),
+	))
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL, body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = -1 // chunked transfer encoding
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized body: status = %d, want 400", res.StatusCode)
+	}
+	if res.ContentLength >= maxHTTPBodyBytes {
+		t.Fatalf("handler appeared to buffer the whole body (resp Content-Length = %d)", res.ContentLength)
+	}
+}
+
 func TestResolveCORS(t *testing.T) {
 	tests := []struct {
 		name           string
