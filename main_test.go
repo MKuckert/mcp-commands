@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2806,7 +2807,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, true, false, "", false, "", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: 5 * time.Minute})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -2821,7 +2822,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		missing := filepath.Join(tmpDir, "no-such-scripts")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, true, false, "", false, "", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
@@ -2839,7 +2840,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			t.Fatalf("failed to create script: %v", err)
 		}
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, true, false, "", false, "", 5*time.Minute, []string{"--host", "--port"})
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--port"}})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -2880,7 +2881,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+			done <- runDiagnostic(&stdout, &stderr, serverConfig{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -2947,7 +2948,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+			done <- runDiagnostic(&stdout, &stderr, serverConfig{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -3154,7 +3155,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, false, "", true, "{}", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, paramsRaw: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
@@ -3168,7 +3169,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, paramsRaw: `{"x":"y"}`, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--watch"}})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}
@@ -3184,7 +3185,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, filepath.Join(tmpDir, "no-such"), false, false, "ok", true, "{}", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, serverConfig{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, paramsRaw: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
@@ -3468,5 +3469,294 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("first call did not finish")
+	}
+}
+
+// TestParseCLI covers F-10's fail-fast branches without a live process: the
+// version short-circuit, required flags, mutual exclusivity, the
+// --api-key-file fail-fast read, and config assembly.
+func TestParseCLI(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("file-tok\n"), 0o600); err != nil {
+		t.Fatalf("failed to create token file: %v", err)
+	}
+
+	validBase := []string{"--dir", "some-dir", "--scripts", "some-scripts"}
+
+	tests := []struct {
+		name       string
+		args       []string
+		env        [2]string // name/value pair set for the test
+		wantCode   int
+		wantStderr string
+		check      func(t *testing.T, cfg serverConfig)
+	}{
+		{
+			name:     "version",
+			args:     []string{"--version"},
+			wantCode: 0,
+			check: func(t *testing.T, cfg serverConfig) {
+				if !cfg.handled {
+					t.Error("version should be marked handled")
+				}
+			},
+		},
+		{
+			name:       "missing dir",
+			args:       []string{"--scripts", "some-scripts"},
+			wantCode:   1,
+			wantStderr: "--dir and --scripts are required",
+		},
+		{
+			name:       "missing scripts",
+			args:       []string{"--dir", "some-dir"},
+			wantCode:   1,
+			wantStderr: "--dir and --scripts are required",
+		},
+		{
+			name:       "unknown flag",
+			args:       []string{"--dir", "d", "--scripts", "s", "--nope"},
+			wantCode:   2,
+			wantStderr: "not defined",
+		},
+		{
+			name:       "timeout and no-timeout exclusive",
+			args:       append(append([]string{}, validBase...), "--timeout", "1m", "--no-timeout"),
+			wantCode:   1,
+			wantStderr: "mutually exclusive",
+		},
+		{
+			name:       "list-tools and call-tool exclusive",
+			args:       append(append([]string{}, validBase...), "--list-tools", "--call-tool", "x"),
+			wantCode:   1,
+			wantStderr: "mutually exclusive",
+		},
+		{
+			name:       "negative max-concurrent",
+			args:       append(append([]string{}, validBase...), "--max-concurrent", "-1"),
+			wantCode:   1,
+			wantStderr: "must be >= 0",
+		},
+		{
+			name:       "bad origin",
+			args:       append(append([]string{}, validBase...), "--allowed-origins", "ftp://x"),
+			wantCode:   1,
+			wantStderr: "invalid origin",
+		},
+		{
+			name:       "origins and allow-all exclusive",
+			args:       append(append([]string{}, validBase...), "--allowed-origins", "https://a", "--allow-all-origins"),
+			wantCode:   1,
+			wantStderr: "mutually exclusive",
+		},
+		{
+			name:       "bad allow-all env",
+			args:       validBase,
+			env:        [2]string{allowAllOriginsEnvVar, "bogus"},
+			wantCode:   1,
+			wantStderr: "must be 1, true, or yes",
+		},
+		{
+			name:       "api-key-file unreadable",
+			args:       append(append([]string{}, validBase...), "--api-key-file", "/nonexistent/nowhere"),
+			wantCode:   1,
+			wantStderr: "cannot read --api-key-file",
+		},
+		{
+			name:     "valid server config",
+			args:     append(append([]string{}, validBase...), "--host", "127.0.0.1", "--port", "8080", "--api-key-file", tokenFile, "--max-concurrent", "4", "--timeout", "1m", "--watch"),
+			wantCode: 0,
+			check: func(t *testing.T, cfg serverConfig) {
+				t.Helper()
+				if cfg.dir != "some-dir" || cfg.scriptsDir != "some-scripts" {
+					t.Errorf("paths = %q/%q", cfg.dir, cfg.scriptsDir)
+				}
+				if cfg.host != "127.0.0.1" || cfg.port != 8080 {
+					t.Errorf("host/port = %q/%d", cfg.host, cfg.port)
+				}
+				if cfg.apiKey != "file-tok" {
+					t.Errorf("apiKey = %q, want file-tok (trimmed)", cfg.apiKey)
+				}
+				if cfg.apiKeyFromFlag {
+					t.Error("apiKeyFromFlag set, want false (file source)")
+				}
+				if cfg.maxConcurrent != 4 {
+					t.Errorf("maxConcurrent = %d", cfg.maxConcurrent)
+				}
+				if cfg.timeout != time.Minute {
+					t.Errorf("timeout = %v", cfg.timeout)
+				}
+				if !cfg.watch {
+					t.Error("watch = false")
+				}
+			},
+		},
+		{
+			name:     "api-key flag beats file and env",
+			args:     append(append([]string{}, validBase...), "--api-key", "flag-tok", "--api-key-file", tokenFile),
+			env:      [2]string{apiKeyEnvVar, "env-tok"},
+			wantCode: 0,
+			check: func(t *testing.T, cfg serverConfig) {
+				if cfg.apiKey != "flag-tok" || !cfg.apiKeyFromFlag {
+					t.Errorf("apiKey = %q fromFlag=%v, want flag-tok/true", cfg.apiKey, cfg.apiKeyFromFlag)
+				}
+			},
+		},
+		{
+			name:     "diagnostic ignored flags",
+			args:     append(append([]string{}, validBase...), "--list-tools", "--port", "0", "--host", "127.0.0.1", "--watch"),
+			wantCode: 0,
+			check: func(t *testing.T, cfg serverConfig) {
+				t.Helper()
+				if !cfg.listTools {
+					t.Fatal("listTools = false")
+				}
+				for _, want := range []string{"--host", "--port"} {
+					if !containsString(cfg.ignoredFlags, want) {
+						t.Errorf("ignoredFlags %v missing %s", cfg.ignoredFlags, want)
+					}
+				}
+			},
+		},
+		{
+			name:     "call-tool ignores watch",
+			args:     append(append([]string{}, validBase...), "--call-tool", "ok", "--watch"),
+			wantCode: 0,
+			check: func(t *testing.T, cfg serverConfig) {
+				if !containsString(cfg.ignoredFlags, "--watch") {
+					t.Errorf("ignoredFlags %v missing --watch", cfg.ignoredFlags)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env[0] != "" {
+				t.Setenv(tt.env[0], tt.env[1])
+			}
+			var out, errBuf bytes.Buffer
+			cfg, code := parseCLI(tt.args, &out, &errBuf)
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, tt.wantCode, errBuf.String())
+			}
+			if tt.wantStderr != "" && !strings.Contains(errBuf.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", errBuf.String(), tt.wantStderr)
+			}
+			if tt.name == "version" {
+				if !strings.Contains(out.String(), serverVersion) {
+					t.Errorf("stdout = %q, want it to contain %q", out.String(), serverVersion)
+				}
+			}
+			if tt.check != nil {
+				tt.check(t, cfg)
+			}
+		})
+	}
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonrpcStatus POSTs one JSON-RPC request to the streamable-HTTP endpoint
+// and returns the response status; 0 when the connection itself fails
+// (server not up yet) so callers can poll.
+func jsonrpcStatus(t *testing.T, url, body string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// TestRunHTTPEndToEnd covers F-10's end-to-end half: run() with port > 0
+// boots a real loopback HTTP server, serves the MCP protocol for the
+// discovered tool, and returns cleanly on context cancel (graceful
+// shutdown). The zero-tools warning is printed to os.Stderr directly (the
+// liveEnv injection seam is F-15, Tier 3), so it is not asserted here.
+func TestRunHTTPEndToEnd(t *testing.T) {
+	scriptsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scriptsDir, "alpha.sh"), []byte("#!/bin/sh\necho a\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find a free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	cfg := serverConfig{
+		dir:           t.TempDir(),
+		scriptsDir:    scriptsDir,
+		host:          "127.0.0.1",
+		port:          port,
+		timeout:       defaultToolTimeout,
+		maxConcurrent: 16,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg)
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
+
+	status := 0
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status = jsonrpcStatus(t, url, initBody)
+		if status == http.StatusOK {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("initialize was never served, last status %d", status)
+	}
+
+	// The discovered tool must be listed through the live server.
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tools/list failed: %v", err)
+	}
+	buf := new(bytes.Buffer)
+	_, _ = io.Copy(buf, resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(buf.String(), "alpha") {
+		t.Errorf("tools/list response does not name the discovered tool: %s", buf.String())
+	}
+
+	// Graceful shutdown: cancel must bring run() back with nil.
+	cancel()
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("run returned %v after cancel, want nil", runErr)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after cancel")
 	}
 }
