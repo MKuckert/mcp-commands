@@ -62,7 +62,7 @@ Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0
 
 #### Authentication (optional)
 
-The HTTP server accepts requests without authentication by default. You can optionally protect it with a static API token:
+The HTTP server accepts requests without authentication **when bound to loopback** (the default `127.0.0.1`). You can optionally protect it with a static API token:
 
 ```bash
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key my-secret-token
@@ -103,6 +103,17 @@ Notes:
 - The token is never logged by the server.
 - Enabling auth is a breaking change for existing HTTP clients — they must start sending the token.
 - **Stdio mode needs no token.** `--api-key` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
+- **Non-loopback binds require auth (0.8.0).** Binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start**:
+
+  ```
+  Error: refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
+  ```
+
+  An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, printing a loud `WARNING: UNAUTHENTICATED HTTP server bound to …` line and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
+
+#### Concurrency Cap
+
+The server runs at most `--max-concurrent` tool subprocesses at once (default **16**, `0` selects the default). A call arriving when the cap is full gets a clean in-band MCP error — `mcp-commands is at capacity (16 concurrent tool executions); please retry shortly` — that the client can retry, instead of piling up unbounded subprocesses. Lower it on small hosts; raise it for bursty clients.
 
 #### Browser Clients (Cross Origin Resource Sharing, CORS)
 

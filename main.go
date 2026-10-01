@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,20 +35,24 @@ import (
 )
 
 const (
-	defaultToolTimeout    = 5 * time.Minute
-	maxToolOutputBytes    = 1 << 20
-	scanHeaderLines       = 30
-	scanDescriptionPrefix = "Description:"
-	scanParamPrefix       = "Param:"
-	scanTimeoutPrefix     = "Timeout:"
-	watchToolsInterval    = 2 * time.Second
-	watchDebounceDelay    = 100 * time.Millisecond
-	serverName            = "mcp-commands"
-	listWrapWidth         = 160     // non-TTY fallback for --list-tools wrapping
-	listIndent            = "     " // included in the wrap width budget
+	defaultToolTimeout        = 5 * time.Minute
+	maxToolOutputBytes        = 1 << 20
+	defaultMaxConcurrentTools = 16
+	maxHTTPBodyBytes          = 10 << 20 // 10 MiB request-body cap
+	httpReadHeaderTimeout     = 5 * time.Second
+	httpIdleTimeout           = 2 * time.Minute
+	scanHeaderLines           = 30
+	scanDescriptionPrefix     = "Description:"
+	scanParamPrefix           = "Param:"
+	scanTimeoutPrefix         = "Timeout:"
+	watchToolsInterval        = 2 * time.Second
+	watchDebounceDelay        = 100 * time.Millisecond
+	serverName                = "mcp-commands"
+	listWrapWidth             = 160     // non-TTY fallback for --list-tools wrapping
+	listIndent                = "     " // included in the wrap width budget
 )
 
-var serverVersion = "0.7.0"
+var serverVersion = "0.8.0"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
@@ -468,6 +474,47 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	return cliArgs, nil
 }
 
+// boundedWriter is an io.Writer that accumulates at most limit bytes. Writes
+// beyond the limit are consumed (the return value stays len(p), err nil, so
+// the subprocess sees a healthy pipe) but not stored; the overflow is
+// remembered. This bounds executeTool's memory to O(limit) per stream no
+// matter how much a tool prints.
+type boundedWriter struct {
+	buf       bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func newBoundedWriter(limit int) *boundedWriter {
+	return &boundedWriter{remaining: limit}
+}
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > b.remaining {
+		b.buf.Write(p[:b.remaining])
+		b.remaining = 0
+		b.truncated = true
+		return len(p), nil
+	}
+	// A write that lands exactly on the limit drops nothing: truncated stays false.
+	b.buf.Write(p)
+	b.remaining -= len(p)
+	return len(p), nil
+}
+
+// Bytes returns the captured bytes (at most the limit) and whether output
+// was dropped to enforce it.
+func (b *boundedWriter) Bytes() []byte { return b.buf.Bytes() }
+
+func (b *boundedWriter) Truncated() bool { return b.truncated }
+
 // combineToolOutput merges stdout and stderr from a tool execution, wrapping each
 // in XML-style tags (<stdout>...</stdout> and <stderr>...</stderr>). It enforces
 // a maximum byte limit (maxToolOutputBytes) to prevent overwhelming the MCP client
@@ -503,8 +550,16 @@ func combineToolOutput(stdout, stderr []byte) string {
 		return string(combined)
 	}
 
-	truncated := string(combined[:maxToolOutputBytes])
-	return truncated + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
+	// Back off the cut to a UTF-8 rune boundary: a naive byte cut can split a
+	// multi-byte rune and hand the LLM invalid bytes. A split rune spans at
+	// most 3 bytes, so at most 3 back-offs; for tool output that is already
+	// invalid UTF-8 (binary) the bounded loop simply stops, no worse than the
+	// raw bytes we would have emitted before.
+	cut := maxToolOutputBytes
+	for i := 0; i < 3 && cut > 0 && !utf8.Valid(combined[:cut]); i++ {
+		cut--
+	}
+	return string(combined[:cut]) + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
 // toolRegistry manages the dynamic registration and deregistration of tools
@@ -514,14 +569,47 @@ type toolRegistry struct {
 	server        *mcp.Server
 	dirAbs        string
 	globalTimeout time.Duration // applied to tools without a per-tool Timeout:
+	slot          *execSlot     // bounds concurrent tool executions
 	mu            sync.Mutex
 	names         []string
 	lastHandler   mcp.ToolHandler
 }
 
-func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration) *toolRegistry {
-	return &toolRegistry{server: server, dirAbs: dir, globalTimeout: globalTimeout}
+func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration, maxConcurrent int) *toolRegistry {
+	return &toolRegistry{
+		server:        server,
+		dirAbs:        dir,
+		globalTimeout: globalTimeout,
+		slot:          newExecSlot(maxConcurrent),
+	}
 }
+
+// execSlot bounds how many tool subprocesses may run at once. It is a
+// fixed-size buffered channel: each running execution holds one slot.
+type execSlot struct {
+	sem   chan struct{}
+	limit int
+}
+
+func newExecSlot(limit int) *execSlot {
+	if limit <= 0 {
+		limit = defaultMaxConcurrentTools
+	}
+	return &execSlot{sem: make(chan struct{}, limit), limit: limit}
+}
+
+// tryAcquire grabs a slot without blocking: false means the server is at
+// capacity (the caller returns a clean "at capacity" tool result).
+func (s *execSlot) tryAcquire() bool {
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *execSlot) release() { <-s.sem }
 
 // replace unregisters all currently tracked tools and registers a new set of tools.
 // It defines the InputSchema dynamically based on each tool's Param declarations,
@@ -556,6 +644,17 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 					IsError: true,
 				}, nil
 			}
+			// Capacity check after validation: malformed calls must not
+			// consume a slot. At capacity, fail cleanly so clients retry
+			// rather than piling up pinned subprocesses.
+			if !r.slot.tryAcquire() {
+				msg := fmt.Sprintf("mcp-commands is at capacity (%d concurrent tool executions); please retry shortly", r.slot.limit)
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+					IsError: true,
+				}, nil
+			}
+			defer r.slot.release()
 			return executeTool(ctx, toolPath, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
@@ -868,10 +967,12 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// Bounded capture: a tool printing gigabytes costs O(1 MiB) per stream,
+	// not O(output size); combineToolOutput applies the final cap.
+	stdout := newBoundedWriter(maxToolOutputBytes)
+	stderr := newBoundedWriter(maxToolOutputBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, err
@@ -950,7 +1051,7 @@ var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection"}
+var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
@@ -1112,6 +1213,40 @@ func resolveAPIKey(flagValue string) string {
 		return flagValue
 	}
 	return os.Getenv(apiKeyEnvVar)
+}
+
+// isLoopbackHost reports whether host binds only to the local machine: the
+// 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
+// including unparseable values and non-IP hostnames — is treated as
+// non-loopback, the conservative choice: a hostname that resolves outside
+// loopback binds externally.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 127
+	}
+	return ip.Equal(net.ParseIP("::1"))
+}
+
+// checkHTTPSecurityPolicy validates the auth posture of an HTTP bind. It
+// returns a warning to log when the server runs unauthenticated, and an
+// error when it would start unauthenticated on a non-loopback host without
+// the explicit --insecure-no-auth escape hatch (an unguarded remote
+// command-execution endpoint).
+func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning string, err error) {
+	if apiKey != "" || isLoopbackHost(host) {
+		return "", nil
+	}
+	if !acceptsRisk {
+		return "", fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+	}
+	return fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host), nil
 }
 
 // corsConfig holds the resolved CORS and streamable-HTTP mode options for the
@@ -1290,9 +1425,10 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
-// vestigial). When token is non-empty it is wrapped in bearer-token auth
-// middleware; when CORS is enabled it is wrapped (outermost) in the CORS
-// middleware, so preflights bypass auth and 401s carry CORS headers.
+// vestigial). It is wrapped (innermost) in a request-body size limit
+// (maxHTTPBodyBytes); when token is non-empty it is wrapped in bearer-token
+// auth middleware; when CORS is enabled it is wrapped (outermost) in the
+// CORS middleware, so preflights bypass auth and 401s carry CORS headers.
 func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
 	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
@@ -1301,6 +1437,15 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		// sessions are vestigial.
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
+	})
+	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
+	// chunked body must not be read into memory.
+	next := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+		}
+		next.ServeHTTP(w, r)
 	})
 	if token != "" {
 		h = newBearerAuthHandler(h, token)
@@ -1318,6 +1463,8 @@ func main() {
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
+	insecureNoAuthFlag := flag.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
+	maxConcurrentFlag := flag.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
 	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
 	allowAllOriginsFlag := flag.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
 	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
@@ -1336,7 +1483,7 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--timeout <duration>] | [--no-timeout]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
 	}
 
@@ -1374,6 +1521,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error: --list-tools and --call-tool are mutually exclusive")
 		os.Exit(1)
 	}
+	if *maxConcurrentFlag < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --max-concurrent must be >= 0 (got %d)\n", *maxConcurrentFlag)
+		os.Exit(1)
+	}
 	if *listToolsFlag || callToolActive {
 		// --watch is honored with --list-tools (live list) and ignored with
 		// --call-tool; the server-mode flags are always ignored. Presence is
@@ -1391,13 +1542,13 @@ func main() {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *listToolsFlag, *watchFlag, *callToolFlag, callToolSet, *paramsFlag, timeout, ignored))
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout); err != nil {
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -1422,7 +1573,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs, timeout)
+	registry := newToolRegistry(server, dirAbs, timeout, maxConcurrent)
 	registry.replace(tools)
 
 	if watch {
@@ -1435,8 +1586,24 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 
 	if port > 0 {
 		addr := fmt.Sprintf("%s:%d", host, port)
+
+		// Fail fast before binding: no silent unauthenticated remote shells.
+		if warning, err := checkHTTPSecurityPolicy(host, apiKey, insecureNoAuth); err != nil {
+			return err
+		} else if warning != "" {
+			fmt.Fprintln(os.Stderr, warning)
+		}
+
 		handler := buildHTTPHandler(server, apiKey, cors)
-		serverHTTP := &http.Server{Addr: addr, Handler: handler}
+		serverHTTP := &http.Server{
+			Addr:    addr,
+			Handler: handler,
+			// No Read/WriteTimeout: they would have to exceed the 5-minute
+			// tool-call budget. These two guard against slowloris and
+			// pinned idle keep-alive connections.
+			ReadHeaderTimeout: httpReadHeaderTimeout,
+			IdleTimeout:       httpIdleTimeout,
+		}
 
 		go func() {
 			<-sigCtx.Done()
@@ -1448,6 +1615,8 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		var notes []string
 		if apiKey != "" {
 			notes = append(notes, "API key auth enabled")
+		} else if !isLoopbackHost(host) {
+			notes = append(notes, "UNAUTHENTICATED")
 		}
 		if cors.enabled() {
 			notes = append(notes, cors.summary())
