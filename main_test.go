@@ -3760,3 +3760,67 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		t.Fatal("run did not return after cancel")
 	}
 }
+
+// TestRegistryReplaceSkipsIdenticalSet covers F-11: re-registering a tool
+// set that is identical to the current one must emit no
+// tools/list_changed notification (the debounce being the only reason the
+// old code spammed one per reload), while a real change still notifies.
+func TestRegistryReplaceSkipsIdenticalSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho a\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, defaultToolTimeout, 16)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	var changed atomic.Int32
+	var ch chan struct{}
+	ch = make(chan struct{}, 16)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			changed.Add(1)
+			ch <- struct{}{}
+		},
+	})
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	waitForChange := func() {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected a tools/list_changed notification, got none")
+		}
+	}
+
+	tools := []discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}}
+
+	// Initial registration notifies.
+	registry.replace(tools)
+	waitForChange()
+
+	// An identical set is a no-op: silence.
+	registry.replace(tools)
+	select {
+	case <-ch:
+		t.Fatalf("identical replace emitted a list_changed notification (count=%d)", changed.Load())
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// A real change notifies again (the mechanism is alive).
+	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha v2", Params: []paramSpec{}}})
+	waitForChange()
+}

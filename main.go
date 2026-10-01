@@ -573,6 +573,7 @@ type toolRegistry struct {
 	slot          *execSlot     // bounds concurrent tool executions
 	mu            sync.Mutex
 	names         []string
+	current       []discoveredTool // last registered set (F-11 change-diff)
 	lastHandler   mcp.ToolHandler
 }
 
@@ -612,12 +613,22 @@ func (s *execSlot) tryAcquire() bool {
 
 func (s *execSlot) release() { <-s.sem }
 
-// replace unregisters all currently tracked tools and registers a new set of tools.
-// It defines the InputSchema dynamically based on each tool's Param declarations,
-// allowing tools to accept typed parameters with proper schema validation.
+// replace unregisters all currently tracked tools and registers a new set of
+// tools. It defines the InputSchema dynamically based on each tool's Param
+// declarations, allowing tools to accept typed parameters with proper schema
+// validation.
+//
+// Change-diff (F-11): a set identical to the one already registered is a
+// no-op — no RemoveTools/AddTool pairs, no per-tool re-marshal, and no
+// tools/list_changed notifications for a reload that changed nothing.
 func (r *toolRegistry) replace(tools []discoveredTool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if reflect.DeepEqual(r.current, tools) {
+		return
+	}
+	r.current = tools
 
 	if len(r.names) > 0 {
 		r.server.RemoveTools(r.names...)
@@ -848,11 +859,13 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
-// watchChanges watches dir with fsnotify and invokes onChange once per
-// debounced burst of Create/Write/Remove/Rename events. Watcher errors are
-// logged to stderr but do not stop the loop, ensuring robust operation even
-// if the watched directory is deleted or permissions change. It returns when
-// ctx is done or the watcher channels close.
+// watchChanges watches dir with fsnotify and invokes onChange after a
+// 100 ms quiescence following the last Create/Write/Remove/Rename event
+// (the timer re-arms on every event, so a burst — fast or slow — collapses
+// to one reload). Watcher errors are logged to stderr but do not stop the
+// loop, ensuring robust operation even if the watched directory is deleted
+// or permissions change. It returns when ctx is done or the watcher
+// channels close.
 func watchChanges(ctx context.Context, dir string, onChange func()) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -870,7 +883,6 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 	// the channel, so no stale tick can be in flight.)
 	debounceTimer.Stop()
 	defer debounceTimer.Stop()
-	debounceActive := false
 
 	for {
 		select {
@@ -883,12 +895,14 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 			}
 
 			// Check if the event is for a file in the scripts directory
-			// We look for Create, Write, Remove, and Rename operations
+			// We look for Create, Write, Remove, and Rename operations.
+			// The timer is re-armed on EVERY event (quiescence semantics,
+			// F-11): onChange fires 100 ms after the last event, so a slow
+			// burst that straddles the window still collapses to one reload.
 			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
-				if !debounceActive {
-					debounceActive = true
-					debounceTimer.Reset(watchDebounceDelay)
-				}
+				// Go >= 1.23 Stop drains the channel, so Reset never observes
+				// a stale tick.
+				debounceTimer.Reset(watchDebounceDelay)
 			}
 
 		case err, ok := <-watcher.Errors:
@@ -900,7 +914,6 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 			fmt.Fprintf(os.Stderr, "Warning: file watcher error: %v\n", err)
 
 		case <-debounceTimer.C:
-			debounceActive = false
 			onChange()
 		}
 	}
