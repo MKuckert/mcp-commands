@@ -278,25 +278,38 @@ func TestWatchTools(t *testing.T) {
 	}()
 
 	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
-	if err := os.WriteFile(addedScriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-		t.Fatalf("failed to create second script: %v", err)
-	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		res, err := clientSession.ListTools(ctx, nil)
-		if err != nil {
-			t.Fatalf("ListTools failed: %v", err)
+	// Bounded write retries (F-22): fsnotify events can be lost under load
+	// (inotify queue overflow), so re-write and re-poll until the reload
+	// lands; the same content still fires a fresh event.
+	var lastCount int
+	updated := false
+	for i := 0; i < 10 && !updated; i++ {
+		if err := os.WriteFile(addedScriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+			t.Fatalf("failed to create second script: %v", err)
 		}
-		if len(res.Tools) == 2 {
-			cancel()
-			break
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools failed: %v", err)
+			}
+			lastCount = len(res.Tools)
+			if lastCount == 2 {
+				updated = true
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("watchTools did not update before deadline: got %d tools", len(res.Tools))
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	if !updated {
+		cancel()
+		t.Fatalf("watchTools did not update after 10 write attempts: got %d tools", lastCount)
+	}
+	cancel()
 
 	select {
 	case err := <-done:
@@ -342,25 +355,36 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
 	}()
 
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta now\n"), 0o755); err != nil {
-		t.Fatalf("failed to update script: %v", err)
+	// Bounded write retries: a lost fsnotify event is recovered by the next
+	// write (see TestWatchTools). (F-22)
+	var lastTools []*mcp.Tool
+	refreshed := false
+	for i := 0; i < 10 && !refreshed; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta now\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools failed: %v", err)
+			}
+			lastTools = res.Tools
+			if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated (timeout: 5m0s)" {
+				refreshed = true
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		res, err := clientSession.ListTools(ctx, nil)
-		if err != nil {
-			t.Fatalf("ListTools failed: %v", err)
-		}
-		if len(res.Tools) == 1 && res.Tools[0].Description == "beta updated (timeout: 5m0s)" {
-			cancel()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("watchTools did not refresh updated tool description: %+v", res.Tools)
-		}
-		time.Sleep(20 * time.Millisecond)
+	if !refreshed {
+		cancel()
+		t.Fatalf("watchTools did not refresh updated tool description after 10 write attempts: %+v", lastTools)
 	}
+	cancel()
 
 	select {
 	case err := <-done:
@@ -2055,25 +2079,36 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 	}()
 
 	// Hot reload: editing only the Timeout: line re-registers the tool.
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Timeout: 30s\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to update script: %v", err)
+	// Bounded write retries: a lost fsnotify event is recovered by the next
+	// write (see TestWatchTools). (F-22)
+	var lastTools []*mcp.Tool
+	refreshed := false
+	for i := 0; i < 10 && !refreshed; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Timeout: 30s\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools failed: %v", err)
+			}
+			lastTools = res.Tools
+			if len(res.Tools) == 1 && res.Tools[0].Description == "(timeout: 30s)" {
+				refreshed = true
+				break
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		res, err := clientSession.ListTools(ctx, nil)
-		if err != nil {
-			t.Fatalf("ListTools failed: %v", err)
-		}
-		if len(res.Tools) == 1 && res.Tools[0].Description == "(timeout: 30s)" {
-			cancel()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("watchTools did not refresh updated Timeout: %+v", res.Tools)
-		}
-		time.Sleep(20 * time.Millisecond)
+	if !refreshed {
+		cancel()
+		t.Fatalf("watchTools did not refresh updated Timeout after 10 write attempts: %+v", lastTools)
 	}
+	cancel()
 
 	select {
 	case err := <-done:
