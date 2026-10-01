@@ -624,6 +624,13 @@ func (e *toolEntry) release() {
 	e.fd.Close()
 }
 
+// sameToolIdentity reports whether two discoveredTool records name the same
+// file: same (canonical) path and, where the platform provides one, same
+// (device, inode). The anchor-fd identity anchor, not the contents.
+func sameToolIdentity(a, b discoveredTool) bool {
+	return a.Path == b.Path && a.dev == b.dev && a.ino == b.ino
+}
+
 // execSlot bounds how many tool subprocesses may run at once. It is a
 // fixed-size buffered channel: each running execution holds one slot.
 type execSlot struct {
@@ -668,14 +675,21 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	}
 	r.current = tools
 
-	// F-13 anchor lifecycle: mark disappearing entries removed; close their
-	// anchor fds while idle — the last in-flight call closes them otherwise.
-	newSet := make(map[string]bool, len(tools))
+	// F-13 anchor lifecycle: an entry whose identity (path + (dev, inode))
+	// is unchanged keeps its entry object and its anchor fd — an in-place
+	// edit reuses the same opened inode, and a frontmatter-only reload churns
+	// no descriptors at all. Every other old entry (removed, or swapped for a
+	// different inode) is marked removed and its anchor fd closed while idle
+	// — the last in-flight call closes it otherwise, and a discarded-but-
+	// never-closed fd would leak until the GC finalizer ran.
+	newByName := make(map[string]discoveredTool, len(tools))
 	for _, tool := range tools {
-		newSet[tool.Name] = true
+		newByName[tool.Name] = tool
 	}
+	kept := make(map[string]*toolEntry, len(tools))
 	for name, entry := range r.entries {
-		if newSet[name] {
+		if next, ok := newByName[name]; ok && sameToolIdentity(entry.tool, next) {
+			kept[name] = entry
 			continue
 		}
 		atomic.StoreInt32(&entry.removed, 1)
@@ -699,7 +713,17 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 		description := registeredDescription(discoveredTool.Description, toolTimeout)
 
-		entry := &toolEntry{tool: discoveredTool, fd: openToolAnchor(discoveredTool)}
+		// Reuse the previous entry (and its anchor fd) when the tool's
+		// identity is unchanged; open a fresh anchor for a new one.
+		entry := kept[toolName]
+		if entry == nil {
+			entry = &toolEntry{tool: discoveredTool}
+		}
+		if entry.fd == nil {
+			// A previous anchor open failed (or the platform has no fd
+			// exec): retry, so a transient failure self-heals on reload.
+			entry.fd = openToolAnchor(discoveredTool)
+		}
 
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Pin the anchor fd for the whole call (F-13): replace() will not

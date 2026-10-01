@@ -3,7 +3,7 @@
 **Branch:** `fix/tier2-hardening` (from `main` @ 15e7da7)
 **Target release:** v0.8.1
 **Source of truth:** `REVIEW.md` §Tier 2. F-12 is already done — it landed with F-2 in Tier 1 (commit 459a9ba); this branch only marks it in REVIEW.md.
-Status: **In progress**
+Status: **Done** (quality pass 2026-10-01: one confirmed bug — `replace()` leaked the anchor fd of every surviving tool; fixed via entry/fd reuse on unchanged identity, `TestRegistryReplaceAnchorLifecycle`; gofmt fix in `exec_unix.go`)
 
 ## Scope
 

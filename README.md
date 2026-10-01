@@ -320,7 +320,7 @@ declaration of that name.
 
 **Exec-time pinning.** A script that is *swapped* after discovery cannot redirect a running server's tool calls:
 
-- **Server mode (unix):** at registration, mcp-commands opens each script (with `O_NOFOLLOW`) and keeps the file descriptor; a tool call execs *that opened inode* via `/dev/fd/3`. Renaming the file, replacing it, or re-pointing a symlink afterwards changes nothing — the discovered inode is what runs (or the call is refused if the descriptor is unusable). File descriptors are refcounted so an in-flight call is never starved, and they close when the tool is re-registered or removed.
+- **Server mode (unix):** at registration, mcp-commands opens each script (with `O_NOFOLLOW`) and keeps the file descriptor; a tool call execs *that opened inode* via `/dev/fd/3`. Renaming the file, replacing it, or re-pointing a symlink afterwards changes nothing — the discovered inode is what runs (or the call is refused if the descriptor is unusable). File descriptors are refcounted so an in-flight call is never starved: a tool whose file is unchanged keeps its descriptor across reloads, and a descriptor closes when the tool is swapped for a different file or removed (by the last in-flight call, if one is running).
 - **Server mode (Windows):** no `/dev/fd` exec; the path is re-verified at exec time (resolves, regular file, executable bit). A narrow window between check and exec remains — treat a concurrently writable scripts directory as unsafe there.
 - **`--call-tool` diagnostics:** the file is opened at exec time with `O_NOFOLLOW` and must still be the same regular, executable `(device, inode)` as at discovery; mismatches (relink, replacement) are refused with an explicit error.
 

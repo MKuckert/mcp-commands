@@ -4008,3 +4008,113 @@ func TestRegistryPinsDiscoveredFile(t *testing.T) {
 		t.Fatalf("pinned inode was not executed: %q", text)
 	}
 }
+
+// fileIsClosed reports whether an *os.File has been closed (a closed file
+// detaches its descriptor: Fd() is ^uintptr(0), i.e. -1 signed). fd NUMBERS
+// are no assertion target: the kernel hands a freshly closed number to the
+// next open, so after a swap the replacement anchor likely reuses it.
+func fileIsClosed(f *os.File) bool { return int64(f.Fd()) < 0 }
+
+func assertFDUsable(t *testing.T, f *os.File) {
+	t.Helper()
+	if fileIsClosed(f) {
+		t.Fatal("anchor fd already closed, want open")
+	}
+	if _, err := f.Stat(); err != nil {
+		t.Fatalf("fd %d not usable: %v", f.Fd(), err)
+	}
+}
+
+func assertFDClosed(t *testing.T, f *os.File) {
+	t.Helper()
+	if !fileIsClosed(f) {
+		t.Fatalf("fd %d still open, want closed", f.Fd())
+	}
+}
+
+// TestRegistryReplaceAnchorLifecycle covers the F-13 fd lifecycle in
+// replace(): an entry whose (path, dev, inode) identity is unchanged keeps
+// its entry object and its anchor fd; a swap to a different inode gets a
+// fresh anchor while the old fd closes immediately; a removal closes the fd.
+// The close paths are the regression — a discarded-but-never-closed anchor
+// fd leaks until the GC finalizer runs.
+func TestRegistryReplaceAnchorLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("anchor fds are a unix feature")
+	}
+	scriptsDir := t.TempDir()
+	scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+	write := func(body string) {
+		if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+			t.Fatalf("write alpha: %v", err)
+		}
+	}
+	write("#!/bin/sh\necho a\n")
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, scriptsDir, defaultToolTimeout, 16)
+
+	tools, err := discoverTools(scriptsDir)
+	if err != nil {
+		t.Fatalf("discoverTools: %v", err)
+	}
+	registry.replace(tools)
+	first := registry.entries["alpha"]
+	if first == nil {
+		t.Fatal("alpha not registered")
+	}
+	if first.fd == nil {
+		t.Skip("anchor open unavailable on this system")
+	}
+
+	// 1. In-place edit (same inode): the entry and its anchor fd are reused.
+	write("#!/bin/sh\necho a v2\n")
+	tools2, err := discoverTools(scriptsDir)
+	if err != nil {
+		t.Fatalf("rediscover: %v", err)
+	}
+	registry.replace(tools2)
+	if registry.entries["alpha"] != first {
+		t.Fatalf("in-place edit must reuse the entry, got a new one")
+	}
+	assertFDUsable(t, first.fd)
+
+	// 2. Swap to a different inode: a fresh anchor, the old fd closed.
+	if err := os.Remove(scriptPath); err != nil {
+		t.Fatalf("remove alpha: %v", err)
+	}
+	write("#!/bin/sh\necho a v3\n")
+	tools3, err := discoverTools(scriptsDir)
+	if err != nil {
+		t.Fatalf("rediscover: %v", err)
+	}
+	registry.replace(tools3)
+	live := registry.entries["alpha"]
+	if live == nil {
+		t.Fatal("alpha not registered after swap")
+	}
+	if live == first {
+		// The filesystem reused the deleted inode, so the sets are identical
+		// and replace() no-oped — the swap assertions cannot apply.
+		t.Log("filesystem reused the deleted inode; skipping swap assertions")
+	} else {
+		if live.fd == nil {
+			t.Fatal("swapped tool got no anchor fd")
+		}
+		assertFDClosed(t, first.fd)
+		assertFDUsable(t, live.fd)
+	}
+
+	// 3. Removal: the live anchor fd closes.
+	if err := os.Remove(scriptPath); err != nil {
+		t.Fatalf("remove alpha: %v", err)
+	}
+	tools4, err := discoverTools(scriptsDir)
+	if err != nil {
+		t.Fatalf("rediscover: %v", err)
+	}
+	registry.replace(tools4)
+	if live.fd != nil {
+		assertFDClosed(t, live.fd)
+	}
+}
