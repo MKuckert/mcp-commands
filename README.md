@@ -303,9 +303,10 @@ required-parameter validation before the script starts.
   | Missing required param, non-zero script exit, or timeout | 1 | tool's result on stdout |
   | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
 
-- Server-mode flags (`--host`, `--port`, `--api-key`, and the CORS flags
-  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`)
-  are ignored in both diagnostic modes, and `--watch` is ignored with
+- Server-mode flags (`--host`, `--port`, `--api-key`, `--api-key-file`, and the CORS flags
+  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`;
+  an unreadable `--api-key-file` path is a startup error like all fail-fast
+  validation) are ignored in both diagnostic modes, and `--watch` is ignored with
   `--call-tool` as well; if you pass any of them explicitly, a single notice
   is printed to stderr. `--watch` is *honored* with `--list-tools` — it is
   the live-list mode described above and never listed as ignored there.
