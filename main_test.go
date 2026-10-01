@@ -1405,13 +1405,17 @@ func TestResolveAPIKey(t *testing.T) {
 	tests := []struct {
 		name string
 		flag string
+		file string
 		env  string
 		want string
 	}{
-		{name: "flag_only", flag: "from-flag", env: "", want: "from-flag"},
-		{name: "env_only", flag: "", env: "from-env", want: "from-env"},
-		{name: "both_set_flag_wins", flag: "from-flag", env: "from-env", want: "from-flag"},
-		{name: "neither_set", flag: "", env: "", want: ""},
+		{name: "flag_only", flag: "from-flag", want: "from-flag"},
+		{name: "file_only", file: "from-file", want: "from-file"},
+		{name: "env_only", env: "from-env", want: "from-env"},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", env: "from-env", want: "from-flag"},
+		{name: "file_beats_env", file: "from-file", env: "from-env", want: "from-file"},
+		{name: "empty_file_falls_through_to_env", file: "", env: "from-env", want: "from-env"},
+		{name: "neither_set", want: ""},
 	}
 
 	for _, tt := range tests {
@@ -1419,8 +1423,8 @@ func TestResolveAPIKey(t *testing.T) {
 			// t.Setenv to "" counts as empty for resolveAPIKey.
 			t.Setenv(apiKeyEnvVar, tt.env)
 
-			if got := resolveAPIKey(tt.flag); got != tt.want {
-				t.Errorf("resolveAPIKey(%q) = %q, want %q", tt.flag, got, tt.want)
+			if got := resolveAPIKey(tt.flag, tt.file); got != tt.want {
+				t.Errorf("resolveAPIKey(%q, %q) = %q, want %q", tt.flag, tt.file, got, tt.want)
 			}
 		})
 	}

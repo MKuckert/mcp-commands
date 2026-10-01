@@ -1059,7 +1059,7 @@ var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
+var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
@@ -1214,11 +1214,17 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 	return 0
 }
 
-// resolveAPIKey returns the token from the flag value if non-empty,
-// otherwise from MCP_COMMANDS_API_KEY. Returns "" if neither is set.
-func resolveAPIKey(flagValue string) string {
+// resolveAPIKey returns the token from --api-key if non-empty, then from the
+// --api-key-file content, then from MCP_COMMANDS_API_KEY. Returns "" if none
+// is set. (--api-key stays first so existing setups are unchanged; the file
+// is the preferred middle tier — a flag value is readable via
+// /proc/<pid>/cmdline for the server's lifetime, which main() warns about.)
+func resolveAPIKey(flagValue, fileValue string) string {
 	if flagValue != "" {
 		return flagValue
+	}
+	if fileValue != "" {
+		return fileValue
 	}
 	return os.Getenv(apiKeyEnvVar)
 }
@@ -1252,7 +1258,7 @@ func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning str
 		return "", nil
 	}
 	if !acceptsRisk {
-		return "", fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+		return "", fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key/--api-key-file (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
 	}
 	return fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host), nil
 }
@@ -1470,7 +1476,8 @@ func main() {
 	watchFlag := flag.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
-	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
+	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or --api-key-file or MCP_COMMANDS_API_KEY; the flag value is visible in the process list)")
+	apiKeyFileFlag := flag.String("api-key-file", "", "File containing the API token (preferred over --api-key, whose value is world-readable in /proc/<pid>/cmdline)")
 	insecureNoAuthFlag := flag.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
 	maxConcurrentFlag := flag.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
 	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
@@ -1491,8 +1498,21 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--api-key-file <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
+	}
+
+	// --api-key is world-readable in /proc/<pid>/cmdline for the server's
+	// lifetime; the file/env tiers are not (F-8). The file is read fail-fast
+	// so an unreadable path is a startup error, not a silent no-auth.
+	var apiKeyFileValue string
+	if *apiKeyFileFlag != "" {
+		raw, err := os.ReadFile(*apiKeyFileFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read --api-key-file %q: %v\n", *apiKeyFileFlag, err)
+			os.Exit(1)
+		}
+		apiKeyFileValue = strings.TrimSpace(string(raw))
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
@@ -1550,17 +1570,23 @@ func main() {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *listToolsFlag, *watchFlag, *callToolFlag, callToolSet, *paramsFlag, timeout, ignored))
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, apiKeyFileValue, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
+func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey, apiKeyFile string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	apiKey = resolveAPIKey(apiKey)
+	// F-8: a flag token is world-readable in /proc/<pid>/cmdline for the
+	// server's lifetime; the file/env sources are not. Warn when the flag
+	// (not file/env) is the source.
+	if apiKey != "" {
+		fmt.Fprintln(os.Stderr, "Warning: --api-key on the command line is readable by other processes via /proc/<pid>/cmdline; prefer --api-key-file or MCP_COMMANDS_API_KEY")
+	}
+	apiKey = resolveAPIKey(apiKey, apiKeyFile)
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {

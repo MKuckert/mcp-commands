@@ -74,7 +74,14 @@ or via the `MCP_COMMANDS_API_KEY` environment variable:
 MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
-The `--api-key` flag takes precedence over the environment variable. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
+or from a file (preferred — see the note below):
+
+```bash
+chmod 600 /etc/mcp-commands/token
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key-file /etc/mcp-commands/token
+```
+
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
 
 ```bash
 curl -s http://localhost:8080 \
@@ -99,14 +106,15 @@ MCP clients that support custom headers can be configured the same way, e.g. a g
 ```
 
 Notes:
+- **`--api-key-file` is the preferred way to supply the token (0.8.1).** A `--api-key` *value* is world-readable via `/proc/<pid>/cmdline` for the server's lifetime (any local user can run `ps`); a file with `chmod 600` and the environment variable are not. When the token comes from the `--api-key` flag, the server prints a startup warning naming the process-list exposure. The file's content is whitespace-trimmed, and an unreadable `--api-key-file` path is a startup error.
 - The scheme is compared case-insensitively (`bearer` works), but the header must be exactly `Bearer <token>` separated by a single space.
 - The token is never logged by the server.
 - Enabling auth is a breaking change for existing HTTP clients — they must start sending the token.
-- **Stdio mode needs no token.** `--api-key` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
+- **Stdio mode needs no token.** `--api-key` / `--api-key-file` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
 - **Non-loopback binds require auth (0.8.0).** Binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start**:
 
   ```
-  Error: refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
+  Error: refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key/--api-key-file (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
   ```
 
   An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, printing a loud `WARNING: UNAUTHENTICATED HTTP server bound to …` line and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
