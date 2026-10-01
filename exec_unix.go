@@ -49,9 +49,11 @@ func openToolAnchor(tool discoveredTool) *os.File {
 //
 //   - the path is opened with O_NOFOLLOW: a symlink planted at the
 //     (canonical) tool path fails at the open stage;
+//
 //   - the opened fd is fstat'ed and must be a regular, executable file whose
 //     (dev, inode) matches the discovery-time identity (skipped when the
 //     identity is unknown, i.e. zero);
+//
 //   - the returned script argument is /dev/fd/3 — the opened inode itself —
 //     so the file that runs is the file that was verified. A swap after our
 //     open cannot change what runs.
