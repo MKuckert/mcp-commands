@@ -21,8 +21,11 @@ func applyProcessGroup(cmd *exec.Cmd, waitDelay time.Duration) {
 		if cmd.Process == nil {
 			return nil
 		}
-		// ECHILD: the group is already gone — nothing to do.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ECHILD {
+		// ESRCH: the whole group already exited (the normal race between a
+		// clean exit and the deadline); ECHILD: no children. Both mean
+		// "nothing to do" — a spurious error here would make a SUCCEEDED
+		// tool look like a cancellation failure.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH && err != syscall.ECHILD {
 			return err
 		}
 		return nil

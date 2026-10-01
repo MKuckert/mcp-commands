@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -2668,10 +2669,18 @@ func TestWatchChangesPermissionChangeSurvival(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, "alpha.sh"), []byte("#!/bin/sh\necho a\n"), 0o755); err != nil {
 		t.Fatalf("failed to create script: %v", err)
 	}
-	if err := os.Chmod(tmpDir, 0); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
+
+	// Set the watch up FIRST, deterministically: a mode-000 directory may be
+	// unwatchable by a non-root process, so the watch must be added while the
+	// directory is accessible and the permission change applied only after.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+	defer watcher.Close()
+	if err := watcher.Add(tmpDir); err != nil {
+		t.Fatalf("failed to add watch: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2679,24 +2688,44 @@ func TestWatchChangesPermissionChangeSurvival(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+		done <- runWatchLoop(ctx, watcher.Events, watcher.Errors, func() { calls.Add(1) })
 	}()
 
-	time.Sleep(500 * time.Millisecond) // several debounce windows, dir at mode 000
-	select {
-	case err := <-done:
-		t.Fatalf("watchChanges returned %v after a permission change, want it to keep running", err)
-	default:
+	// Now, with the watch known to be active: drop the directory to mode 000
+	// (fsnotify delivers a Chmod event) and restore it. The loop must
+	// survive the permission change and keep serving events.
+	if err := os.Chmod(tmpDir, 0); err != nil {
+		t.Fatalf("failed to chmod 000: %v", err)
+	}
+	if err := os.Chmod(tmpDir, 0o755); err != nil {
+		t.Fatalf("failed to chmod 755: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "alpha.sh"), []byte("#!/bin/sh\necho a2\n"), 0o755); err != nil {
+		t.Fatalf("failed to rewrite script: %v", err)
+	}
+
+	// The loop must have survived the mode-000 window: a change that lands
+	// after the restore triggers a debounced reload.
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("watch loop exited %v after a mid-watch permission change, want it to keep running", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if calls.Load() == 0 {
+		t.Fatal("onChange never fired after surviving a permission change")
 	}
 
 	cancel()
 	select {
 	case err := <-done:
 		if err != nil && err != context.Canceled {
-			t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+			t.Fatalf("runWatchLoop returned %v after cancel, want context.Canceled", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("watchChanges did not stop after cancel")
+		t.Fatal("runWatchLoop did not stop after cancel")
 	}
 }
 
@@ -3839,8 +3868,8 @@ func TestExecuteToolIdentity(t *testing.T) {
 			t.Fatalf("stat failed: %v", err)
 		}
 		tool := discoveredTool{Name: "tool", Path: scriptPath}
-		tool.dev, tool.ino = statIdentity(fi)
-		if tool.dev == 0 && tool.ino == 0 {
+		tool.id = statIdentity(fi)
+		if tool.id.ino == 0 {
 			t.Fatal("no identity available; this test requires unix")
 		}
 		return tool
@@ -3883,7 +3912,7 @@ func TestExecuteToolIdentity(t *testing.T) {
 	}
 	write("#!/bin/sh\necho impostor\n", 0o755) // new file
 	if fi, err := os.Stat(scriptPath); err == nil {
-		if dev, ino := statIdentity(fi); dev == tool.dev && ino == tool.ino {
+		if statIdentity(fi) == tool.id {
 			// This filesystem (e.g. tmpfs) reused the deleted file's
 			// inode, so layer 2 cannot distinguish a swap from an
 			// in-place edit — the registry anchor (layer 1) is the

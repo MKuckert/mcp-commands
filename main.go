@@ -70,6 +70,12 @@ type paramSpec struct {
 	Description string
 }
 
+// fileID is the (device, inode) pair identifying a file within a
+// filesystem. Zero on platforms that expose no inode (Windows).
+type fileID struct {
+	dev, ino uint64
+}
+
 type discoveredTool struct {
 	Name        string
 	Path        string // resolved (canonical) path to the executable
@@ -81,8 +87,13 @@ type discoveredTool struct {
 	// now resolves to a different inode (swapped/relinked). (0, 0) means
 	// "unknown identity" (synthesized tools in tests, platforms without
 	// inodes) and skips the identity check.
-	dev uint64
-	ino uint64
+	id fileID
+	// fd is the anchor descriptor opened AT DISCOVERY (unix): exec runs that
+	// opened inode via /dev/fd, so the identity above is derived from the
+	// very file that will run. Nil on Windows and when the open failed. The
+	// opener owns it: a registry hands it to the tool's entry, diagnostic
+	// modes close it (closeToolFDs).
+	fd *os.File
 }
 
 // discoverTools scans the given directory for executable files and symlinks
@@ -121,18 +132,37 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 		description, params, timeout := extractFrontmatter(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
-		tool := discoveredTool{
-			Name:        name,
-			Path:        resolvedPath,
-			Description: description,
-			Params:      params,
-			Timeout:     timeout,
-		}
-		tool.dev, tool.ino = statIdentity(fileInfo)
-		tools = append(tools, tool)
+		tools = append(tools, newDiscoveredTool(name, resolvedPath, description, params, timeout, fileInfo))
 	}
 
 	return tools, nil
+}
+
+// newDiscoveredTool builds a tool record from a directory entry: name from
+// the entry's stem, resolved path, frontmatter, the entry's stat, and — on
+// unix — the anchor descriptor opened here, at discovery. When the anchor
+// is available, (dev, inode) is derived from a fstat of THAT descriptor,
+// so the identity is of the file that will actually be exec'd, not of
+// whatever the path happens to point at a moment later.
+func newDiscoveredTool(name, path, description string, params []paramSpec, timeout *time.Duration, info os.FileInfo) discoveredTool {
+	tool := discoveredTool{
+		Name:        name,
+		Path:        path,
+		Description: description,
+		Params:      params,
+		Timeout:     timeout,
+	}
+	tool.fd = openToolAnchor(path) // nil on windows or on open failure
+	if tool.fd != nil {
+		if fi, err := tool.fd.Stat(); err == nil {
+			tool.id = statIdentity(fi)
+		} else {
+			tool.id = statIdentity(info)
+		}
+	} else {
+		tool.id = statIdentity(info)
+	}
+	return tool
 }
 
 // extractFrontmatter reads the first scanHeaderLines lines of a file in a
@@ -598,22 +628,32 @@ func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration
 	}
 }
 
-// toolEntry is a registered tool plus its exec anchor (F-13). On unix the
-// anchor is a file descriptor opened at registration: the child execs THAT
+// toolEntry pairs a registered tool with its exec anchor (F-13). On unix
+// the anchor is the descriptor opened at DISCOVERY: the child execs THAT
 // inode via /dev/fd, so a later swap of the path (relink, replace) cannot
-// change what runs — the strongest pin the (dev, inode) recheck can give.
-// inFlight/removed keep the fd alive until the last in-flight call is done.
+// change what runs.
+//
+// Concurrency: once published by AddTool, nothing mutates this entry. The
+// handler captures the tool RECORD BY VALUE and reads only fd (set before
+// publication) plus the atomic counters — the registry mutex protects
+// replace(), not handler reads, so there is no race. inFlight/removed keep
+// the fd alive until the last in-flight call is done.
 type toolEntry struct {
-	tool     discoveredTool
-	fd       *os.File // nil on platforms without fd exec, or if the anchor open failed
+	tool     discoveredTool // read only under the registry mutex (replace)
+	fd       *os.File       // immutable after publication; nil on windows / open failure
 	inFlight int32
 	removed  int32
 }
 
 func (e *toolEntry) acquire() { atomic.AddInt32(&e.inFlight, 1) }
 
-// release drops the in-flight count; the last releaser of a REMOVED entry
-// closes the anchor fd (replace() closes immediately when the entry is idle).
+// release drops the in-flight count. An fd is closed in exactly one of two
+// mutually exclusive ways: replace() closes it directly when it marks the
+// entry removed and the entry is IDLE (inFlight == 0 at that instant); the
+// last releaser of a BUSY removed entry closes it here (in-flight calls
+// keep the fd alive until they finish). Because entry fields are immutable
+// after publication, this touches only the atomics and the fd — no race
+// with concurrent handler reads.
 func (e *toolEntry) release() {
 	if atomic.AddInt32(&e.inFlight, -1) > 0 {
 		return
@@ -628,7 +668,36 @@ func (e *toolEntry) release() {
 // file: same (canonical) path and, where the platform provides one, same
 // (device, inode). The anchor-fd identity anchor, not the contents.
 func sameToolIdentity(a, b discoveredTool) bool {
-	return a.Path == b.Path && a.dev == b.dev && a.ino == b.ino
+	return a.Path == b.Path && a.id == b.id
+}
+
+// sameToolSet reports whether two discovered tool sets are identical, with
+// the anchor descriptors ignored (two equal sets carry different fds).
+func sameToolSet(a, b []discoveredTool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	az := make([]discoveredTool, len(a))
+	bz := make([]discoveredTool, len(b))
+	for i := range a {
+		az[i] = a[i]
+		az[i].fd = nil
+	}
+	for i := range b {
+		bz[i] = b[i]
+		bz[i].fd = nil
+	}
+	return reflect.DeepEqual(az, bz)
+}
+
+// closeToolFDs releases anchor descriptors owned by a discovery result that
+// is NOT handed to a registry entry (diagnostic modes, no-op reloads).
+func closeToolFDs(tools []discoveredTool) {
+	for i := range tools {
+		if tools[i].fd != nil {
+			tools[i].fd.Close()
+		}
+	}
 }
 
 // execSlot bounds how many tool subprocesses may run at once. It is a
@@ -670,7 +739,10 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if reflect.DeepEqual(r.current, tools) {
+	if sameToolSet(r.current, tools) {
+		// No-op reload: the incoming discovery fds are ours now and get
+		// nothing — release them (the registered entries keep their own).
+		closeToolFDs(tools)
 		return
 	}
 	r.current = tools
@@ -714,22 +786,32 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		description := registeredDescription(discoveredTool.Description, toolTimeout)
 
 		// Reuse the previous entry (and its anchor fd) when the tool's
-		// identity is unchanged; open a fresh anchor for a new one.
+		// identity is unchanged; a new entry takes over the fd opened at
+		// discovery. Reused entries keep their ORIGINAL fd (the anchored
+		// inode is unchanged, in place or not) — the fresh discovery fd is
+		// redundant and closed.
 		entry := kept[toolName]
 		if entry == nil {
-			entry = &toolEntry{tool: discoveredTool}
+			entry = &toolEntry{tool: discoveredTool, fd: discoveredTool.fd}
+			if entry.fd == nil {
+				// The discovery open failed (or the platform has no fd
+				// exec): retry at registration so a transient failure
+				// self-heals on the next reload.
+				entry.fd = openToolAnchor(discoveredTool.Path)
+			}
 		} else {
 			// Same identity, fresh record: refresh description/params/timeout
-			// so the entry never serves stale metadata (Path/dev/ino are
-			// unchanged by sameToolIdentity, in flight or not).
+			// (only ever read under the registry mutex) and release the
+			// redundant discovery fd.
 			entry.tool = discoveredTool
-		}
-		if entry.fd == nil {
-			// A previous anchor open failed (or the platform has no fd
-			// exec): retry, so a transient failure self-heals on reload.
-			entry.fd = openToolAnchor(discoveredTool)
+			if discoveredTool.fd != nil {
+				discoveredTool.fd.Close()
+			}
 		}
 
+		// The record is captured BY VALUE (tool entries are immutable once
+		// published): this call executes exactly the tool it was registered
+		// for, and entry contributes only its anchor fd plus the refcount.
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Pin the anchor fd for the whole call (F-13): replace() will not
 			// close it while in-flight, so /dev/fd always names the file that
@@ -758,7 +840,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 				}, nil
 			}
 			defer r.slot.release()
-			return executeTool(ctx, entry.tool, entry.fd, parsedArgs, toolTimeout, r.dirAbs)
+			return executeTool(ctx, discoveredTool, entry.fd, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
 		r.server.AddTool(&mcp.Tool{
@@ -969,6 +1051,15 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 		return fmt.Errorf("failed to watch directory: %w", err)
 	}
 
+	return runWatchLoop(ctx, watcher.Events, watcher.Errors, onChange)
+}
+
+// runWatchLoop consumes a fsnotify watcher's event and error channels,
+// invoking onChange (debounced) for file changes until ctx is cancelled. It
+// is factored out of watchChanges so tests can drive a deterministically
+// set-up watcher — e.g. applying a directory permission change only AFTER
+// the watch is known to be active.
+func runWatchLoop(ctx context.Context, events chan fsnotify.Event, errors chan error, onChange func()) error {
 	debounceTimer := time.NewTimer(watchDebounceDelay)
 	// NewTimer arms the clock immediately; disarm it right away so onChange
 	// only fires after a file event Resets the timer. (Go >= 1.23 Stop drains
@@ -981,7 +1072,7 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 		case <-ctx.Done():
 			return ctx.Err()
 
-		case event, ok := <-watcher.Events:
+		case event, ok := <-events:
 			if !ok {
 				return fmt.Errorf("watcher channel closed unexpectedly")
 			}
@@ -997,7 +1088,7 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 				debounceTimer.Reset(watchDebounceDelay)
 			}
 
-		case err, ok := <-watcher.Errors:
+		case err, ok := <-errors:
 			if !ok {
 				return fmt.Errorf("watcher error channel closed unexpectedly")
 			}
@@ -1235,6 +1326,9 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 	if err != nil {
 		return 1, fmt.Errorf("failed to discover tools: %w", err)
 	}
+	// Diagnostic mode: the discovery fds are never handed to a registry,
+	// so release them once the one-shot execution is done.
+	defer closeToolFDs(tools)
 
 	var tool discoveredTool
 	found := false
@@ -1267,9 +1361,10 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 		return 1, nil
 	}
 
-	// No registry anchor in diagnostic mode: the exec-time open recheck
-	// (F-13 layer 2) applies.
-	result, err := executeTool(context.Background(), tool, nil, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
+	// One-shot anchor: the discovery descriptor is the exec anchor, so the
+	// diagnostic gets the same /dev/fd pinning as the server (nil on
+	// windows → the exec-time open recheck applies there).
+	result, err := executeTool(context.Background(), tool, tool.fd, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
 	if err != nil {
 		return 1, fmt.Errorf("failed to run tool %q: %w", name, err)
 	}
@@ -1308,6 +1403,8 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 	}
 
 	printList := func(tools []discoveredTool) {
+		// The list is printed by value; the discovery fds are not retained.
+		defer closeToolFDs(tools)
 		if len(tools) == 0 {
 			fmt.Fprintf(stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
 		}

@@ -81,7 +81,7 @@ chmod 600 /etc/mcp-commands/token
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key-file /etc/mcp-commands/token
 ```
 
-Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`. One exception: when `--cors` is enabled, the CORS middleware sits *outside* the auth middleware and answers allowed-origin `OPTIONS` preflights without credentials (browsers cannot send an `Authorization` header on a preflight); every non-preflight request is still authenticated.
 
 ```bash
 curl -s http://localhost:8080 \
@@ -319,13 +319,13 @@ declaration of that name.
 
 **Trust boundary.** The `--scripts` directory is a *trusted* input: every script found in it runs with the server user's full privileges, and a symlink in the directory that resolves to a regular executable file is accepted (it registers under the symlink's name, pointing at the resolved target). Nothing here sandboxes script execution — keep the directory writable only by users you trust, and prefer loopback HTTP + `--api-key`/`--api-key-file` so that only authenticated clients can trigger executions.
 
-**Exec-time pinning.** A script that is *swapped* after discovery cannot redirect a running server's tool calls:
+**Exec pinning.** A tool call never re-resolves the script path: it execs the file the registry anchored, so a swap can never *silently* redirect a call:
 
-- **Server mode (unix):** at registration, mcp-commands opens each script (with `O_NOFOLLOW`) and keeps the file descriptor; a tool call execs *that opened inode* via `/dev/fd/3`. Renaming the file, replacing it, or re-pointing a symlink afterwards changes nothing — the discovered inode is what runs (or the call is refused if the descriptor is unusable). File descriptors are refcounted so an in-flight call is never starved: a tool whose file is unchanged keeps its descriptor across reloads, and a descriptor closes when the tool is swapped for a different file or removed (by the last in-flight call, if one is running).
-- **Server mode (Windows):** no `/dev/fd` exec; the path is re-verified at exec time (resolves, regular file, executable bit). A narrow window between check and exec remains — treat a concurrently writable scripts directory as unsafe there.
-- **`--call-tool` diagnostics:** the file is opened at exec time with `O_NOFOLLOW` and must still be the same regular, executable `(device, inode)` as at discovery; mismatches (relink, replacement) are refused with an explicit error.
+- **Server mode (unix):** at discovery, mcp-commands opens each script (with `O_NOFOLLOW`) and keeps the file descriptor; the record's `(device, inode)` is derived from that same descriptor, and a tool call execs *that opened inode* via `/dev/fd/3`. An in-flight call therefore always runs the inode the registry last registered — even if the path is renamed, replaced, or re-pointed in the meantime. Edits in place are picked up immediately (same inode, new content); a *replacement* is picked up on the next reload, where the watch re-discovers and swaps the anchor to the new file. File descriptors are refcounted so an in-flight call is never starved: a tool whose identity is unchanged reuses its descriptor across reloads, and a descriptor closes when the tool is swapped for a different file or removed (by the last in-flight call, if one is running).
+- **`--call-tool` diagnostics:** the same discovery-time descriptor is the exec anchor where available, so the diagnostic mode gets the same `/dev/fd` pinning; where there is none (Windows, failed open) the path is re-verified at exec time instead.
+- **Windows:** no `/dev/fd` exec; the path is re-verified at exec time (resolves, regular file, executable bit). A narrow window between check and exec remains — treat a concurrently writable scripts directory as unsafe there.
 
-The `(device, inode)` identity is the anchor where descriptors are not available; on filesystems that aggressively reuse inode numbers after deletion (e.g. tmpfs), a delete-and-recreate *at the same path* can in principle match the recorded identity in diagnostic mode — the registration-time descriptor above is what closes that gap for the server.
+The `(device, inode)` identity is the anchor where descriptors are not available; on filesystems that aggressively reuse inode numbers after deletion (e.g. tmpfs), a delete-and-recreate *at the same path* can in principle match the recorded identity in the re-verification path — the discovery-time descriptor above is what closes that gap.
 
 ## AI Usage
 
