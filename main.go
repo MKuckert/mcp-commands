@@ -41,6 +41,7 @@ const (
 	maxHTTPBodyBytes          = 10 << 20 // 10 MiB request-body cap
 	httpReadHeaderTimeout     = 5 * time.Second
 	httpIdleTimeout           = 2 * time.Minute
+	execWaitDelay             = 5 * time.Second // post-deadline pipe-close backstop for tool subprocesses
 	scanHeaderLines           = 30
 	scanDescriptionPrefix     = "Description:"
 	scanParamPrefix           = "Param:"
@@ -943,8 +944,10 @@ func validateRequiredParams(args map[string]any, params []paramSpec) error {
 
 // executeTool runs the script at scriptPath as a subprocess in the specified
 // working directory. It accepts pre-parsed arguments as a map, converts them to
-// CLI flags, and binds the context to a timeout to prevent hanging tools.
-// The output is captured, combined, and returned as an MCP CallToolResult.
+// CLI flags, and binds the context to a timeout to prevent hanging tools. On
+// cancellation (deadline or client abort) the whole tool process group is
+// killed, so shell-script grandchildren die with the budget (F-7). The output
+// is captured, combined, and returned as an MCP CallToolResult.
 func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
@@ -966,6 +969,11 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
+
+	// A deadline is a budget for the whole process tree, not just the direct
+	// child: shell scripts spawn grandchildren, and a surviving descendant
+	// can also hold the pipes open past the kill (F-7).
+	applyProcessGroup(cmd, execWaitDelay)
 
 	// Bounded capture: a tool printing gigabytes costs O(1 MiB) per stream,
 	// not O(output size); combineToolOutput applies the final cap.

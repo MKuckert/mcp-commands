@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -3077,6 +3079,45 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 	}
 	if !utf8.ValidString(text.Text) {
 		t.Fatal("result text is not valid UTF-8")
+	}
+}
+
+// TestExecuteToolKillsProcessGroup covers F-7: the script's background
+// grandchild (orphaned when the direct child exits) must die with the
+// deadline, not keep running. The marker makes pgrep unambiguous.
+func TestExecuteToolKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are a Unix concept")
+	}
+	tmpDir := t.TempDir()
+	marker := fmt.Sprintf("mcp-commands-f7-orphan-%d-%d", os.Getpid(), time.Now().UnixNano())
+	// The grandchild is a uniquely NAMED script: its full command line
+	// ("bash ./<marker>.sh") carries the marker, so pgrep -f finds exactly it.
+	scriptPath := filepath.Join(tmpDir, "spawns.sh")
+	body := "#!/bin/bash\n./" + marker + ".sh &\nwait\n"
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, marker+".sh"), []byte("#!/bin/bash\nsleep 300\n"), 0o755); err != nil {
+		t.Fatalf("failed to create grandchild script: %v", err)
+	}
+
+	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, time.Second, tmpDir)
+	if err != nil {
+		t.Fatalf("executeTool returned unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected a timeout IsError result, got success")
+	}
+	if text, _ := result.Content[0].(*mcp.TextContent); !strings.Contains(text.Text, "timed out") {
+		t.Fatalf("expected a timeout message, got %q", text.Text)
+	}
+
+	// Give the kill a moment to land, then the orphan must be gone.
+	time.Sleep(500 * time.Millisecond)
+	out, err := exec.Command("pgrep", "-f", marker).CombinedOutput()
+	if err == nil && strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("grandchild survived the deadline: %s", out)
 	}
 }
 
