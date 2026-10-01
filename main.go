@@ -718,6 +718,11 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		entry := kept[toolName]
 		if entry == nil {
 			entry = &toolEntry{tool: discoveredTool}
+		} else {
+			// Same identity, fresh record: refresh description/params/timeout
+			// so the entry never serves stale metadata (Path/dev/ino are
+			// unchanged by sameToolIdentity, in flight or not).
+			entry.tool = discoveredTool
 		}
 		if entry.fd == nil {
 			// A previous anchor open failed (or the platform has no fd
