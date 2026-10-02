@@ -53,7 +53,7 @@ const (
 	listIndent                = "     " // included in the wrap width budget
 )
 
-var serverVersion = "0.8.1"
+var serverVersion = "0.8.2"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
