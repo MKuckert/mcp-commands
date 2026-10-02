@@ -15,6 +15,7 @@ import (
 )
 
 func TestArgumentsToCLIArgsValidatesKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		args    map[string]any
@@ -71,6 +72,7 @@ func TestArgumentsToCLIArgsValidatesKeys(t *testing.T) {
 }
 
 func TestArgumentsToCLIArgsBooleanAndNilHandling(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		args     map[string]any
@@ -154,11 +156,10 @@ func TestArgumentsToCLIArgsBooleanAndNilHandling(t *testing.T) {
 }
 
 func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
+	t.Parallel()
 	scriptDir := t.TempDir()
 	scriptPath := filepath.Join(scriptDir, "noop.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho noop\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho noop\n")
 
 	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
 	if err != nil {
@@ -173,6 +174,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 }
 
 func TestExecuteToolWithWorkingDirectory(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory that will be the working directory
 	workDir := t.TempDir()
 
@@ -212,6 +214,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 }
 
 func TestCombineToolOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		stdout         []byte
@@ -273,6 +276,7 @@ func TestCombineToolOutput(t *testing.T) {
 }
 
 func TestValidateRequiredParams(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		args      map[string]any
@@ -343,6 +347,7 @@ func TestValidateRequiredParams(t *testing.T) {
 }
 
 func TestBoundedWriter(t *testing.T) {
+	t.Parallel()
 	w := newBoundedWriter(10)
 	// 7 bytes fit, the next 8-byte write overflows the limit.
 	n1, err := w.Write([]byte("0123456"))
@@ -371,6 +376,7 @@ func TestBoundedWriter(t *testing.T) {
 }
 
 func TestCombineToolOutputTruncation(t *testing.T) {
+	t.Parallel()
 	// The 1 MiB branch of combineToolOutput was previously untested.
 	suffixLen := len(fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes))
 
@@ -419,6 +425,7 @@ func TestCombineToolOutputTruncation(t *testing.T) {
 }
 
 func TestExecuteToolHugeStdout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "spew.sh")
 	// 5 MiB of 'a' — well past the 1 MiB cap, cheap to generate.

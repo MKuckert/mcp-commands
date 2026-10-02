@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestToolsEqual(t *testing.T) {
+	t.Parallel()
 	timeout5 := 5 * time.Minute
 	timeout0 := time.Duration(0)
 	tests := []struct {
@@ -46,15 +48,12 @@ func TestToolsEqual(t *testing.T) {
 // still reloads.
 
 func TestResolvedTimeoutViaRegistry(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	sleepPath := filepath.Join(tmpDir, "sleep5.sh")
-	if err := os.WriteFile(sleepPath, []byte("#!/bin/bash\nexec sleep 5\n"), 0o755); err != nil {
-		t.Fatalf("failed to create sleep script: %v", err)
-	}
+	writeScript(t, sleepPath, "#!/bin/bash\nexec sleep 5\n")
 	fastPath := filepath.Join(tmpDir, "fast.sh")
-	if err := os.WriteFile(fastPath, []byte("#!/bin/bash\necho fast\n"), 0o755); err != nil {
-		t.Fatalf("failed to create fast script: %v", err)
-	}
+	writeScript(t, fastPath, "#!/bin/bash\necho fast\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, tmpDir, 2*time.Second, 16)
@@ -176,11 +175,10 @@ func TestResolvedTimeoutViaRegistry(t *testing.T) {
 }
 
 func TestRequiredParamValidationViaRegistry(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "convert.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho done\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho done\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, tmpDir, defaultToolTimeout, 16)
@@ -224,6 +222,7 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 }
 
 func TestRegisteredDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		desc    string
 		timeout time.Duration
@@ -243,6 +242,7 @@ func TestRegisteredDescription(t *testing.T) {
 }
 
 func TestExecSlot(t *testing.T) {
+	t.Parallel()
 	s := newExecSlot(2)
 	if !s.tryAcquire() || !s.tryAcquire() {
 		t.Fatal("expected two acquisitions to succeed with limit 2")
@@ -261,11 +261,10 @@ func TestExecSlot(t *testing.T) {
 }
 
 func TestToolCapacityViaRegistry(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	slowPath := filepath.Join(tmpDir, "slow.sh")
-	if err := os.WriteFile(slowPath, []byte("#!/bin/bash\nsleep 3\n"), 0o755); err != nil {
-		t.Fatalf("failed to create slow script: %v", err)
-	}
+	writeScript(t, slowPath, "#!/bin/bash\nsleep 3\n")
 	noTimeout := time.Duration(0)
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
@@ -334,5 +333,37 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("first call did not finish")
+	}
+}
+
+// TestRegistryReplaceConcurrency: the registry mutex must keep names/current
+// consistent under concurrent replace() calls (the watcher and a test may
+// both race the registry in future configurations).
+func TestRegistryReplaceConcurrency(t *testing.T) {
+	t.Parallel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				var tools []discoveredTool
+				for k := 0; k < 50; k++ {
+					tools = append(tools, discoveredTool{Name: fmt.Sprintf("tool%d", k), Description: "d"})
+				}
+				registry.replace(tools)
+			}
+		}()
+	}
+	wg.Wait()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.names) != 50 {
+		t.Fatalf("registry has %d names after concurrent replaces, want 50", len(registry.names))
+	}
+	if len(registry.current) != 50 {
+		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
 	}
 }

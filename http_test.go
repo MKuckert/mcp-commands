@@ -104,6 +104,7 @@ func (c *captureWriter) String() string {
 // local envs — no shared state — so they can run in parallel.
 
 func TestBearerAuthMiddleware(t *testing.T) {
+	t.Parallel()
 	const token = "tok"
 
 	tests := []struct {
@@ -199,6 +200,7 @@ func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
 }
 
 func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
 	defer httpServer.Close()
@@ -210,6 +212,7 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 }
 
 func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", corsConfig{}))
 	defer httpServer.Close()
@@ -231,6 +234,7 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 // the multi-GB-chunked-body exhaustion vector from the review.
 
 func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
 	defer httpServer.Close()
@@ -356,6 +360,7 @@ func TestResolveCORS(t *testing.T) {
 }
 
 func TestCORSHandlerPreflight(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		requestHdr string // Access-Control-Request-Headers; "-" means omit
@@ -412,6 +417,7 @@ func TestCORSHandlerPreflight(t *testing.T) {
 }
 
 func TestCORSHandlerNonPreflight(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		cfg         corsConfig
@@ -470,6 +476,7 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 }
 
 func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
@@ -496,6 +503,7 @@ func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
 }
 
 func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
@@ -528,6 +536,7 @@ func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
 }
 
 func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
@@ -574,6 +583,7 @@ func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
 }
 
 func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
+	t.Parallel()
 	server := newTestMCPServer(t)
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
 	defer httpServer.Close()
@@ -601,6 +611,7 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 // change must invalidate the skip, and an unchanged set must compare equal.
 
 func TestHTTPSecurityPolicy(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		host        string
 		apiKey      string

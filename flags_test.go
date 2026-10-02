@@ -9,6 +9,7 @@ import (
 )
 
 func TestParseCLI(t *testing.T) {
+	t.Parallel()
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)

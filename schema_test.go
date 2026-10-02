@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseToolArgumentsRejectsDoubleEncodedJSON(t *testing.T) {
+	t.Parallel()
 	// This test explicitly documents that the fallback double-decode has been removed.
 	// parseToolArguments must reject double-encoded JSON strings and only accept
 	// proper JSON objects (or empty/null).
@@ -43,6 +44,7 @@ func TestParseToolArgumentsRejectsDoubleEncodedJSON(t *testing.T) {
 }
 
 func TestBuildInputSchema(t *testing.T) {
+	t.Parallel()
 	t.Run("zero_params", func(t *testing.T) {
 		schema := buildInputSchema([]paramSpec{})
 

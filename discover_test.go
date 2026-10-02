@@ -12,6 +12,7 @@ import (
 )
 
 func TestDiscoverTools(t *testing.T) {
+	t.Parallel()
 	t.Run("discovers_executable_scripts", func(t *testing.T) {
 
 		// Create a temporary directory with test scripts
@@ -235,6 +236,7 @@ echo "Processing"
 }
 
 func TestExtractFrontmatterTimeout(t *testing.T) {
+	t.Parallel()
 	t.Run("absent", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: no timeout\necho hi\n")
@@ -354,6 +356,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 }
 
 func TestDiscoverToolsExtractsTimeout(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: sleeper\n# Timeout: 1m\necho hi\n")
 
@@ -370,6 +373,7 @@ func TestDiscoverToolsExtractsTimeout(t *testing.T) {
 }
 
 func TestExtractParams(t *testing.T) {
+	t.Parallel()
 	t.Run("happy_path_all_types", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		scriptPath := filepath.Join(tmpDir, "test.sh")

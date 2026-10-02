@@ -17,6 +17,7 @@ import (
 )
 
 func TestRunHTTPEndToEnd(t *testing.T) {
+	t.Parallel()
 	t.Run("one_tool_authenticated", func(t *testing.T) {
 		dir := t.TempDir()
 		scripts := t.TempDir()
@@ -125,6 +126,27 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 // bearerTransport injects the Authorization header on every request.
 type bearerTransport struct{ token string }
 
+// writeScript stages an executable script file in the test's tree.
+func writeScript(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to write script %s: %v", path, err)
+	}
+}
+
+// waitFor polls cond (bounded, no fixed sleeps at call sites) until true and
+// fails the test with msg if the timeout elapses first.
+func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s: %s", timeout, msg)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
 	t.Helper()
 	env := prodLiveEnv()
@@ -159,6 +181,7 @@ func waitForHTTP(t *testing.T, url string) bool {
 }
 
 func TestResolveToolPaths(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(tmpDir, tmpDir)
@@ -178,12 +201,13 @@ func TestResolveToolPaths(t *testing.T) {
 }
 
 func TestRunDiagnosticListTools(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: defaultToolTimeout})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -198,7 +222,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		missing := filepath.Join(tmpDir, "no-such-scripts")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: defaultToolTimeout})
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
@@ -212,11 +236,9 @@ func TestRunDiagnosticListTools(t *testing.T) {
 
 	t.Run("prints_list_and_ignored_flags_notice", func(t *testing.T) {
 		scriptPath := filepath.Join(tmpDir, "alpha.sh")
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha tool\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to create script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha tool\necho alpha\n")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--port"}})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: defaultToolTimeout, ignoredFlags: []string{"--host", "--port"}})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -235,9 +257,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("live_mode_reprints_on_change", func(t *testing.T) {
 		scriptsDir := t.TempDir()
 		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to create script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 		var clears atomic.Int32
 		var cancel context.CancelFunc
@@ -252,7 +272,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		}
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
+			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: defaultToolTimeout})
 		}()
 
 		// Initial print.
@@ -264,9 +284,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			t.Fatalf("initial print missing: %q", stdout.String())
 		}
 
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta\n"), 0o755); err != nil {
-			t.Fatalf("failed to update script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: beta updated\necho beta\n")
 
 		deadline = time.Now().Add(2 * time.Second)
 		for !strings.Contains(stdout.String(), "beta updated (timeout: 5m0s)") && time.Now().Before(deadline) {
@@ -297,9 +315,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("live_mode_stays_quiet_without_changes", func(t *testing.T) {
 		scriptsDir := t.TempDir()
 		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to create script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 		var clears atomic.Int32
 		var cancel context.CancelFunc
@@ -314,7 +330,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		}
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
+			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: defaultToolTimeout})
 		}()
 
 		// Initial print.
@@ -351,6 +367,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 }
 
 func TestRunCallTool(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptsDir := filepath.Join(tmpDir, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
@@ -509,19 +526,18 @@ func TestRunCallTool(t *testing.T) {
 }
 
 func TestRunDiagnosticCallTool(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptsDir := filepath.Join(tmpDir, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("failed to create scripts dir: %v", err)
 	}
 	scriptPath := filepath.Join(scriptsDir, "ok.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho ran\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho ran\n")
 
 	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, params: "{}", timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, params: "{}", timeout: defaultToolTimeout})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
@@ -535,7 +551,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--watch"}})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: defaultToolTimeout, ignoredFlags: []string{"--host", "--watch"}})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}
@@ -551,7 +567,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, params: "{}", timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, params: "{}", timeout: defaultToolTimeout})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}

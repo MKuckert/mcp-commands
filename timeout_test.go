@@ -18,6 +18,7 @@ func writeTimeoutScript(t *testing.T, dir, body string) string {
 }
 
 func TestParseTimeoutDuration(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		raw          string
@@ -79,6 +80,7 @@ func TestParseTimeoutDuration(t *testing.T) {
 }
 
 func TestResolveTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		timeoutFlag string
@@ -118,6 +120,7 @@ func TestResolveTimeout(t *testing.T) {
 }
 
 func TestResolveToolTimeout(t *testing.T) {
+	t.Parallel()
 	perTool := 30 * time.Second
 	none := time.Duration(0)
 	tests := []struct {

@@ -7,6 +7,7 @@ import (
 )
 
 func TestListParamDecl(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		param paramSpec
 		want  string
@@ -24,6 +25,7 @@ func TestListParamDecl(t *testing.T) {
 }
 
 func TestToolListSignature(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		params []paramSpec
@@ -62,6 +64,7 @@ func TestToolListSignature(t *testing.T) {
 }
 
 func TestWordWrap(t *testing.T) {
+	t.Parallel()
 	indent := "     "
 
 	t.Run("short_text_single_line", func(t *testing.T) {
@@ -171,6 +174,7 @@ func TestWordWrap(t *testing.T) {
 }
 
 func TestRenderToolList(t *testing.T) {
+	t.Parallel()
 	t.Run("no_params_short_description", func(t *testing.T) {
 		none := time.Duration(0)
 		tools := []discoveredTool{

@@ -15,11 +15,10 @@ import (
 )
 
 func TestWatchTools(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
@@ -57,9 +56,7 @@ func TestWatchTools(t *testing.T) {
 	var lastCount int
 	updated := false
 	for i := 0; i < 10 && !updated; i++ {
-		if err := os.WriteFile(addedScriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-			t.Fatalf("failed to create second script: %v", err)
-		}
+		writeScript(t, addedScriptPath, "#!/bin/bash\necho beta\n")
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			res, err := clientSession.ListTools(ctx, nil)
@@ -94,11 +91,10 @@ func TestWatchTools(t *testing.T) {
 }
 
 func TestWatchToolsDetectsContentChanges(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
@@ -133,9 +129,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: beta updated\necho beta now\n"), 0o755); err != nil {
-			t.Fatalf("failed to update script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: beta updated\necho beta now\n")
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			res, err := clientSession.ListTools(ctx, nil)
@@ -170,11 +164,10 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 }
 
 func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
@@ -223,9 +216,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	// that silence is the assertion.
 	noopSawChange := false
 	for i := 0; i < 10; i++ {
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to touch script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 		time.Sleep(600 * time.Millisecond) // several debounce windows
 		if changed.Load() != baseline {
 			noopSawChange = true
@@ -241,9 +232,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 
 	// A real frontmatter change must reload.
 	for i := 0; i < 10; i++ {
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha v2\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to update script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha v2\necho alpha\n")
 		deadline := time.Now().Add(5 * time.Second)
 		for changed.Load() == baseline && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
@@ -268,11 +257,10 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 }
 
 func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", 2*time.Second, 16)
@@ -308,9 +296,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Timeout: 30s\necho alpha\n"), 0o755); err != nil {
-			t.Fatalf("failed to update script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\n# Timeout: 30s\necho alpha\n")
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			res, err := clientSession.ListTools(ctx, nil)
@@ -345,11 +331,10 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 }
 
 func TestWatchChanges(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -365,9 +350,7 @@ func TestWatchChanges(t *testing.T) {
 	// watcher registration (a lost event is legal for fsnotify), and only
 	// writes landing after Add is guaranteed to produce a debounced fire.
 	for i := 0; i < 40; i++ {
-		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-			t.Fatalf("failed to modify script: %v", err)
-		}
+		writeScript(t, scriptPath, "#!/bin/bash\necho beta\n")
 		deadline := time.Now().Add(2 * time.Second)
 		for calls.Load() == 0 && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
@@ -396,6 +379,7 @@ func TestWatchChanges(t *testing.T) {
 // arms the clock immediately, so the first debounce window elapsed without
 // any event).
 func TestWatchChangesNoSpuriousFire(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -428,6 +412,7 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 // must keep running when the scripts directory disappears mid-watch.
 
 func TestWatchToolsWatchedDirDeleted(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
@@ -498,11 +483,10 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 // onChange, like create/write/remove do.
 
 func TestWatchChangesRenameTriggersChange(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "alpha.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -546,6 +530,7 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 // loop — and the loop must keep processing real events afterwards.
 
 func TestWatchChangesPermissionError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -604,15 +589,12 @@ func TestWatchChangesPermissionError(t *testing.T) {
 // its tool from the registry (RemoveTools), leaving the rest intact.
 
 func TestWatchToolsRemovesDeletedTool(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	alphaPath := filepath.Join(tmpDir, "alpha.sh")
 	betaPath := filepath.Join(tmpDir, "beta.sh")
-	if err := os.WriteFile(alphaPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
-		t.Fatalf("failed to create alpha: %v", err)
-	}
-	if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-		t.Fatalf("failed to create beta: %v", err)
-	}
+	writeScript(t, alphaPath, "#!/bin/bash\necho alpha\n")
+	writeScript(t, betaPath, "#!/bin/bash\necho beta\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
@@ -654,9 +636,7 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 	for i := 0; i < 10 && !removed; i++ {
 		if err := os.Remove(betaPath); err != nil {
 			// First attempt: the file may not exist yet for the watcher; recreate.
-			if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
-				t.Fatalf("failed to recreate beta: %v", err)
-			}
+			writeScript(t, betaPath, "#!/bin/bash\necho beta\n")
 			if err := os.Remove(betaPath); err != nil {
 				t.Fatalf("failed to delete beta: %v", err)
 			}
