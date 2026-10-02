@@ -61,6 +61,14 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 			continue
 		}
 
+		// Only regular files are tools. A symlink to a directory fails the
+		// entry.IsDir() check above (that check does not follow links), but
+		// directories carry execute bits, so without this it would be
+		// registered as a tool. The README promises regular files only.
+		if fileInfo.IsDir() {
+			continue
+		}
+
 		// Check executable flag
 		if fileInfo.Mode()&0111 == 0 {
 			continue
@@ -94,9 +102,10 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 // single pass and collects the tool's frontmatter: the first Description:
 // line (first occurrence wins; populates the MCP tool description), all
 // Param: annotations (invalid ones log a stderr warning and are skipped),
-// and the first Timeout: value (first occurrence wins; nil when undeclared
-// so the global applies, &0 for NONE/0; an invalid value logs a stderr
-// warning and yields nil so the global applies). An unreadable file yields
+// and the first Timeout: value. First-occurrence wins: `timeoutSeen` is set
+// on the first Timeout: line even when it is invalid (which logs a stderr
+// warning and yields nil, so the global applies), so later valid values are
+// ignored. nil when undeclared, &0 for NONE/0. An unreadable file yields
 // zero values.
 func extractFrontmatter(filePath string, stderr io.Writer) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)

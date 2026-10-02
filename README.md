@@ -242,7 +242,7 @@ echo "Hello, $NAME!"
 
 #### Script Frontmatter
 
-The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are silently ignored; every valid `Param:` line is collected):
+The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are ignored — invalid ones warn; every valid `Param:` line is collected):
 
 - `Description: <text>` — presented to the LLM as the tool description.
 - `Param: <name> <type> <required|optional> "<description>"` — declares a typed tool parameter (`string`, `number`, or `boolean`; the description must be quoted). One line per parameter; invalid lines log a warning to stderr and are skipped. The name must match `^[a-zA-Z][a-zA-Z0-9_-]*$`.
@@ -359,7 +359,7 @@ declaration of that name.
 ## Troubleshooting
 
 - **Script not discovered.** A file becomes a tool only if it is a regular file (or a symlink resolving to one) with the executable bit set — `chmod +x <script>`. Subdirectories and non-executable files are skipped silently, so a missing tool usually means a missing exec bit. Verify what the server registers with `--list-tools` (below).
-- **Frontmatter warnings on stderr.** An invalid `Param:` or `Timeout:` line in a script's first 30 lines is skipped with a warning on stderr; for `Description:` and `Timeout:` the first valid occurrence wins. Discovery and hot reload are not broken.
+- **Frontmatter warnings on stderr.** An invalid `Param:` or `Timeout:` line in a script's first 30 lines is skipped with a warning on stderr. For `Description:` and `Timeout:` the *first occurrence* wins — if the first `Timeout:` is invalid it warns and the global timeout applies, and any later `Timeout:` lines (even valid ones) are ignored; put a single, valid `Timeout:` line first. Discovery and hot reload are not broken.
 - **Inspect what the server registered.** `mcp-commands --dir <dir> --scripts <scripts> --list-tools` prints the exact names, signatures, descriptions, and timeout suffixes the LLM sees, without starting a server.
 - **Duplicate tool names.** The tool name is the filename minus its extension, so `a.sh` and `a.py` both register as `a`. The first file in directory order wins and a warning is printed to stderr for each shadowed duplicate — rename one of the files to expose both.
 

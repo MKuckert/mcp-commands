@@ -231,3 +231,27 @@ func TestParseCLI(t *testing.T) {
 		})
 	}
 }
+
+// TestParseCLIDiagnosticIgnoresInvalidServerValidation: diagnostic modes
+// document their server flags as ignored, so an invalid CORS flag/env var
+// (and an invalid --max-concurrent) must not block --list-tools/--call-tool.
+func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
+	t.Setenv(allowedOriginsEnvVar, "not-a-url")
+	t.Setenv(allowAllOriginsEnvVar, "banana")
+
+	cfg, err := parseCLI([]string{"--dir", "d", "--scripts", "s", "--list-tools", "--max-concurrent", "-1"})
+	if err != nil {
+		t.Fatalf("diagnostic mode must not run server-only CORS/concurrency validation: %v", err)
+	}
+	if cfg.mode != modeListTools {
+		t.Errorf("mode = %v, want list-tools", cfg.mode)
+	}
+	if len(cfg.diagnostic.ignoredFlags) == 0 {
+		t.Errorf("ignored-flags notice empty — server flags were not reported")
+	}
+
+	// The same inputs in server mode must still fail-fast.
+	if _, err := parseCLI([]string{"--dir", "d", "--scripts", "s"}); err == nil {
+		t.Errorf("server mode with invalid CORS env must fail, got nil")
+	}
+}

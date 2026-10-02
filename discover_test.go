@@ -551,3 +551,31 @@ echo "Hello"
 		}
 	})
 }
+
+// TestDiscoverSymlinkToDirectory: a symlink whose target is a directory
+// passes the entry-level IsDir check (it does not follow links) and
+// directories carry execute bits, so it must be rejected on its resolved
+// target — discovery registers regular files only.
+func TestDiscoverSymlinkToDirectory(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	toolDir := filepath.Join(tmpDir, "adir")
+	if err := os.Mkdir(toolDir, 0o755); err != nil {
+		t.Fatalf("failed to create directory: %v", err)
+	}
+	writeScript(t, filepath.Join(tmpDir, "real.sh"), "#!/bin/bash\necho real\n")
+	if err := os.Symlink(toolDir, filepath.Join(tmpDir, "adir_link.sh")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	tools, err := discoverTools(tmpDir, io.Discard)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	var names []string
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	if len(tools) != 1 || tools[0].Name != "real" {
+		t.Fatalf("discovered %v, want [real] only — the symlink-to-directory must not register", names)
+	}
+}

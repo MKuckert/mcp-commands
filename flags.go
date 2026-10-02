@@ -158,20 +158,9 @@ func parseCLI(args []string) (cliConfig, error) {
 		}
 	})
 
-	var err error
-	cfg.server.cors, err = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
-	if err != nil {
-		return cliConfig{}, err
-	}
-
-	// Resolved and validated here (all modes, fail-fast); run only consumes it.
-	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
-	if err != nil {
-		return cliConfig{}, err
-	}
-	cfg.server.timeout = timeout
-	cfg.diagnostic.timeout = timeout
-
+	// The mode is resolved first: server-only validation (CORS, max
+	// concurrent) must not block a diagnostic invocation whose server
+	// flags are documented and reported as ignored.
 	callToolActive := *callToolFlag != "" || callToolSet
 	cfg.diagnostic.callToolSet = callToolSet
 	cfg.mode = modeServer
@@ -183,9 +172,15 @@ func parseCLI(args []string) (cliConfig, error) {
 	if cfg.diagnostic.listTools && callToolActive {
 		return cliConfig{}, errors.New("--list-tools and --call-tool are mutually exclusive")
 	}
-	if cfg.server.maxConcurrent < 0 {
-		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.server.maxConcurrent)
+
+	// Shared by every mode (fail-fast); run only consumes the resolved value.
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	if err != nil {
+		return cliConfig{}, err
 	}
+	cfg.server.timeout = timeout
+	cfg.diagnostic.timeout = timeout
+
 	if cfg.mode != modeServer {
 		// The server-mode flags are always ignored in diagnostic modes
 		// (presence is visit-tracked, so default-valued forms like
@@ -203,10 +198,17 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cfg, nil
 	}
 
-	// HTTP mode only: in stdio mode the auth sources are documented as
-	// ignored, so an unreadable --api-key-file must not block a stdio
-	// server from starting. (Diagnostic modes ignore the key flags and
-	// report them via the ignored-flags notice.)
+	// HTTP mode only.
+	var corsErr error
+	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+	if corsErr != nil {
+		return cliConfig{}, corsErr
+	}
+	if cfg.server.maxConcurrent < 0 {
+		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.server.maxConcurrent)
+	}
+	// In stdio mode the auth sources are documented as ignored, so an
+	// unreadable --api-key-file must not block a stdio server from starting.
 	if cfg.server.port > 0 {
 		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
 	}
