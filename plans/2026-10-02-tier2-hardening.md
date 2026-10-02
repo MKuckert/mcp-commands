@@ -7,7 +7,7 @@ Status: **In progress** — tick boxes as units land.
 
 ## Scope
 
-- [ ] F-7: process-group kill — `Setpgid` + kill `−pid` on deadline + `cmd.WaitDelay` backstop, so shell-script tools can't leave grandchildren running past their budget
+- [x] F-7: process-group kill — `Setpgid` + kill `−pid` on deadline + `cmd.WaitDelay` backstop, so shell-script tools can't leave grandchildren running past their budget
 - [ ] F-8: deprecate `--api-key <value>` (world-readable via `/proc/<pid>/cmdline`): new `--api-key-file` flag; startup warning when the flag is the token source
 - [ ] F-9: fsnotify failure-mode tests — watched dir deleted, rename, permission error, tool removal from the registry
 - [ ] F-10: `main`/`run` coverage — `parseCLI` extraction + one HTTP end-to-end test against `run`
@@ -26,7 +26,8 @@ Status: **In progress** — tick boxes as units land.
 5. **F-11**: registry tracks `current []discoveredTool`; new `replaceIfChanged` compares element-wise (timeout pointer deref, params `DeepEqual`) and skips the remove/re-add entirely when identical; `watchTools`' debounced onChange uses it. The "re-arm debounce per event" idea from the finding is *not* done: the fixed 100 ms window already collapses bursts, and re-arming per event can starve the reload indefinitely under a continuous write stream — net negative.
 6. **F-12**: no code change — verified already landed with F-2 (Tier 1, 459a9ba): `combineToolOutput` backs off to a rune boundary, `TestCombineToolOutputTruncation` asserts valid UTF-8 at a split boundary.
 7. **F-23**: `Makefile` `VERSION ?= 0.2.0` → `0.8.1` and `buildall` added to `.PHONY`; `serverVersion` constant → `0.8.1` (this is the actual version bump for this branch; goreleaser uses the hardcoded constant, so release and `make` builds agree).
-8. `-race` cannot run in this sandbox (ThreadSanitizer unsupported) — race coverage by inspection, same convention as Tier 1.
+8. **F-7 test caveat**: this sandbox's seccomp profile silently swallows `kill(2)` (even single-target SIGKILL) toward processes Go `exec`'d — group kills from a Go caller are untestable here, while the same calls from shell processes work. The test therefore probes delivery first (`assertGroupKillDelivered`) and **skips with a visible reason** in such sandboxes; it runs for real on ordinary systems/CI. Code unchanged: `Setpgid` + `kill(−pid)` + `WaitDelay` is the standard pattern.
+9. `-race` cannot run in this sandbox (ThreadSanitizer unsupported) — race coverage by inspection, same convention as Tier 1.
 
 ## Verification
 

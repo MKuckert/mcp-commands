@@ -41,6 +41,7 @@ const (
 	maxHTTPBodyBytes          = 10 << 20 // 10 MiB request-body cap
 	httpReadHeaderTimeout     = 5 * time.Second
 	httpIdleTimeout           = 2 * time.Minute
+	toolKillWaitDelay         = 5 * time.Second // Wait backstop after a deadline kill
 	scanHeaderLines           = 30
 	scanDescriptionPrefix     = "Description:"
 	scanParamPrefix           = "Param:"
@@ -966,6 +967,11 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
+	armToolProcess(cmd)
+	// Backstop: a grandchild that detaches the process group (setsid) and
+	// keeps an output pipe open would otherwise block Wait forever; after the
+	// delay the pipes are closed and Wait returns.
+	cmd.WaitDelay = toolKillWaitDelay
 
 	// Bounded capture: a tool printing gigabytes costs O(1 MiB) per stream,
 	// not O(output size); combineToolOutput applies the final cap.
@@ -977,6 +983,13 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// CommandContext signals only the direct child; the whole process group
+	// (script plus grandchildren — the canonical shell-tool shape) must die
+	// with the deadline, or the 5-minute budget is not a real budget.
+	go func() {
+		<-execCtx.Done()
+		_ = killToolProcess(cmd)
+	}()
 
 	waitErr := cmd.Wait()
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
