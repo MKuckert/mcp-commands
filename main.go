@@ -1064,7 +1064,7 @@ var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
+var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
@@ -1219,14 +1219,35 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 	return 0
 }
 
-// resolveAPIKey returns the token from the flag value if non-empty,
-// otherwise from MCP_COMMANDS_API_KEY. Returns "" if neither is set.
-func resolveAPIKey(flagValue string) string {
+// resolveAPIKey resolves the HTTP auth token with precedence
+// --api-key > --api-key-file > MCP_COMMANDS_API_KEY, returning the token
+// ("" when none is configured), whether the value came from the --api-key
+// flag (so the caller can print the visibility deprecation warning), and an
+// error when a --api-key-file was given but unreadable. File content is
+// TrimSpace'd so hand-written files with a trailing newline work.
+func resolveAPIKey(flagValue, fileValue string) (token string, fromFlag bool, err error) {
 	if flagValue != "" {
-		return flagValue
+		return flagValue, true, nil
 	}
-	return os.Getenv(apiKeyEnvVar)
+	if fileValue != "" {
+		data, err := os.ReadFile(fileValue)
+		if err != nil {
+			return "", false, fmt.Errorf("cannot read --api-key-file: %w", err)
+		}
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return token, false, nil
+		}
+	}
+	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
+		return envToken, false, nil
+	}
+	return "", false, nil
 }
+
+// apiKeyFlagWarning is the startup warning printed when the token comes from
+// --api-key <value>: command-line arguments are world-readable via
+// /proc/<pid>/cmdline for the server's entire lifetime.
+const apiKeyFlagWarning = "Warning: --api-key <value> is visible to other local users via /proc/<pid>/cmdline for the server's lifetime; prefer --api-key-file or " + apiKeyEnvVar
 
 // isLoopbackHost reports whether host binds only to the local machine: the
 // 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
@@ -1475,7 +1496,8 @@ func main() {
 	watchFlag := flag.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
-	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
+	apiKeyFlag := flag.String("api-key", "", "DEPRECATED: API token on the command line is visible to local users (see --api-key-file / MCP_COMMANDS_API_KEY)")
+	apiKeyFileFlag := flag.String("api-key-file", "", "Read the API token from a file (content is trimmed; trailing newline ok)")
 	insecureNoAuthFlag := flag.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
 	maxConcurrentFlag := flag.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
 	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
@@ -1496,7 +1518,7 @@ func main() {
 
 	if *dirFlag == "" || *scriptsFlag == "" {
 		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
+		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
 		os.Exit(1)
 	}
 
@@ -1555,7 +1577,17 @@ func main() {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *listToolsFlag, *watchFlag, *callToolFlag, callToolSet, *paramsFlag, timeout, ignored))
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
+	// Server mode only: resolve the token here (diagnostic modes ignore the
+	// key flags and report them via the ignored-flags notice).
+	apiKey, apiKeyFromFlag, err := resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if apiKeyFromFlag {
+		fmt.Fprintln(os.Stderr, apiKeyFlagWarning)
+	}
+	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, apiKey, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -1564,8 +1596,6 @@ func main() {
 func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	apiKey = resolveAPIKey(apiKey)
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {

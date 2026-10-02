@@ -64,8 +64,10 @@ Pass `--host` to bind to a specific IP address (default is `127.0.0.1`, use `0.0
 
 The HTTP server accepts requests without authentication **when bound to loopback** (the default `127.0.0.1`). You can optionally protect it with a static API token:
 
+Recommended — from a file (the token never appears in a process listing):
+
 ```bash
-mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key my-secret-token
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080 --api-key-file /path/to/token.txt
 ```
 
 or via the `MCP_COMMANDS_API_KEY` environment variable:
@@ -74,7 +76,7 @@ or via the `MCP_COMMANDS_API_KEY` environment variable:
 MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
-The `--api-key` flag takes precedence over the environment variable. When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. The `--api-key <value>` flag is **deprecated**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime, so the server prints a startup warning whenever the token comes from the flag — use `--api-key-file` or the environment variable instead. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; an unreadable file is a startup error.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
 
 ```bash
 curl -s http://localhost:8080 \
@@ -102,7 +104,7 @@ Notes:
 - The scheme is compared case-insensitively (`bearer` works), but the header must be exactly `Bearer <token>` separated by a single space.
 - The token is never logged by the server.
 - Enabling auth is a breaking change for existing HTTP clients — they must start sending the token.
-- **Stdio mode needs no token.** `--api-key` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
+- **Stdio mode needs no token.** `--api-key` / `--api-key-file` / `MCP_COMMANDS_API_KEY` are ignored when the server runs without `--port`.
 - **Non-loopback binds require auth (0.8.0).** Binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start**:
 
   ```

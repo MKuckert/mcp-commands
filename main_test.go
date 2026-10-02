@@ -7,14 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -1405,15 +1405,23 @@ func TestValidateRequiredParams(t *testing.T) {
 
 func TestResolveAPIKey(t *testing.T) {
 	tests := []struct {
-		name string
-		flag string
-		env  string
-		want string
+		name     string
+		flag     string
+		file     string // content written to a temp file when fileSet
+		fileSet  bool
+		fileMiss bool // path set but file missing → error
+		env      string
+		want     string
+		wantFlag bool // token must be flagged as coming from --api-key
 	}{
-		{name: "flag_only", flag: "from-flag", env: "", want: "from-flag"},
-		{name: "env_only", flag: "", env: "from-env", want: "from-env"},
-		{name: "both_set_flag_wins", flag: "from-flag", env: "from-env", want: "from-flag"},
-		{name: "neither_set", flag: "", env: "", want: ""},
+		{name: "flag_only", flag: "from-flag", want: "from-flag", wantFlag: true},
+		{name: "env_only", env: "from-env", want: "from-env"},
+		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file"},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantFlag: true},
+		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file"},
+		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env"},
+		{name: "missing_file_errors", fileMiss: true},
+		{name: "neither_set", want: ""},
 	}
 
 	for _, tt := range tests {
@@ -1421,10 +1429,47 @@ func TestResolveAPIKey(t *testing.T) {
 			// t.Setenv to "" counts as empty for resolveAPIKey.
 			t.Setenv(apiKeyEnvVar, tt.env)
 
-			if got := resolveAPIKey(tt.flag); got != tt.want {
-				t.Errorf("resolveAPIKey(%q) = %q, want %q", tt.flag, got, tt.want)
+			var filePath string
+			if tt.fileSet || tt.fileMiss {
+				if tt.fileMiss {
+					filePath = filepath.Join(t.TempDir(), "missing.txt")
+				} else {
+					filePath = filepath.Join(t.TempDir(), "key.txt")
+					if err := os.WriteFile(filePath, []byte(tt.file), 0o600); err != nil {
+						t.Fatalf("failed to write key file: %v", err)
+					}
+				}
+			}
+
+			got, gotFlag, err := resolveAPIKey(tt.flag, filePath)
+			if tt.fileMiss {
+				if err == nil {
+					t.Fatalf("expected an error for the missing key file, got token %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAPIKey returned unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveAPIKey = %q, want %q", got, tt.want)
+			}
+			if gotFlag != tt.wantFlag {
+				t.Errorf("fromFlag = %v, want %v", gotFlag, tt.wantFlag)
 			}
 		})
+	}
+}
+
+// TestAPIKeyFlagWarning pins the F-8 deprecation: a token on the command line
+// is world-readable via /proc/<pid>/cmdline, so the warning must name the
+// exposure and point at the safe alternatives.
+func TestAPIKeyFlagWarning(t *testing.T) {
+	if !strings.Contains(apiKeyFlagWarning, "--api-key-file") || !strings.Contains(apiKeyFlagWarning, apiKeyEnvVar) {
+		t.Fatalf("warning must point users at the safe alternatives: %q", apiKeyFlagWarning)
+	}
+	if !strings.Contains(apiKeyFlagWarning, "/proc") {
+		t.Fatalf("warning must name the exposure (cmdline): %q", apiKeyFlagWarning)
 	}
 }
 
