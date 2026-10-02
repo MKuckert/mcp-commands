@@ -1031,20 +1031,12 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	// Override CommandContext's direct-child kill before Start so exec's
+	// context watcher always kills the complete process group.
+	cmd.Cancel = func() error { return killToolProcess(cmd) }
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	// CommandContext signals only the direct child; the whole process group
-	// (script plus grandchildren — the canonical shell-tool shape) must die
-	// with the deadline, or the 5-minute budget is not a real budget.
-	// CommandContext's default Cancel signals only the direct child; the
-	// whole process group (script plus grandchildren — the canonical
-	// shell-tool shape) must die with the deadline, or the 5-minute budget
-	// is not a real budget. Overriding Cancel lets exec itself perform the
-	// group kill when the context finishes: no competing goroutine, no
-	// race with the built-in kill, and an already-exited process is a
-	// tolerated no-op (exec ignores the returned error).
-	cmd.Cancel = func() error { return killToolProcess(cmd) }
 
 	waitErr := cmd.Wait()
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
