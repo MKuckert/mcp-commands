@@ -32,9 +32,7 @@ func assertGroupKillDelivered(t *testing.T) bool {
 	t.Helper()
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "grp.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\nsleep 60 &\nsleep 60\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
+	writeScript(t, scriptPath, "#!/bin/bash\nsleep 60 &\nsleep 60\n")
 	cmd := exec.Command(scriptPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
@@ -64,6 +62,7 @@ func assertGroupKillDelivered(t *testing.T) bool {
 // process group, not only the direct child — a shell script's grandchildren
 // (the canonical tool shape) must not outlive their budget.
 func TestExecuteToolKillsProcessGroup(t *testing.T) {
+	t.Parallel()
 	if !assertGroupKillDelivered(t) {
 		t.Skip("this sandbox does not deliver process-group signals to Go-exec'd processes; group kill cannot be verified here")
 	}

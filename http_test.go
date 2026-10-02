@@ -1,0 +1,641 @@
+package main
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func TestResolveAPIKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		flag       string
+		file       string // content written to a temp file when fileSet
+		fileSet    bool
+		fileMiss   bool // path set but file missing → error
+		env        string
+		want       string
+		wantSource apiKeySource
+	}{
+		{name: "flag_only", flag: "from-flag", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "env_only", env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file", wantSource: apiKeySourceFile},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file", wantSource: apiKeySourceFile},
+		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "missing_file_errors", fileMiss: true},
+		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// t.Setenv to "" counts as empty for resolveAPIKey.
+			t.Setenv(apiKeyEnvVar, tt.env)
+
+			var filePath string
+			if tt.fileSet || tt.fileMiss {
+				if tt.fileMiss {
+					filePath = filepath.Join(t.TempDir(), "missing.txt")
+				} else {
+					filePath = filepath.Join(t.TempDir(), "key.txt")
+					if err := os.WriteFile(filePath, []byte(tt.file), 0o600); err != nil {
+						t.Fatalf("failed to write key file: %v", err)
+					}
+				}
+			}
+
+			got, err := resolveAPIKey(tt.flag, filePath)
+			if tt.fileMiss {
+				if err == nil {
+					t.Fatalf("expected an error for the missing key file, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAPIKey returned unexpected error: %v", err)
+			}
+			if got.Token != tt.want {
+				t.Errorf("resolveAPIKey token = %q, want %q", got.Token, tt.want)
+			}
+			if got.Source != tt.wantSource {
+				t.Errorf("resolveAPIKey source = %v, want %v", got.Source, tt.wantSource)
+			}
+		})
+	}
+}
+
+func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// captureWriter is a goroutine-safe strings.Builder for env.stderr capture.
+type captureWriter struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *captureWriter) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *captureWriter) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+func TestBearerAuthMiddleware(t *testing.T) {
+	t.Parallel()
+	const token = "tok"
+
+	tests := []struct {
+		name        string
+		header      string
+		wantStatus  int
+		wantReached bool
+	}{
+		{name: "no_header", header: "", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "scheme_only", header: "Bearer", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "empty_token", header: "Bearer ", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "wrong_scheme", header: "Basic abc", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "lowercase_scheme_accepted", header: "bearer " + token, wantStatus: http.StatusOK, wantReached: true},
+		{name: "wrong_token", header: "Bearer wrong", wantStatus: http.StatusUnauthorized, wantReached: false},
+		{name: "correct_token", header: "Bearer " + token, wantStatus: http.StatusOK, wantReached: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
+			rec := httptest.NewRecorder()
+
+			newBearerAuthHandler(next, token).ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if reached != tt.wantReached {
+				t.Errorf("downstream reached = %v, want %v", reached, tt.wantReached)
+			}
+			if rec.Code == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") != "Bearer" {
+				t.Errorf("401 without WWW-Authenticate: Bearer, got %q", rec.Header().Get("WWW-Authenticate"))
+			}
+		})
+	}
+}
+
+// newTestMCPServer builds an mcp.Server with one trivial tool.
+func newTestMCPServer(t *testing.T) *mcp.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+	server.AddTool(&mcp.Tool{Name: "noop", Description: "no-op", InputSchema: buildInputSchema([]paramSpec{})}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	})
+	return server
+}
+
+// postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
+// the response status code. An empty auth value omits the Authorization header.
+func postInitializeStatus(t *testing.T, url, auth string) int {
+	t.Helper()
+	resp := doInitialize(t, url, auth, "")
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+// doInitialize POSTs a JSON-RPC initialize request and returns the response.
+// Empty auth/origin values omit the corresponding headers.
+func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
+	req, err := http.NewRequest(http.MethodPost, url+"/", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	return resp
+}
+
+func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusOK {
+		t.Fatalf("unauthenticated request: status = %d, want 200 (only 401s were being checked before; 400/404/500 used to pass silently)", status)
+	}
+}
+
+func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", corsConfig{}))
+	defer httpServer.Close()
+
+	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusUnauthorized {
+		t.Errorf("unauthenticated request: status = %d, want 401", status)
+	}
+
+	status := postInitializeStatus(t, httpServer.URL, "Bearer s3cret")
+	if status == http.StatusUnauthorized {
+		t.Errorf("authenticated request: status = %d, want non-401", status)
+	}
+}
+
+// TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
+// end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
+// rejected (400) without being read into memory. Chunked (ContentLength -1)
+// so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
+// the multi-GB-chunked-body exhaustion vector from the review.
+func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	// Valid JSON-RPC initialize prefix, then enough padding to cross the cap.
+	prefix := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	body := io.NopCloser(io.MultiReader(
+		strings.NewReader(prefix),
+		strings.NewReader(strings.Repeat("a", maxHTTPBodyBytes+1<<10)),
+	))
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL, body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = -1 // chunked transfer encoding
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized body: status = %d, want 400", res.StatusCode)
+	}
+	if res.ContentLength >= maxHTTPBodyBytes {
+		t.Fatalf("handler appeared to buffer the whole body (resp Content-Length = %d)", res.ContentLength)
+	}
+}
+
+func TestResolveCORS(t *testing.T) {
+	tests := []struct {
+		name           string
+		flag           string
+		originsEnv     string
+		allowAllEnv    string
+		allowAllFlag   bool
+		allowAllSet    bool
+		disableLocalhp bool
+		wantOrigins    []string
+		wantAllowAll   bool
+		wantDisableLHP bool
+		wantErr        bool
+		errSubstr      string
+	}{
+		{name: "flag_only", flag: "https://a.example", wantOrigins: []string{"https://a.example"}},
+		{name: "env_only", originsEnv: "https://a.example, https://b.example",
+			wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "both_set_flag_wins", flag: "https://flag.example", originsEnv: "https://env.example",
+			wantOrigins: []string{"https://flag.example"}},
+		{name: "neither_set", wantOrigins: []string{}},
+		{name: "comma_space_parsing", flag: "https://a.example, https://b.example",
+			wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "port_accepted", flag: "https://x.example:8443", wantOrigins: []string{"https://x.example:8443"}},
+		{name: "port_only_authority_rejected", flag: "https://:8443", wantErr: true},
+		{name: "allow_all_flag", allowAllFlag: true, allowAllSet: true, wantOrigins: []string{}, wantAllowAll: true},
+		{name: "allow_all_env_true", allowAllEnv: "TRUE", wantOrigins: []string{}, wantAllowAll: true},
+		{name: "allow_all_env_yes", allowAllEnv: "yes", wantOrigins: []string{}, wantAllowAll: true},
+		// "0" is not in the recognized set (1/true/yes) → fail loud, per spec.
+		{name: "allow_all_env_zero_rejected", allowAllEnv: "0", wantErr: true},
+		// An explicit --allow-all-origins[=false] suppresses the env var, so
+		// only an unset flag consults it.
+		{name: "explicit_false_suppresses_env", allowAllFlag: false, allowAllSet: true, allowAllEnv: "1",
+			wantOrigins: []string{}, wantAllowAll: false},
+		{name: "unset_flag_reads_env", allowAllFlag: false, allowAllSet: false, allowAllEnv: "1",
+			wantOrigins: []string{}, wantAllowAll: true},
+		{name: "disable_localhost_protection", flag: "https://a.example", disableLocalhp: true,
+			wantOrigins: []string{"https://a.example"}, wantDisableLHP: true},
+		{name: "contradictory_origins_and_allow_all", flag: "https://a.example", allowAllFlag: true, allowAllSet: true,
+			wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "contradiction_reported_before_bad_origin", flag: "notaurl", allowAllFlag: true, allowAllSet: true,
+			wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "env_origins_and_env_allow_all", originsEnv: "https://a.example", allowAllEnv: "1", wantErr: true,
+			errSubstr: "mutually exclusive"},
+		{name: "malformed_not_a_url", flag: "notaurl", wantErr: true},
+		{name: "malformed_missing_host", flag: "https://", wantErr: true},
+		{name: "malformed_scheme", flag: "ftp://x.example", wantErr: true},
+		{name: "malformed_userinfo", flag: "https://user@x.example", wantErr: true},
+		{name: "malformed_path", flag: "https://x.example/path", wantErr: true},
+		{name: "malformed_env_origin", originsEnv: "https://a.example, not-a-url", wantErr: true},
+		{name: "allow_all_env_banana", allowAllEnv: "banana", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(allowedOriginsEnvVar, tt.originsEnv)
+			t.Setenv(allowAllOriginsEnvVar, tt.allowAllEnv)
+
+			got, err := resolveCORS(tt.flag, tt.allowAllFlag, tt.allowAllSet, tt.disableLocalhp)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (%+v)", got)
+				}
+				if tt.errSubstr != "" && !strings.Contains(err.Error(), tt.errSubstr) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tt.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got.origins) != len(tt.wantOrigins) {
+				t.Fatalf("origins = %v, want %v", got.origins, tt.wantOrigins)
+			}
+			for i, want := range tt.wantOrigins {
+				if got.origins[i] != want {
+					t.Errorf("origin[%d] = %q, want %q", i, got.origins[i], want)
+				}
+			}
+			if got.allowAll != tt.wantAllowAll {
+				t.Errorf("allowAll = %v, want %v", got.allowAll, tt.wantAllowAll)
+			}
+			if got.disableLocalhostProtection != tt.wantDisableLHP {
+				t.Errorf("disableLocalhostProtection = %v, want %v", got.disableLocalhostProtection, tt.wantDisableLHP)
+			}
+			if !tt.wantAllowAll && len(tt.wantOrigins) == 0 && got.enabled() {
+				t.Errorf("enabled() = true, want false for empty config")
+			}
+		})
+	}
+}
+
+func TestCORSHandlerPreflight(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		requestHdr string // Access-Control-Request-Headers; "-" means omit
+		wantACRHdr string
+	}{
+		{name: "echoes_requested_headers", requestHdr: "content-type, authorization", wantACRHdr: "content-type, authorization"},
+		{name: "omits_when_not_requested", requestHdr: "-", wantACRHdr: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := corsConfig{origins: []string{"https://app.example.com"}}
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusTeapot)
+			})
+
+			req := httptest.NewRequest(http.MethodOptions, "/", nil)
+			req.Header.Set("Origin", "https://app.example.com")
+			if tt.requestHdr != "-" {
+				req.Header.Set("Access-Control-Request-Headers", tt.requestHdr)
+			}
+			rec := httptest.NewRecorder()
+
+			newCORSHandler(next, cfg).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("status = %d, want 204", rec.Code)
+			}
+			if reached {
+				t.Error("preflight was forwarded to next")
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("body = %q, want empty", rec.Body.String())
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Methods"); got != http.MethodPost+", "+http.MethodOptions {
+				t.Errorf("Access-Control-Allow-Methods = %q, want %q", got, http.MethodPost+", "+http.MethodOptions)
+			}
+			if got := rec.Header().Get("Access-Control-Max-Age"); got != "900" {
+				t.Errorf("Access-Control-Max-Age = %q, want 900", got)
+			}
+			if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+				t.Errorf("Vary = %q, want to include Origin", rec.Header().Get("Vary"))
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Headers"); got != tt.wantACRHdr {
+				t.Errorf("Access-Control-Allow-Headers = %q, want %q", got, tt.wantACRHdr)
+			}
+		})
+	}
+}
+
+func TestCORSHandlerNonPreflight(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		cfg         corsConfig
+		origin      string // "-" means omit the header
+		wantAllowed bool   // CORS headers present?
+		wantReached bool
+	}{
+		{name: "no_origin_passthrough", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "-",
+			wantAllowed: false, wantReached: true},
+		{name: "disallowed_origin_passthrough", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "https://evil.example",
+			wantAllowed: false, wantReached: true},
+		{name: "allowed_origin", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "https://app.example.com",
+			wantAllowed: true, wantReached: true},
+		{name: "allow_all", cfg: corsConfig{allowAll: true}, origin: "https://any.example",
+			wantAllowed: true, wantReached: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reached := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tt.origin != "-" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+
+			newCORSHandler(next, tt.cfg).ServeHTTP(rec, req)
+
+			if reached != tt.wantReached {
+				t.Fatalf("downstream reached = %v, want %v", reached, tt.wantReached)
+			}
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200 (unchanged)", rec.Code)
+			}
+			acAO := rec.Header().Get("Access-Control-Allow-Origin")
+			if tt.wantAllowed {
+				if acAO != tt.origin {
+					t.Errorf("Access-Control-Allow-Origin = %q, want %q", acAO, tt.origin)
+				}
+				if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
+					t.Errorf("Vary = %q, want to include Origin", rec.Header().Get("Vary"))
+				}
+				if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id, Last-Event-ID" {
+					t.Errorf("Access-Control-Expose-Headers = %q, want %q", got, "Mcp-Session-Id, Last-Event-ID")
+				}
+			} else if acAO != "" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want absent", acAO)
+			}
+		})
+	}
+}
+
+func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, httpServer.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Origin", "https://app.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204 (not 401)", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+}
+
+func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer wrong")
+	req.Header.Set("Origin", "https://app.example.com")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("401 Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+	if got := resp.Header.Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id, Last-Event-ID" {
+		t.Errorf("401 Access-Control-Expose-Headers = %q, want %q", got, "Mcp-Session-Id, Last-Event-ID")
+	}
+}
+
+func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	cors := corsConfig{origins: []string{"https://app.example.com"}}
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	defer httpServer.Close()
+
+	resp := doInitialize(t, httpServer.URL, "Bearer s3cret", "https://app.example.com")
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("authenticated request: status = %d, want non-401", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+	resp.Body.Close()
+
+	// Always stateless: a stored/re-sent session ID must keep working
+	// (the SDK ignores it) — even if it is a made-up value.
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Origin", "https://app.example.com")
+	if sessionID == "" {
+		sessionID = "some-stale-id"
+	}
+	req.Header.Set("Mcp-Session-Id", sessionID)
+
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("tools/list failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	if resp2.StatusCode == http.StatusUnauthorized || resp2.StatusCode == http.StatusNotFound {
+		t.Errorf("request with session ID %q: status = %d, want served (stateless ignores session IDs)", sessionID, resp2.StatusCode)
+	}
+	if got := resp2.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want echoed origin", got)
+	}
+}
+
+func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	resp := doInitialize(t, httpServer.URL, "", "")
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("unauthenticated server: status = %d, want non-401", resp.StatusCode)
+	}
+	headers := resp.Header
+	if got := headers.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want absent (CORS disabled)", got)
+	}
+	if got := headers.Get("Access-Control-Expose-Headers"); got != "" {
+		t.Errorf("Access-Control-Expose-Headers = %q, want absent (CORS disabled)", got)
+	}
+	if got := headers.Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want absent (CORS disabled)", got)
+	}
+}
+
+func TestHTTPSecurityPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		host        string
+		apiKey      string
+		acceptsRisk bool
+		wantErr     bool
+		wantWarning string // substring expected when a warning is returned
+	}{
+		{host: "127.0.0.1", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "127.0.0.2", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
+		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
+		// The remote-bind case: no key, no escape hatch → refuse.
+		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
+		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
+		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
+		// Unparseable host → treated as non-loopback (conservative).
+		{host: "not-an-ip", apiKey: "", acceptsRisk: false, wantErr: true},
+		// Escape hatch: starts, but loudly.
+		{host: "0.0.0.0", apiKey: "", acceptsRisk: true, wantWarning: "UNAUTHENTICATED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.acceptsRisk)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				if !strings.Contains(err.Error(), "--insecure-no-auth") {
+					t.Errorf("error should mention the escape hatch: %v", err)
+				}
+				if !strings.Contains(err.Error(), tt.host) {
+					t.Errorf("error should name the host: %v", err)
+				}
+			}
+			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
+				t.Fatalf("warning = %q, want it to contain %q", warning, tt.wantWarning)
+			}
+		})
+	}
+}

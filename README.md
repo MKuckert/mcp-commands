@@ -13,7 +13,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 - **Smart Argument Translation:** Safely maps JSON tool arguments from the LLM into POSIX-compliant CLI flags (e.g., `{"force": true, "file": "data.txt"}` becomes `--force --file data.txt`).
 - **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and HTTP streaming transport for remote connections.
 - **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces a configurable execution timeout (default 5 minutes, per tool, per server, or disabled) and output limits.
-- **Raw Output:** Returns the raw stdout and stderr (capped to 1 MB) of the executed script, allowing LLMs to process the output directly.
+- **Tagged Output:** Returns the executed script's stdout and stderr wrapped in `<stdout>`/`<stderr>` tags (so the LLM can tell the streams apart). Combined output is capped at 1 MiB, with a trailing truncation notice when the cap is exceeded.
 
 ## Installation
 
@@ -24,6 +24,12 @@ go install github.com/mkuckert/mcp-commands@latest
 ```
 
 _(Adjust package path based on your repository structure)_
+
+**Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
+
+```bash
+tar -xzf mcp-commands_linux_amd64.tar.gz   # unzip on Windows
+```
 
 ## Usage
 
@@ -174,6 +180,47 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --no-timeout
 
 The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` suffix so the LLM knows its budget.
 
+#### Version
+
+`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation.
+
+#### Flags and Environment Variables
+
+Consolidated summary — the per-section prose above remains authoritative.
+
+Essentials and modes:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dir <dir>` | _(required)_ | Working directory where tool scripts are executed. |
+| `--scripts <dir>` | _(required)_ | Directory scanned for executable scripts. |
+| `--watch` | off | Hot-reload in server mode; live re-print in `--list-tools` mode (ignored with `--call-tool`). |
+| `--list-tools` | off | Print exactly what the server would register, then exit; no server starts. |
+| `--call-tool <name>` | _(none)_ | Run one discovered tool once and exit (debug mode; no server starts). |
+| `--params <json>` | `{}` | JSON object of named arguments for `--call-tool`. |
+| `--version` | off | Print the version and exit. |
+
+HTTP server:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--host <ip>` | `127.0.0.1` | Bind address for HTTP mode. |
+| `--port <port>` | `0` (stdio) | A non-zero value switches to HTTP mode. |
+| `--api-key <token>` | _(none)_ | Bearer token. Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. |
+| `--api-key-file <path>` | _(none)_ | Read the token from a file (content trimmed); the token never appears in a process listing. |
+| `--insecure-no-auth` | off | Escape hatch: start an unauthenticated server on a non-loopback host (loudly warned). |
+| `--max-concurrent <n>` | `16` (`0` = default) | Cap on simultaneous tool executions; saturated calls get a clean at-capacity error. |
+
+CORS (`--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`) — see the [CORS section](#browser-clients-cross-origin-resource-sharing-cors) for the full reference, including env fallbacks. Timeouts (`--timeout`, `--no-timeout`) — see the [Timeouts section](#timeouts).
+
+Environment variables (each is consulted only when its flag is not set):
+
+| Variable | Equivalent flag |
+|---|---|
+| `MCP_COMMANDS_API_KEY` | `--api-key` |
+| `MCP_COMMANDS_ALLOWED_ORIGINS` | `--allowed-origins` |
+| `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | `--allow-all-origins` (`1`/`true`/`yes`) |
+
 ### Creating Tools
 
 Simply create an executable file in your `--scripts` directory.
@@ -195,7 +242,7 @@ echo "Hello, $NAME!"
 
 #### Script Frontmatter
 
-The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are silently ignored; every valid `Param:` line is collected):
+The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are ignored — invalid ones warn; every valid `Param:` line is collected):
 
 - `Description: <text>` — presented to the LLM as the tool description.
 - `Param: <name> <type> <required|optional> "<description>"` — declares a typed tool parameter (`string`, `number`, or `boolean`; the description must be quoted). One line per parameter; invalid lines log a warning to stderr and are skipped. The name must match `^[a-zA-Z][a-zA-Z0-9_-]*$`.
@@ -224,6 +271,7 @@ The server translates JSON properties into CLI flags.
   - `{"flag": false}` ➡️ _(omitted entirely)_
 - **Arrays:** `{"items": ["a", "b"]}` ➡️ `--items a --items b`
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
+- **Deterministic ordering:** Keys are sorted alphabetically before translation, so the CLI flag order is stable and never reflects the LLM's JSON object key order.
 
 ### Diagnostics
 
@@ -307,6 +355,13 @@ required-parameter validation before the script starts.
 Inherited quirk, same as server mode: a parameter name declared more than
 once is last-wins in the schema, but validation enforces *any* `required`
 declaration of that name.
+
+## Troubleshooting
+
+- **Script not discovered.** A file becomes a tool only if it is a regular file (or a symlink resolving to one) with the executable bit set — `chmod +x <script>`. Subdirectories and non-executable files are skipped silently, so a missing tool usually means a missing exec bit. Verify what the server registers with `--list-tools` (below).
+- **Frontmatter warnings on stderr.** An invalid `Param:` or `Timeout:` line in a script's first 30 lines is skipped with a warning on stderr. For `Description:` and `Timeout:` the *first occurrence* wins — if the first `Timeout:` is invalid it warns and the global timeout applies, and any later `Timeout:` lines (even valid ones) are ignored; put a single, valid `Timeout:` line first. Discovery and hot reload are not broken.
+- **Inspect what the server registered.** `mcp-commands --dir <dir> --scripts <scripts> --list-tools` prints the exact names, signatures, descriptions, and timeout suffixes the LLM sees, without starting a server.
+- **Duplicate tool names.** The tool name is the filename minus its extension, so `a.sh` and `a.py` both register as `a`. The first file in directory order wins and a warning is printed to stderr for each shadowed duplicate — rename one of the files to expose both.
 
 ## AI Usage
 
