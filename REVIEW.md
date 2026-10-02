@@ -57,7 +57,6 @@ Severity: **H**igh / **M**edium / **L**ow. Complexity: **T**rivial (≤ ~20 line
 | F-10 | M/M | **`main` and `run` are 100% untested** (Test #19): flag exclusivity, fail-fast branches, HTTP bind, graceful shutdown, zero-tools warning. `main` needs a small refactor (`os.Exit` blocks it); `run` deserves one end-to-end HTTP test. | `main.go:1314–1468` | Extract `parseCLI` (see F-14) + one `httptest` end-to-end against `run`. |
 | F-11 | M/M | **Full re-registration with no change-diff** (PERF-2). The debounce is sound (a burst within the 100 ms window collapses to one scan), but each debounced change — even when the resulting tool set is identical — triggers a full `discoverTools` + `registry.remove-all`/`AddTool`-per-tool + per-tool `json.Marshal`, and every `AddTool` emits a separate SDK `tools/list_changed` notification (N per reload). | `main.go:767–806, 529–580` | Diff new vs current tool set; skip `replace` when identical (also covers PERF-8 schema re-marshal); consider re-arming the debounce per event for slower bursts. |
 | F-12 | M/S | **Truncation can split a UTF-8 rune**, emitting invalid bytes to the LLM. | `main.go:501–507` | Back off to `utf8.FullRune` boundary after truncation (1 line, do as part of F-2). |
-| F-13 | M/M | **Symlink/path TOCTOU** (SEC-7): `resolvedPath` is stat/exec-checked at discovery, re-used at exec with no re-validation; a party writable on the scripts dir can swap a symlink target in the window. Also the scripts-dir trust boundary is undocumented. | `main.go:88–118, 868` | Re-`Stat`/`EvalSymlinks` + regular-file + exec-bit at exec time, reject on change; open frontmatter `O_NOFOLLOW`; document "write access to scripts dir = code execution as the server user" in README. |
 
 ### Tier 3 — Low severity, structural / maintainability
 
@@ -80,8 +79,6 @@ Severity: **H**igh / **M**edium / **L**ow. Complexity: **T**rivial (≤ ~20 line
 | F-23 | L/T | Stale `Makefile`: `VERSION ?= 0.2.0` while code is 0.7.0 — `make` builds report the wrong version (release binaries are unaffected: `.goreleaser.yaml` has no version injection and uses the hardcoded constant). Also `buildall` missing from `.PHONY`. | Bump / add. |
 | F-24 | L/T | Stale `.zed/debug.json`: `src/` paths that no longer exist — launch config fails. | Update to repo root. |
 | F-25 | L/T | Root `PLAN.md` (369 lines, fully completed, "Approved") not archived, inconsistent with the `plans/` convention; `plans/2026-06-30-initial.md` describes `--ip`, `src/`, `os.Chdir`, 10-line scan — all superseded, no "superseded" banner. | Archive root PLAN.md; one-line banners on superseded plans. |
-| F-26 | L/T | README fluff: "AI Usage" section (zero operational value), "adjust package path" vestige. | Cut. |
-| F-27 | L/T | `--allow-all-origins` + non-loopback host: add a persistent startup warning (origin-echo footgun; SEC-8). | 3 lines. |
 | F-28 | L/T | No TLS: document that HTTP transport is cleartext and must be terminated upstream (SEC-10); optionally `--tls-cert/--tls-key`. | README + flag. |
 | F-29 | L/T | Document that tool output is untrusted model input; the `<stdout>` tag wrapper is advisory, and scripts can emit literal `</stdout>` (SEC-9). | README one-paragraph. |
 | F-30 | L/T | No vulnerability scanning in CI (deps verified clean by hand today: go-sdk v1.6.1 past both 2026 advisories; fsnotify CVE is a kernel issue). | Add `govulncheck`/`osv-scanner` step to `release.yml`. |
@@ -98,7 +95,7 @@ README is the strongest asset: **every** flag, env var, default, message, and pr
 "Ship-quality core, monolith-shaped shell." No correctness blockers. Debt: 3 injection globals, test-only `lastHandler` field, dead `interval` param, double startup scan, 9–11-param functions, one 72-line validator with 5× repeated boilerplate. Proposed 12-file split is mechanical once config structs + `liveEnv` land.
 
 ### Security (Code Reviewer)
-Protocol boundary is genuinely good: argument keys regex-validated, values passed as discrete argv elements with **no shell** (injection closed), constant-time token compare, no token in logs, exact-origin CORS with strict URL validation, integer-overflow-safe duration parsing, stateless HTTP, deps clean. **Not production-safe in HTTP mode** because of F-1..F-4 — all small, self-contained fixes. Residual risk is the inherent trust model: write access to the scripts dir = code execution as the server user (document it, F-13).
+Protocol boundary is genuinely good: argument keys regex-validated, values passed as discrete argv elements with **no shell** (injection closed), constant-time token compare, no token in logs, exact-origin CORS with strict URL validation, integer-overflow-safe duration parsing, stateless HTTP, deps clean. **Not production-safe in HTTP mode** because of F-1..F-4 — all small, self-contained fixes. Residual risk is the inherent trust model: write access to the scripts dir = code execution as the server user (document it).
 
 ### Testing (Testing)
 Suite is above average: 42 test functions, all pass (~10 s), `go vet` clean, newer sections table-driven with exact assertions, no vacuous tests, injection points proportionate. Gaps: truncation branch (F-6), fsnotify failure modes (F-9), `main`/`run` (F-10), flake-prone timing loops, no `-race` possible in this sandbox. 25 concrete proposed tests are in the agent's report (highest value: F-6, F-9, `TestRegistryReplaceConcurrency`).
@@ -111,7 +108,7 @@ Verified clean: no goroutine/timer leaks, compiled regex reused, short lock crit
 ## Suggested execution order
 
 1. **Tier 1 (F-1…F-6)** — ~1 day of work, closes every High. One PR: "harden HTTP mode" (F-1, F-3, F-4) + "bound output capture" (F-2, F-12, F-6) + key rotation (F-5).
-2. **Tier 2 (F-7…F-13)** — ~2–3 days: process-group kill, token-from-argv deprecation, fsnotify tests + diff-skip, `run` e2e test, TOCTOU re-validation.
+2. **Tier 2 (F-7…F-12)** — ~2–3 days: process-group kill, token-from-argv deprecation, fsnotify tests + diff-skip, `run` e2e test.
 3. **Tier 3 (F-14…F-22)** — structure PRs in this order: config structs → `liveEnv` → dead-code removal (F-16, F-17) → local simplifications (F-18, F-19) → 12-file split (F-20) (+ mirrored test split, F-22); docs edits (F-21) can ride along anytime.
 4. **Tier 4 (F-23…F-31)** — chores, can ride along with anything.
 
