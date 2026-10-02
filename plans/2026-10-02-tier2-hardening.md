@@ -11,8 +11,8 @@ Status: **In progress** — tick boxes as units land.
 - [x] F-8: deprecate `--api-key <value>` (world-readable via `/proc/<pid>/cmdline`): new `--api-key-file` flag; startup warning when the flag is the token source
 - [x] F-9: fsnotify failure-mode tests — watched dir deleted, rename, permission error, tool removal from the registry
 - [ ] F-10: `main`/`run` coverage — `parseCLI` extraction + one HTTP end-to-end test against `run`
-- [ ] F-11: diff new vs current tool set; skip re-registration (and N `tools/list_changed` notifications) when the set is unchanged
-- [ ] F-12: mark done (UTF-8 boundary back-off landed with F-2 in commit 459a9ba, tested in `TestCombineToolOutputTruncation`)
+- [x] F-11: diff new vs current tool set; skip re-registration (and N `tools/list_changed` notifications) when the set is unchanged
+- [x] F-12: mark done (UTF-8 boundary back-off landed with F-2 in commit 459a9ba, tested in `TestCombineToolOutputTruncation`)
 - [ ] F-23: Makefile `VERSION` 0.2.0 → 0.8.1, `buildall` in `.PHONY`; `serverVersion` → `0.8.1`
 - [x] Docs: README auth section documents `--api-key-file` + deprecation; usage line updated
 - [ ] REVIEW.md: mark F-7…F-12, F-23 ✅ with this branch's commits

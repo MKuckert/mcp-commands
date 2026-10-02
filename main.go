@@ -573,6 +573,7 @@ type toolRegistry struct {
 	slot          *execSlot     // bounds concurrent tool executions
 	mu            sync.Mutex
 	names         []string
+	current       []discoveredTool // last registered set (for the change-diff in replaceIfChanged)
 	lastHandler   mcp.ToolHandler
 }
 
@@ -624,6 +625,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	}
 
 	r.names = make([]string, 0, len(tools))
+	r.current = tools
 	for _, discoveredTool := range tools {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
@@ -668,6 +670,47 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
+}
+
+// replaceIfChanged re-registers only when the discovered set differs from
+// the currently registered one: an unchanged set (e.g. a touched file whose
+// frontmatter did not change) triggers no RemoveTools/AddTool churn and no
+// tools/list_changed notifications (F-11). It returns false when the set
+// was identical and the replace was skipped.
+func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
+	r.mu.Lock()
+	unchanged := toolsEqual(r.current, tools)
+	r.mu.Unlock()
+	if unchanged {
+		return false
+	}
+	r.replace(tools)
+	return true
+}
+
+// toolsEqual compares two discovered tool sets element-wise (order included;
+// discoverTools yields ReadDir order, i.e. stable by filename). The Timeout
+// pointer is compared by value, the Params slice structurally.
+func toolsEqual(a, b []discoveredTool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Path != b[i].Path || a[i].Description != b[i].Description {
+			return false
+		}
+		ta, tb := a[i].Timeout, b[i].Timeout
+		if (ta == nil) != (tb == nil) {
+			return false
+		}
+		if ta != nil && *ta != *tb {
+			return false
+		}
+		if !reflect.DeepEqual(a[i].Params, b[i].Params) {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveToolTimeout resolves a tool's effective timeout with the registry's
@@ -920,14 +963,16 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 
 	return watchChanges(ctx, scriptsDir, func() {
-		// After debounce delay, rediscover tools
+		// After debounce delay, rediscover tools. The diff-skip (F-11) avoids
+		// the remove/re-add churn and N list_changed notifications for a
+		// no-op rescan (e.g. a touched file with unchanged frontmatter).
 		tools, err := discoverTools(scriptsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return
 		}
 
-		registry.replace(tools)
+		registry.replaceIfChanged(tools)
 	})
 }
 

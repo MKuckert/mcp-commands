@@ -1963,6 +1963,137 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 }
 
+// TestToolsEqual covers the F-11 change-diff: every field a rescan can
+// change must invalidate the skip, and an unchanged set must compare equal.
+func TestToolsEqual(t *testing.T) {
+	timeout5 := 5 * time.Minute
+	timeout0 := time.Duration(0)
+	tests := []struct {
+		name string
+		a, b discoveredTool
+		want bool
+	}{
+		{name: "identical", a: discoveredTool{Name: "t", Path: "/x", Description: "d"}, b: discoveredTool{Name: "t", Path: "/x", Description: "d"}, want: true},
+		{name: "nil_timeouts_equal", a: discoveredTool{Name: "t"}, b: discoveredTool{Name: "t"}, want: true},
+		{name: "different_names", a: discoveredTool{Name: "a"}, b: discoveredTool{Name: "b"}, want: false},
+		{name: "different_paths", a: discoveredTool{Name: "t", Path: "/x"}, b: discoveredTool{Name: "t", Path: "/y"}, want: false},
+		{name: "different_descriptions", a: discoveredTool{Name: "t", Description: "one"}, b: discoveredTool{Name: "t", Description: "two"}, want: false},
+		{name: "nil_vs_zero_timeout", a: discoveredTool{Name: "t"}, b: discoveredTool{Name: "t", Timeout: &timeout0}, want: false},
+		{name: "timeout_values_differ", a: discoveredTool{Name: "t", Timeout: &timeout5}, b: discoveredTool{Name: "t", Timeout: &timeout0}, want: false},
+		{name: "params_differ", a: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p", Type: "string", Required: true}}}, b: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p", Type: "number"}}}, want: false},
+		{name: "params_reordered", a: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p"}, {Name: "q"}}}, b: discoveredTool{Name: "t", Params: []paramSpec{{Name: "q"}, {Name: "p"}}}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolsEqual([]discoveredTool{tt.a}, []discoveredTool{tt.b}); got != tt.want {
+				t.Errorf("toolsEqual = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if toolsEqual([]discoveredTool{{Name: "a"}, {Name: "b"}}, []discoveredTool{{Name: "a"}}) {
+		t.Error("different lengths must not compare equal")
+	}
+}
+
+// TestWatchToolsSkipsIdenticalRescan pins F-11: a debounced rescan whose
+// result is identical to the registered set must emit no RemoveTools/AddTool
+// churn and no tools/list_changed notifications, while a genuine change
+// still reloads.
+func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	initial, err := discoverTools(tmpDir)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	registry.replace(initial)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	var changed atomic.Int32
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { changed.Add(1) },
+	})
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_ = watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// The startup replace runs unconditionally (the F-17 double-scan is out
+	// of scope); wait for its notification(s) to drain, then take a baseline.
+	deadline := time.Now().Add(5 * time.Second)
+	for changed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	baseline := changed.Load()
+
+	// No-op touches: same content → identical set → must be skipped. Bounded
+	// retries (the F-22 pattern): a lost fsnotify event is legal, so keep
+	// touching until a rescan window has elapsed with zero notifications —
+	// that silence is the assertion.
+	noopSawChange := false
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to touch script: %v", err)
+		}
+		time.Sleep(600 * time.Millisecond) // several debounce windows
+		if changed.Load() != baseline {
+			noopSawChange = true
+			break
+		}
+		if i > 2 { // a few clean windows: the skip is working
+			break
+		}
+	}
+	if noopSawChange {
+		t.Fatalf("no-op rescan emitted %d list_changed notification(s) above baseline, want 0", changed.Load()-baseline)
+	}
+
+	// A real frontmatter change must reload.
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha v2\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for changed.Load() == baseline && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if changed.Load() != baseline {
+			break
+		}
+	}
+	if changed.Load() == baseline {
+		t.Fatal("a genuine description change did not trigger a reload after 10 attempts")
+	}
+
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Description != "alpha v2 (timeout: 5m0s)" {
+		t.Fatalf("tools after reload = %+v, want the updated description", res.Tools)
+	}
+}
+
 func TestResolvedTimeoutViaRegistry(t *testing.T) {
 	tmpDir := t.TempDir()
 	sleepPath := filepath.Join(tmpDir, "sleep5.sh")
@@ -2798,9 +2929,12 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 				removed = true
 				break
 			}
-			names = []string{res.Tools[0].Name}
-			if len(res.Tools) > 1 {
-				names = append(names, res.Tools[1].Name)
+			// The registry swaps remove-then-add, so the live list is
+			// transiently empty between the two; a 0-tool snapshot is a
+			// valid in-flight state, not an error — keep polling.
+			names = nil
+			for _, tool := range res.Tools {
+				names = append(names, tool.Name)
 			}
 			if time.Now().After(deadline) {
 				break
@@ -2813,12 +2947,18 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 		t.Fatalf("watchTools did not remove the deleted tool after 10 attempts: got %v", names)
 	}
 
+	// Let any in-flight rescan settle before the final check.
+	time.Sleep(300 * time.Millisecond)
 	res, err := clientSession.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListTools failed: %v", err)
 	}
+	var remaining []string
+	for _, tool := range res.Tools {
+		remaining = append(remaining, tool.Name)
+	}
 	if len(res.Tools) != 1 || res.Tools[0].Name != "alpha" {
-		t.Fatalf("remaining tools = %d (%v), want exactly alpha", len(res.Tools), names)
+		t.Fatalf("remaining tools = %v, want exactly [alpha]", remaining)
 	}
 	cancel()
 	select {
