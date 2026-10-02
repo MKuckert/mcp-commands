@@ -1118,25 +1118,25 @@ var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "a
 // the process exits after the diagnostic completes, except the live
 // --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
 // goes to stdout; warnings and operational errors go to stderr.
-func runDiagnostic(stdout, stderr io.Writer, dir, scriptsDir string, listTools, watch bool, callTool string, callToolSet bool, paramsRaw string, timeout time.Duration, ignoredFlags []string) int {
-	if len(ignoredFlags) > 0 {
-		fmt.Fprintf(stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(ignoredFlags, ", "))
+func runDiagnostic(stdout, stderr io.Writer, diag diagnostic) int {
+	if len(diag.ignoredFlags) > 0 {
+		fmt.Fprintf(stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
 	}
-	if listTools {
-		return runListTools(stdout, stderr, dir, scriptsDir, watch, timeout)
+	if diag.listTools {
+		return runListTools(stdout, stderr, diag.dir, diag.scriptsDir, diag.watch, diag.timeout)
 	}
-	if callTool == "" {
+	if diag.callTool == "" {
 		// Only reachable when --call-tool= was explicitly passed (an
 		// omitted flag is handled by main and never reaches here).
 		fmt.Fprintln(stderr, "Error: --call-tool requires a non-empty tool name")
 		return 1
 	}
-	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
+	dirAbs, scriptsAbs, err := resolveToolPaths(diag.dir, diag.scriptsDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1
 	}
-	code, err := runCallTool(stdout, scriptsAbs, dirAbs, timeout, callTool, paramsRaw)
+	code, err := runCallTool(stdout, scriptsAbs, dirAbs, diag.timeout, diag.callTool, diag.params)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 	}
@@ -1569,27 +1569,43 @@ const (
 	modeCallTool
 )
 
-// cliConfig is the fully resolved and validated result of parseCLI. main
-// consumes it directly; run/runDiagnostic take their fields positionally
-// (a wider struct-ification of those signatures is a future refactor).
-type cliConfig struct {
-	version        bool
-	mode           cliMode
+// serverConfig carries every server-mode option: the fully resolved (fail-
+// fast, in parseCLI) result of the server flags. run consumes it as a whole.
+type serverConfig struct {
 	dir            string
 	scriptsDir     string
 	watch          bool
 	host           string
 	port           int
-	apiKey         resolvedAPIKey // server+HTTP mode only; zero value = unauthenticated
+	apiKey         resolvedAPIKey // HTTP mode only; zero value = unauthenticated
 	cors           corsConfig
 	timeout        time.Duration // 0 = no global timeout (--no-timeout)
 	insecureNoAuth bool
 	maxConcurrent  int // 0 = default
-	listTools      bool
-	callTool       string
-	callToolSet    bool // --call-tool present (active even when its value is "")
-	params         string
-	ignoredFlags   []string
+}
+
+// diagnostic carries every diagnostic-mode option (--list-tools / --call-
+// tool). runDiagnostic consumes it as a whole.
+type diagnostic struct {
+	dir          string
+	scriptsDir   string
+	listTools    bool
+	watch        bool
+	callTool     string
+	callToolSet  bool // --call-tool present (active even when its value is "")
+	params       string
+	timeout      time.Duration
+	ignoredFlags []string
+}
+
+// cliConfig is the fully resolved and validated result of parseCLI. main
+// dispatches on mode: the server mode consumes cfg.server, the diagnostic
+// modes cfg.diagnostic.
+type cliConfig struct {
+	version    bool
+	mode       cliMode
+	server     serverConfig
+	diagnostic diagnostic
 }
 
 // errMissingRequiredFlags is the sentinel parseCLI returns when --dir/
@@ -1650,16 +1666,23 @@ func parseCLI(args []string) (cliConfig, error) {
 	}
 
 	cfg := cliConfig{
-		dir:            *dirFlag,
-		scriptsDir:     *scriptsFlag,
-		watch:          *watchFlag,
-		host:           *hostFlag,
-		port:           *portFlag,
-		insecureNoAuth: *insecureNoAuthFlag,
-		maxConcurrent:  *maxConcurrentFlag,
-		listTools:      *listToolsFlag,
-		callTool:       *callToolFlag,
-		params:         *paramsFlag,
+		server: serverConfig{
+			dir:            *dirFlag,
+			scriptsDir:     *scriptsFlag,
+			watch:          *watchFlag,
+			host:           *hostFlag,
+			port:           *portFlag,
+			insecureNoAuth: *insecureNoAuthFlag,
+			maxConcurrent:  *maxConcurrentFlag,
+		},
+		diagnostic: diagnostic{
+			dir:        *dirFlag,
+			scriptsDir: *scriptsFlag,
+			listTools:  *listToolsFlag,
+			watch:      *watchFlag,
+			callTool:   *callToolFlag,
+			params:     *paramsFlag,
+		},
 	}
 
 	// --version works without the required flags and skips all validation.
@@ -1690,30 +1713,32 @@ func parseCLI(args []string) (cliConfig, error) {
 	})
 
 	var err error
-	cfg.cors, err = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+	cfg.server.cors, err = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
 	if err != nil {
 		return cliConfig{}, err
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
-	cfg.timeout, err = resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
 	if err != nil {
 		return cliConfig{}, err
 	}
+	cfg.server.timeout = timeout
+	cfg.diagnostic.timeout = timeout
 
 	callToolActive := *callToolFlag != "" || callToolSet
-	cfg.callToolSet = callToolSet
+	cfg.diagnostic.callToolSet = callToolSet
 	cfg.mode = modeServer
 	if callToolActive {
 		cfg.mode = modeCallTool
 	} else if *listToolsFlag {
 		cfg.mode = modeListTools
 	}
-	if cfg.listTools && callToolActive {
+	if cfg.diagnostic.listTools && callToolActive {
 		return cliConfig{}, errors.New("--list-tools and --call-tool are mutually exclusive")
 	}
-	if cfg.maxConcurrent < 0 {
-		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.maxConcurrent)
+	if cfg.server.maxConcurrent < 0 {
+		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.server.maxConcurrent)
 	}
 	if cfg.mode != modeServer {
 		// The server-mode flags are always ignored in diagnostic modes
@@ -1721,13 +1746,13 @@ func parseCLI(args []string) (cliConfig, error) {
 		// --port=0, --host=127.0.0.1, --watch=false are noticed too).
 		for _, name := range serverModeFlagNames {
 			if visited[name] {
-				cfg.ignoredFlags = append(cfg.ignoredFlags, "--"+name)
+				cfg.diagnostic.ignoredFlags = append(cfg.diagnostic.ignoredFlags, "--"+name)
 			}
 		}
 		// --watch is honored with --list-tools and ignored with --call-tool;
 		// appended last to preserve the pre-refactor notice ordering.
 		if cfg.mode == modeCallTool && visited["watch"] {
-			cfg.ignoredFlags = append(cfg.ignoredFlags, "--watch")
+			cfg.diagnostic.ignoredFlags = append(cfg.diagnostic.ignoredFlags, "--watch")
 		}
 		return cfg, nil
 	}
@@ -1736,8 +1761,8 @@ func parseCLI(args []string) (cliConfig, error) {
 	// ignored, so an unreadable --api-key-file must not block a stdio
 	// server from starting. (Diagnostic modes ignore the key flags and
 	// report them via the ignored-flags notice.)
-	if cfg.port > 0 {
-		cfg.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	if cfg.server.port > 0 {
+		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
 	}
 	return cfg, err
 }
@@ -1767,9 +1792,9 @@ func main() {
 		os.Exit(0)
 	}
 	if cfg.mode != modeServer {
-		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.dir, cfg.scriptsDir, cfg.listTools, cfg.watch, cfg.callTool, cfg.callToolSet, cfg.params, cfg.timeout, cfg.ignoredFlags))
+		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.diagnostic))
 	}
-	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey.Token, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
+	if err := run(context.Background(), cfg.server); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -1781,11 +1806,11 @@ func main() {
 // reporting keeps using os.Stderr directly.
 var errOut io.Writer = os.Stderr
 
-func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
+func run(ctx context.Context, cfg serverConfig) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
+	dirAbs, scriptsAbs, err := resolveToolPaths(cfg.dir, cfg.scriptsDir)
 	if err != nil {
 		return err
 	}
@@ -1804,10 +1829,10 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs, timeout, maxConcurrent)
+	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent)
 	registry.replace(tools)
 
-	if watch {
+	if cfg.watch {
 		go func() {
 			if err := watchTools(sigCtx, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(errOut, "Warning: watch loop stopped: %v\n", err)
@@ -1815,17 +1840,17 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		}()
 	}
 
-	if port > 0 {
-		addr := fmt.Sprintf("%s:%d", host, port)
+	if cfg.port > 0 {
+		addr := fmt.Sprintf("%s:%d", cfg.host, cfg.port)
 
 		// Fail fast before binding: no silent unauthenticated remote shells.
-		if warning, err := checkHTTPSecurityPolicy(host, apiKey, insecureNoAuth); err != nil {
+		if warning, err := checkHTTPSecurityPolicy(cfg.host, cfg.apiKey.Token, cfg.insecureNoAuth); err != nil {
 			return err
 		} else if warning != "" {
 			fmt.Fprintln(errOut, warning)
 		}
 
-		handler := buildHTTPHandler(server, apiKey, cors)
+		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)
 		serverHTTP := &http.Server{
 			Addr:    addr,
 			Handler: handler,
@@ -1844,13 +1869,13 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		}()
 
 		var notes []string
-		if apiKey != "" {
+		if cfg.apiKey.Token != "" {
 			notes = append(notes, "API key auth enabled")
-		} else if !isLoopbackHost(host) {
+		} else if !isLoopbackHost(cfg.host) {
 			notes = append(notes, "UNAUTHENTICATED")
 		}
-		if cors.enabled() {
-			notes = append(notes, cors.summary())
+		if cfg.cors.enabled() {
+			notes = append(notes, cfg.cors.summary())
 		}
 		line := fmt.Sprintf("Starting HTTP server on %s", addr)
 		if len(notes) > 0 {

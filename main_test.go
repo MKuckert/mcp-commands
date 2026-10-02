@@ -1508,20 +1508,20 @@ func TestParseCLI(t *testing.T) {
 			wantErr:  "",
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.host != "127.0.0.1" {
-					t.Errorf("host = %q, want default 127.0.0.1", c.host)
+				if c.server.host != "127.0.0.1" {
+					t.Errorf("host = %q, want default 127.0.0.1", c.server.host)
 				}
-				if c.port != 0 {
-					t.Errorf("port = %d, want 0 (stdio)", c.port)
+				if c.server.port != 0 {
+					t.Errorf("port = %d, want 0 (stdio)", c.server.port)
 				}
-				if c.timeout != defaultToolTimeout {
-					t.Errorf("timeout = %v, want default", c.timeout)
+				if c.server.timeout != defaultToolTimeout {
+					t.Errorf("timeout = %v, want default", c.server.timeout)
 				}
-				if c.maxConcurrent != defaultMaxConcurrentTools {
-					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				if c.server.maxConcurrent != defaultMaxConcurrentTools {
+					t.Errorf("maxConcurrent = %d", c.server.maxConcurrent)
 				}
-				if c.apiKey.Token != "" {
-					t.Errorf("apiKey = %q, want empty", c.apiKey)
+				if c.server.apiKey.Token != "" {
+					t.Errorf("apiKey = %q, want empty", c.server.apiKey)
 				}
 			},
 		},
@@ -1531,20 +1531,20 @@ func TestParseCLI(t *testing.T) {
 			wantErr:  "",
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.host != "0.0.0.0" || c.port != 9090 {
-					t.Errorf("host/port = %q/%d", c.host, c.port)
+				if c.server.host != "0.0.0.0" || c.server.port != 9090 {
+					t.Errorf("host/port = %q/%d", c.server.host, c.server.port)
 				}
-				if c.apiKey.Token != "tk" || c.apiKey.Source != apiKeySourceFlag {
-					t.Errorf("apiKey = %v, want tk/flag", c.apiKey)
+				if c.server.apiKey.Token != "tk" || c.server.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want tk/flag", c.server.apiKey)
 				}
-				if c.timeout != time.Hour {
-					t.Errorf("timeout = %v", c.timeout)
+				if c.server.timeout != time.Hour {
+					t.Errorf("timeout = %v", c.server.timeout)
 				}
-				if c.maxConcurrent != 4 {
-					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				if c.server.maxConcurrent != 4 {
+					t.Errorf("maxConcurrent = %d", c.server.maxConcurrent)
 				}
-				if !c.watch || !c.insecureNoAuth {
-					t.Errorf("watch/insecure = %v/%v", c.watch, c.insecureNoAuth)
+				if !c.server.watch || !c.server.insecureNoAuth {
+					t.Errorf("watch/insecure = %v/%v", c.server.watch, c.server.insecureNoAuth)
 				}
 			},
 		},
@@ -1553,8 +1553,8 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", keyFile},
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey.Token != "filetoken" || c.apiKey.Source != apiKeySourceFile {
-					t.Errorf("apiKey = %v, want filetoken/file", c.apiKey)
+				if c.server.apiKey.Token != "filetoken" || c.server.apiKey.Source != apiKeySourceFile {
+					t.Errorf("apiKey = %v, want filetoken/file", c.server.apiKey)
 				}
 			},
 		},
@@ -1563,8 +1563,8 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key", "flag", "--api-key-file", keyFile},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey.Token != "flag" || c.apiKey.Source != apiKeySourceFlag {
-					t.Errorf("apiKey = %v, want flag/flag", c.apiKey)
+				if c.server.apiKey.Token != "flag" || c.server.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want flag/flag", c.server.apiKey)
 				}
 			},
 		},
@@ -1580,8 +1580,8 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey.Source != apiKeySourceNone {
-					t.Errorf("apiKey = %v, want zero value in stdio mode", c.apiKey)
+				if c.server.apiKey.Source != apiKeySourceNone {
+					t.Errorf("apiKey = %v, want zero value in stdio mode", c.server.apiKey)
 				}
 			},
 		},
@@ -1590,8 +1590,8 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--no-timeout"},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
-				if c.timeout != 0 {
-					t.Errorf("timeout = %v, want 0", c.timeout)
+				if c.server.timeout != 0 {
+					t.Errorf("timeout = %v, want 0", c.server.timeout)
 				}
 			},
 		},
@@ -1615,9 +1615,9 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk"},
 			wantMode: modeListTools,
 			check: func(t *testing.T, c cliConfig) {
-				got := strings.Join(c.ignoredFlags, ",")
+				got := strings.Join(c.diagnostic.ignoredFlags, ",")
 				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") {
-					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+					t.Errorf("ignoredFlags = %v", c.diagnostic.ignoredFlags)
 				}
 			},
 		},
@@ -1626,11 +1626,11 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--call-tool", "x", "--watch", "--port", "80"},
 			wantMode: modeCallTool,
 			check: func(t *testing.T, c cliConfig) {
-				got := strings.Join(c.ignoredFlags, ",")
+				got := strings.Join(c.diagnostic.ignoredFlags, ",")
 				if !strings.Contains(got, "--watch") || !strings.Contains(got, "--port") {
-					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+					t.Errorf("ignoredFlags = %v", c.diagnostic.ignoredFlags)
 				}
-				if !c.callToolSet {
+				if !c.diagnostic.callToolSet {
 					t.Error("callToolSet must be true")
 				}
 			},
@@ -1640,7 +1640,7 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--call-tool", ""},
 			wantMode: modeCallTool,
 			check: func(t *testing.T, c cliConfig) {
-				if !c.callToolSet {
+				if !c.diagnostic.callToolSet {
 					t.Error("callToolSet must be true even with an empty value")
 				}
 			},
@@ -1701,7 +1701,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			done <- run(ctx, dir, scripts, false, "127.0.0.1", port, "sekret", corsConfig{}, defaultToolTimeout, false, 16)
+			done <- run(ctx, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, apiKey: resolvedAPIKey{Token: "sekret", Source: apiKeySourceFlag}, timeout: defaultToolTimeout})
 		}()
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -1762,7 +1762,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		defer cancel()
 		done := make(chan error, 1)
 		go func() {
-			done <- run(ctx, dir, scripts, false, "127.0.0.1", port, "", corsConfig{}, defaultToolTimeout, false, 16)
+			done <- run(ctx, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, timeout: defaultToolTimeout})
 		}()
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -3435,7 +3435,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, emptyDir, emptyDir, true, false, "", false, "", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: 5 * time.Minute})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -3450,7 +3450,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		missing := filepath.Join(tmpDir, "no-such-scripts")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, missing, true, false, "", false, "", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
@@ -3468,7 +3468,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			t.Fatalf("failed to create script: %v", err)
 		}
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, tmpDir, true, false, "", false, "", 5*time.Minute, []string{"--host", "--port"})
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--port"}})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -3509,7 +3509,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+			done <- runDiagnostic(&stdout, &stderr, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -3576,7 +3576,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, scriptsDir, scriptsDir, true, true, "", false, "", 5*time.Minute, nil)
+			done <- runDiagnostic(&stdout, &stderr, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -3783,7 +3783,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, false, "", true, "{}", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, params: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
@@ -3797,7 +3797,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, scriptsDir, false, true, "ok", true, `{"x":"y"}`, 5*time.Minute, []string{"--host", "--watch"})
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--watch"}})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}
@@ -3813,7 +3813,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, tmpDir, filepath.Join(tmpDir, "no-such"), false, false, "ok", true, "{}", 5*time.Minute, nil)
+		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, params: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
