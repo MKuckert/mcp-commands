@@ -80,8 +80,6 @@ Severity: **H**igh / **M**edium / **L**ow. Complexity: **T**rivial (≤ ~20 line
 | F-23 ✅ 2026-10-02 (commit 8766109) | L/T | Stale `Makefile`: `VERSION ?= 0.2.0` while code is 0.7.0 — `make` builds report the wrong version (release binaries are unaffected: `.goreleaser.yaml` has no version injection and uses the hardcoded constant). Also `buildall` missing from `.PHONY`. | Bump / add. |
 | F-24 | L/T | Stale `.zed/debug.json`: `src/` paths that no longer exist — launch config fails. | Update to repo root. |
 | F-25 | L/T | Root `PLAN.md` (369 lines, fully completed, "Approved") not archived, inconsistent with the `plans/` convention; `plans/2026-06-30-initial.md` describes `--ip`, `src/`, `os.Chdir`, 10-line scan — all superseded, no "superseded" banner. | Archive root PLAN.md; one-line banners on superseded plans. |
-| F-26 | L/T | README fluff: "AI Usage" section (zero operational value), "adjust package path" vestige. | Cut. |
-| F-27 | L/T | `--allow-all-origins` + non-loopback host: add a persistent startup warning (origin-echo footgun; SEC-8). | 3 lines. |
 | F-28 | L/T | No TLS: document that HTTP transport is cleartext and must be terminated upstream (SEC-10); optionally `--tls-cert/--tls-key`. | README + flag. |
 | F-29 | L/T | Document that tool output is untrusted model input; the `<stdout>` tag wrapper is advisory, and scripts can emit literal `</stdout>` (SEC-9). | README one-paragraph. |
 | F-30 | L/T | No vulnerability scanning in CI (deps verified clean by hand today: go-sdk v1.6.1 past both 2026 advisories; fsnotify CVE is a kernel issue). | Add `govulncheck`/`osv-scanner` step to `release.yml`. |
