@@ -3,7 +3,7 @@
 **Branch:** `fix/tier2-hardening` (from `main` @ 15e7da7, post-Tier-1)
 **Target version:** v0.8.1
 **Source of truth:** `REVIEW.md` §Tier 2 (+ F-23 from Tier 4, rides along per its "can ride along with anything" note).
-Status: **In progress** — tick boxes as units land.
+Status: **Complete** — all units landed; pending Code Reviewer sign-off (checkboxes are the reviewer's, this tick list tracks landing).
 
 ## Scope
 
@@ -13,7 +13,7 @@ Status: **In progress** — tick boxes as units land.
 - [x] F-10: `main`/`run` coverage — `parseCLI` extraction + one HTTP end-to-end test against `run`
 - [x] F-11: diff new vs current tool set; skip re-registration (and N `tools/list_changed` notifications) when the set is unchanged
 - [x] F-12: mark done (UTF-8 boundary back-off landed with F-2 in commit 459a9ba, tested in `TestCombineToolOutputTruncation`)
-- [ ] F-23: Makefile `VERSION` 0.2.0 → 0.8.1, `buildall` in `.PHONY`; `serverVersion` → `0.8.1`
+- [x] F-23: Makefile `VERSION` 0.2.0 → 0.8.1, `buildall` in `.PHONY`; `serverVersion` → `0.8.1`
 - [x] Docs: README auth section documents `--api-key-file` + deprecation; usage line updated
 - [x] REVIEW.md: mark F-7…F-12, F-23 ✅ with this branch's commits
 
