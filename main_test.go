@@ -2475,7 +2475,9 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools failed: %v", err)
 	}
-	if len(res.Tools) != 1 || res.Tools[0].Description != "alpha v2 (timeout: 5m0s)" {
+	// Contains, not equality: the description format belongs to
+	// resolveToolTimeout and may change cosmetically.
+	if len(res.Tools) != 1 || !strings.Contains(res.Tools[0].Description, "alpha v2") || !strings.Contains(res.Tools[0].Description, "5m") {
 		t.Fatalf("tools after reload = %+v, want the updated description", res.Tools)
 	}
 }

@@ -1031,12 +1031,20 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	// CommandContext signals only the direct child; the whole process group
 	// (script plus grandchildren — the canonical shell-tool shape) must die
 	// with the deadline, or the 5-minute budget is not a real budget.
+	// The killer lives only as long as the call: it fires on the deadline
+	// and retires on natural exit, so a fast tool leaves no lingering
+	// goroutine (one per call, 5-minute default, would be a slow leak).
+	processDone := make(chan struct{})
 	go func() {
-		<-execCtx.Done()
-		_ = killToolProcess(cmd)
+		select {
+		case <-execCtx.Done():
+			_ = killToolProcess(cmd)
+		case <-processDone:
+		}
 	}()
 
 	waitErr := cmd.Wait()
+	close(processDone)
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
 
 	if waitErr != nil {
@@ -1572,6 +1580,15 @@ type cliConfig struct {
 // --scripts are absent; main prints the usage line for it specifically.
 var errMissingRequiredFlags = errors.New("--dir and --scripts are required")
 
+// flagParseError wraps a raw flag-package parse error (undefined flag,
+// invalid value, -h). main maps it to the flag package's user-visible
+// conventions: -h → usage on stdout, exit 0; other parse errors → usage on
+// stderr, exit 2 — matching the pre-extraction flag.ExitOnError behavior.
+type flagParseError struct{ err error }
+
+func (e *flagParseError) Error() string { return e.err.Error() }
+func (e *flagParseError) Unwrap() error { return e.err }
+
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
 const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]"
 
@@ -1602,7 +1619,10 @@ func parseCLI(args []string) (cliConfig, error) {
 	paramsFlag := fs.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
 
 	if err := fs.Parse(args); err != nil {
-		return cliConfig{}, err
+		// Wrapped so main can restore the flag package's parse-error
+		// convention (usage to stderr, exit 2) and -h (usage to stdout,
+		// exit 0); validation errors keep the regular Error:/exit 1 path.
+		return cliConfig{}, &flagParseError{err: err}
 	}
 
 	cfg := cliConfig{
@@ -1662,9 +1682,6 @@ func parseCLI(args []string) (cliConfig, error) {
 	cfg.mode = modeServer
 	if callToolActive {
 		cfg.mode = modeCallTool
-		if visited["watch"] {
-			cfg.ignoredFlags = append(cfg.ignoredFlags, "--watch")
-		}
 	} else if *listToolsFlag {
 		cfg.mode = modeListTools
 	}
@@ -1675,14 +1692,18 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.maxConcurrent)
 	}
 	if cfg.mode != modeServer {
-		// --watch is honored with --list-tools (live list) and ignored with
-		// --call-tool; the server-mode flags are always ignored. Presence is
-		// visit-tracked, so default-valued forms (--port=0, --host=127.0.0.1,
-		// --watch=false) are noticed too.
+		// The server-mode flags are always ignored in diagnostic modes
+		// (presence is visit-tracked, so default-valued forms like
+		// --port=0, --host=127.0.0.1, --watch=false are noticed too).
 		for _, name := range serverModeFlagNames {
 			if visited[name] {
 				cfg.ignoredFlags = append(cfg.ignoredFlags, "--"+name)
 			}
+		}
+		// --watch is honored with --list-tools and ignored with --call-tool;
+		// appended last to preserve the pre-refactor notice ordering.
+		if cfg.mode == modeCallTool && visited["watch"] {
+			cfg.ignoredFlags = append(cfg.ignoredFlags, "--watch")
 		}
 		return cfg, nil
 	}
@@ -1696,6 +1717,16 @@ func parseCLI(args []string) (cliConfig, error) {
 func main() {
 	cfg, err := parseCLI(os.Args[1:])
 	if err != nil {
+		var parseErr *flagParseError
+		if errors.As(err, &parseErr) {
+			if errors.Is(err, flag.ErrHelp) {
+				fmt.Println(usageLine)
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintln(os.Stderr, usageLine)
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		if errors.Is(err, errMissingRequiredFlags) {
 			fmt.Fprintln(os.Stderr, usageLine)
@@ -1709,7 +1740,9 @@ func main() {
 	if cfg.mode != modeServer {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.dir, cfg.scriptsDir, cfg.listTools, cfg.watch, cfg.callTool, cfg.callToolSet, cfg.params, cfg.timeout, cfg.ignoredFlags))
 	}
-	if cfg.apiKeyFromFlag {
+	// HTTP mode only: in stdio mode the token is unused (no auth layer),
+	// so warning about its /proc exposure would be noise.
+	if cfg.apiKeyFromFlag && cfg.port != 0 {
 		fmt.Fprintln(os.Stderr, apiKeyFlagWarning)
 	}
 	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
