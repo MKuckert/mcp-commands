@@ -286,6 +286,10 @@ The server translates JSON properties into CLI flags.
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
 - **Deterministic ordering:** Keys are sorted alphabetically before translation, so the CLI flag order is stable and never reflects the LLM's JSON object key order.
 
+#### Untrusted Tool Output
+
+Treat tool output as **untrusted model input**. The `<stdout>`/`<stderr>` tags are advisory formatting, not a sandbox: a script can emit a literal `</stdout>` line and thereby inject content that looks like server framing, and anything it prints is handed to the LLM verbatim (up to the 1 MiB cap). The trust boundary is the scripts directory: **write access to `--scripts` is code execution as the server user**, so keep that directory under your control. Do not rely on the tags to keep a misbehaving or hostile script from influencing the model.
+
 ### Diagnostics
 
 Two self-contained diagnostic modes reuse the exact discovery, frontmatter
