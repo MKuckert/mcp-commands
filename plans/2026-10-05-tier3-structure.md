@@ -37,3 +37,18 @@ Status: in progress — tick as units land; checkboxes are the Code Reviewer's.
 - `gofmt -l .` clean
 - Windows cross-compile sanity: `GOOS=windows GOARCH=amd64 go build ./...`
 - Smoke: `--list-tools`, `--call-tool`, HTTP auth, version output
+
+
+## Status (2026-10-05): complete
+
+All nine items landed on `fix/tier3-structure`, one commit each (see `git log`):
+F-14 `b290485` · F-15 `05516c4` · F-16+F-17 `fe8eda1` · F-18+F-19 `9b9fd1f` · F-20 `b6cf5de` · F-22 `3eb592b` · F-21 (README, swept into `b290485`).
+
+Deviations from the plan, all deliberate:
+1. **F-20: 11 files, not 12** — the proposed `call.go` merged into `server.go` (`runCallTool`/`runListTools`/`runDiagnostic` are one "run modes" cluster; a 30-line file would be noise).
+2. **F-18: `parseTimeoutDuration` left as-is** — it was already the proposed prefix-token loop with overflow guards; no rewrite needed.
+3. **F-22: `TestBuildInputSchema` kept as structured `t.Run` subtests** — its assertions are heterogeneous per case; a table would force a weakest-common-denominator assertion set.
+4. **F-22: `waitFor` added and the simple loops converted; the ListTools polling loops keep bounded polling** — their cond (call ListTools, capture state, success check) would be longer inside a `waitFor` closure than the loop it replaces.
+5. **F-21: README changes committed with the F-14 commit** (`git add -A` timing), so the F-14 commit contains doc changes alongside the struct refactor.
+
+Verification (final state): `gofmt -l` clean, `go vet ./...` clean, `go test ./...` green (~11 s with the new `t.Parallel` suite).
