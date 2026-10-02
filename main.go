@@ -87,6 +87,7 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 	}
 
 	var tools []discoveredTool
+	registeredNames := make(map[string]string) // tool name -> file that registered it
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -111,6 +112,15 @@ func discoverTools(scriptsDir string) ([]discoveredTool, error) {
 
 		description, params, timeout := extractFrontmatter(resolvedPath)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+
+		// Name collisions (a.sh and a.py both register as "a") are first-
+		// wins in ReadDir (i.e. filename) order, with a loud warning — the
+		// duplicate would be silently shadowed without it.
+		if firstFile, dup := registeredNames[name]; dup {
+			fmt.Fprintf(os.Stderr, "Warning: ignoring %s: tool name %q already registered by %s\n", entry.Name(), name, firstFile)
+			continue
+		}
+		registeredNames[name] = entry.Name()
 
 		tools = append(tools, discoveredTool{
 			Name:        name,
@@ -149,19 +159,17 @@ func extractFrontmatter(filePath string) (description string, params []paramSpec
 		lineCount++
 		line := scanner.Text()
 
-		if !descriptionSeen && strings.Contains(line, scanDescriptionPrefix) {
-			parts := strings.SplitN(line, scanDescriptionPrefix, 2)
-			if len(parts) == 2 {
-				description = strings.TrimSpace(parts[1])
+		if _, after, found := strings.Cut(line, scanDescriptionPrefix); found {
+			if !descriptionSeen {
+				description = strings.TrimSpace(after)
 			}
 			descriptionSeen = true
 			continue
 		}
 
-		if !timeoutSeen && strings.Contains(line, scanTimeoutPrefix) {
-			parts := strings.SplitN(line, scanTimeoutPrefix, 2)
-			if len(parts) == 2 {
-				if duration, err := parseTimeoutDuration(parts[1]); err != nil {
+		if _, after, found := strings.Cut(line, scanTimeoutPrefix); found {
+			if !timeoutSeen {
+				if duration, err := parseTimeoutDuration(after); err != nil {
 					// Warn and keep timeout nil (global applies) without
 					// interrupting the scan, so later Param: lines are still collected.
 					fmt.Fprintf(os.Stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
@@ -173,13 +181,10 @@ func extractFrontmatter(filePath string) (description string, params []paramSpec
 			continue
 		}
 
-		if strings.Contains(line, scanParamPrefix) {
-			parts := strings.SplitN(line, scanParamPrefix, 2)
-			if len(parts) == 2 {
-				// Invalid annotations log their own stderr warning.
-				if param, err := parseParamAnnotation(strings.TrimSpace(parts[1]), filePath, line); err == nil {
-					params = append(params, param)
-				}
+		if _, after, found := strings.Cut(line, scanParamPrefix); found {
+			// Invalid annotations log their own stderr warning.
+			if param, err := parseParamAnnotation(strings.TrimSpace(after), filePath, line); err == nil {
+				params = append(params, param)
 			}
 		}
 	}
@@ -278,18 +283,26 @@ func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Durati
 	return defaultToolTimeout, nil
 }
 
+// paramTypes is the allowed set of Param: types.
+var paramTypes = map[string]bool{"string": true, "number": true, "boolean": true}
+
+// warnParam logs the single stderr warning shape shared by every rejected
+// Param: annotation variant.
+func warnParam(filePath, reason, fullLine string) {
+	fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n", filePath, reason, fullLine)
+}
+
 // parseParamAnnotation parses a single parameter annotation string.
 // It expects format: <name> <type> <required|optional> "<description>"
 // Returns error if validation fails (warning already logged to stderr).
 func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, error) {
-	// Find the quoted description (everything after the last quote-wrapped string)
-	// The description is the last field, wrapped in quotes
+	// The description is the last field, wrapped in quotes; the first
+	// quoted span is the one we take.
 	lastQuoteIdx := strings.LastIndex(annotation, "\"")
 	firstQuoteIdx := strings.Index(annotation, "\"")
 
 	if firstQuoteIdx < 0 || lastQuoteIdx < 0 || firstQuoteIdx == lastQuoteIdx {
-		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
-			filePath, "description must be quoted", fullLine)
+		warnParam(filePath, "description must be quoted", fullLine)
 		return paramSpec{}, fmt.Errorf("malformed param annotation")
 	}
 
@@ -302,8 +315,7 @@ func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, err
 	// Split prefix into name, type, and required/optional token
 	tokens := strings.Fields(prefix)
 	if len(tokens) != 3 {
-		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
-			filePath, "expected 3 fields (name, type, required|optional)", fullLine)
+		warnParam(filePath, "expected 3 fields (name, type, required|optional)", fullLine)
 		return paramSpec{}, fmt.Errorf("wrong field count")
 	}
 
@@ -313,22 +325,13 @@ func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, err
 
 	// Validate name against argumentKeyPattern
 	if !argumentKeyPattern.MatchString(name) {
-		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
-			filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine)
+		warnParam(filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine)
 		return paramSpec{}, fmt.Errorf("invalid parameter name")
 	}
 
 	// Validate type
-	var typeOk bool
-	switch paramType {
-	case "string", "number", "boolean":
-		typeOk = true
-	default:
-		typeOk = false
-	}
-	if !typeOk {
-		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
-			filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine)
+	if !paramTypes[paramType] {
+		warnParam(filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine)
 		return paramSpec{}, fmt.Errorf("invalid type")
 	}
 
@@ -340,8 +343,7 @@ func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, err
 	case "optional":
 		required = false
 	default:
-		fmt.Fprintf(os.Stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n",
-			filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine)
+		warnParam(filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine)
 		return paramSpec{}, fmt.Errorf("invalid required token")
 	}
 
@@ -472,6 +474,15 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	}
 
 	return cliArgs, nil
+}
+
+// textResult builds the single-text CallToolResult that every tool-execution
+// outcome takes (text + optional IsError flag).
+func textResult(text string, isErr bool) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: text}},
+		IsError: isErr,
+	}
 }
 
 // boundedWriter is an io.Writer that accumulates at most limit bytes. Writes
@@ -624,48 +635,38 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 	r.names = make([]string, 0, len(tools))
 	r.current = tools
-	for _, discoveredTool := range tools {
-		toolName := discoveredTool.Name
-		toolPath := discoveredTool.Path
-		toolParams := discoveredTool.Params
-
+	for _, tool := range tools {
 		// A per-tool Timeout: always wins over the global, even --no-timeout.
-		toolTimeout := resolveToolTimeout(discoveredTool, r.globalTimeout)
+		toolTimeout := resolveToolTimeout(tool, r.globalTimeout)
 
-		description := registeredDescription(discoveredTool.Description, toolTimeout)
+		description := registeredDescription(tool.Description, toolTimeout)
 
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			parsedArgs, err := parseToolArguments(req.Params.Arguments)
 			if err != nil {
 				return nil, err
 			}
-			if err := validateRequiredParams(parsedArgs, toolParams); err != nil {
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
-					IsError: true,
-				}, nil
+			if err := validateRequiredParams(parsedArgs, tool.Params); err != nil {
+				return textResult(err.Error(), true), nil
 			}
 			// Capacity check after validation: malformed calls must not
 			// consume a slot. At capacity, fail cleanly so clients retry
 			// rather than piling up pinned subprocesses.
 			if !r.slot.tryAcquire() {
 				msg := fmt.Sprintf("mcp-commands is at capacity (%d concurrent tool executions); please retry shortly", r.slot.limit)
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: msg}},
-					IsError: true,
-				}, nil
+				return textResult(msg, true), nil
 			}
 			defer r.slot.release()
-			return executeTool(ctx, toolPath, parsedArgs, toolTimeout, r.dirAbs)
+			return executeTool(ctx, tool.Path, parsedArgs, toolTimeout, r.dirAbs)
 		})
 
 		r.server.AddTool(&mcp.Tool{
-			Name:        toolName,
+			Name:        tool.Name,
 			Description: description,
-			InputSchema: buildInputSchema(toolParams),
+			InputSchema: buildInputSchema(tool.Params),
 		}, handlerFunc)
 
-		r.names = append(r.names, toolName)
+		r.names = append(r.names, tool.Name)
 	}
 }
 
@@ -994,10 +995,7 @@ func validateRequiredParams(args map[string]any, params []paramSpec) error {
 func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
-			IsError: true,
-		}, nil
+		return textResult(err.Error(), true), nil
 	}
 
 	execCtx := ctx
@@ -1041,25 +1039,17 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 			if combinedOutput != "" {
 				message += "\n" + combinedOutput
 			}
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: message}},
-				IsError: true,
-			}, nil
+			return textResult(message, true), nil
 		}
 
 		if combinedOutput == "" {
 			combinedOutput = waitErr.Error()
 		}
 
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
-			IsError: true,
-		}, nil
+		return textResult(combinedOutput, true), nil
 	}
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: combinedOutput}},
-	}, nil
+	return textResult(combinedOutput, false), nil
 }
 
 // resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
