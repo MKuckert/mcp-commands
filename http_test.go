@@ -113,6 +113,7 @@ func TestBearerAuthMiddleware(t *testing.T) {
 		{name: "lowercase_scheme_accepted", header: "bearer " + token, wantStatus: http.StatusOK, wantReached: true},
 		{name: "wrong_token", header: "Bearer wrong", wantStatus: http.StatusUnauthorized, wantReached: false},
 		{name: "correct_token", header: "Bearer " + token, wantStatus: http.StatusOK, wantReached: true},
+		{name: "double_space_token", header: "Bearer  " + token, wantStatus: http.StatusUnauthorized, wantReached: false},
 	}
 
 	for _, tt := range tests {
@@ -520,6 +521,78 @@ func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
 	}
 	if got := resp.Header.Get("Access-Control-Expose-Headers"); got != "Mcp-Session-Id, Last-Event-ID" {
 		t.Errorf("401 Access-Control-Expose-Headers = %q, want %q", got, "Mcp-Session-Id, Last-Event-ID")
+	}
+}
+
+// TestCORSHandlerPreflightDisallowedOrigin: a preflight OPTIONS from an
+// origin NOT on the allowlist must be forwarded to the next handler (no 204
+// short-circuit, no echoed CORS headers) — the browser then blocks the read.
+func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
+	t.Parallel()
+	cfg := corsConfig{origins: []string{"https://app.example.com"}}
+	reached := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+
+	newCORSHandler(next, cfg).ServeHTTP(rec, req)
+
+	if !reached {
+		t.Error("preflight from a disallowed origin must be forwarded to next, not answered by the CORS layer")
+	}
+	if acAO := rec.Header().Get("Access-Control-Allow-Origin"); acAO != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want absent for a disallowed origin", acAO)
+	}
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("status = %d, want 418 (unchanged by the CORS layer)", rec.Code)
+	}
+}
+
+// TestBuildHTTPHandlerMethodAllowlist: the streamable HTTP transport answers
+// GET (SSE) and other non-POST methods with 405 (the README's documented
+// behavior). The SDK validates the Accept header before the method, so a
+// stream Accept header is set; DELETE is session-scoped and in stateless
+// mode fails its session precondition (400) instead, so it is checked
+// separately.
+func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	do := func(method string) (int, string) {
+		req, err := http.NewRequest(method, httpServer.URL+"/", nil)
+		if err != nil {
+			t.Fatalf("failed to build %s request: %v", method, err)
+		}
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s request failed: %v", method, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Allow")
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch} {
+		status, allow := do(method)
+		if status != http.StatusMethodNotAllowed {
+			t.Errorf("%s: status = %d, want 405", method, status)
+		}
+		if allow != "POST" {
+			t.Errorf("%s: Allow = %q, want POST", method, allow)
+		}
+	}
+
+	// DELETE without a session ID fails the session precondition, not the
+	// method allowlist (stateless mode accepts a session ID and 204s).
+	if status, _ := do(http.MethodDelete); status != http.StatusBadRequest {
+		t.Errorf("DELETE: status = %d, want 400 (missing Mcp-Session-Id)", status)
 	}
 }
 

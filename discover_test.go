@@ -154,7 +154,7 @@ echo "Hello"
 	})
 
 	t.Run("handles_nonexistent_directory", func(t *testing.T) {
-		nonExistent := "/tmp/nonexistent_dir_12345"
+		nonExistent := filepath.Join(t.TempDir(), "does_not_exist")
 		_, err := discoverTools(nonExistent, io.Discard)
 		if err == nil {
 			t.Error("Expected error for nonexistent directory, got nil")
