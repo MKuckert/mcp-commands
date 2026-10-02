@@ -63,7 +63,7 @@ func prodLiveEnv() liveEnv {
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
+var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "tls-cert", "tls-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
@@ -286,6 +286,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		} else if !isLoopbackHost(cfg.host) {
 			notes = append(notes, "UNAUTHENTICATED")
 		}
+		serve := serverHTTP.ListenAndServe
+		if cfg.tlsCert != "" {
+			serve = func() error { return serverHTTP.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
+			notes = append(notes, "TLS")
+		}
 		if cfg.cors.enabled() {
 			notes = append(notes, cfg.cors.summary())
 		}
@@ -294,7 +299,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
 		fmt.Fprintf(env.stderr, "%s\n", line)
-		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
 		return nil

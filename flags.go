@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -27,6 +28,8 @@ type serverConfig struct {
 	host           string
 	port           int
 	apiKey         resolvedAPIKey // HTTP mode only; zero value = unauthenticated
+	tlsCert        string // HTTP mode only; non-empty switches to ListenAndServeTLS
+	tlsKey         string
 	cors           corsConfig
 	timeout        time.Duration // 0 = no global timeout (--no-timeout)
 	insecureNoAuth bool
@@ -88,6 +91,8 @@ func parseCLI(args []string) (cliConfig, error) {
 	portFlag := fs.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
 	apiKeyFlag := fs.String("api-key", "", "API token for HTTP mode (alternatives: --api-key-file, MCP_COMMANDS_API_KEY)")
 	apiKeyFileFlag := fs.String("api-key-file", "", "Read the API token from a file (content is trimmed; trailing newline ok)")
+	tlsCertFlag := fs.String("tls-cert", "", "TLS certificate file for HTTP mode (PEM); requires --tls-key")
+	tlsKeyFlag := fs.String("tls-key", "", "TLS key file for HTTP mode (PEM); requires --tls-cert")
 	insecureNoAuthFlag := fs.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
 	maxConcurrentFlag := fs.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
 	allowedOriginsFlag := fs.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
@@ -207,10 +212,24 @@ func parseCLI(args []string) (cliConfig, error) {
 	if cfg.server.maxConcurrent < 0 {
 		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.server.maxConcurrent)
 	}
-	// In stdio mode the auth sources are documented as ignored, so an
-	// unreadable --api-key-file must not block a stdio server from starting.
+	// In stdio mode the auth and TLS options are documented as ignored, so
+	// an unreadable --api-key-file or --tls-cert/--tls-key must not block a
+	// stdio server from starting.
 	if cfg.server.port > 0 {
 		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+		if err == nil && (*tlsCertFlag != "") != (*tlsKeyFlag != "") {
+			err = errors.New("--tls-cert and --tls-key must be given together")
+		}
+		for _, tlsFile := range []string{*tlsCertFlag, *tlsKeyFlag} {
+			if err == nil && tlsFile != "" {
+				if _, statErr := os.Stat(tlsFile); statErr != nil {
+					err = fmt.Errorf("cannot read TLS file %s: %w", tlsFile, statErr)
+				}
+			}
+		}
+		if err == nil {
+			cfg.server.tlsCert, cfg.server.tlsKey = *tlsCertFlag, *tlsKeyFlag
+		}
 	}
 	return cfg, err
 }

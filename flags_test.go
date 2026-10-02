@@ -17,6 +17,14 @@ func TestParseCLI(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	tlsCertFile := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(tlsCertFile, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsKeyFile := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(tlsKeyFile, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name     string
@@ -149,6 +157,16 @@ func TestParseCLI(t *testing.T) {
 			wantErr: "mutually exclusive",
 		},
 		{
+			name:     "tls_pair_resolved",
+			args:     []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile, "--tls-key", tlsKeyFile},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != tlsCertFile || c.server.tlsKey != tlsKeyFile {
+					t.Errorf("tlsCert/tlsKey = %q/%q", c.server.tlsCert, c.server.tlsKey)
+				}
+			},
+		},
+		{
 			name:    "max_concurrent_negative",
 			args:    []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "-1"},
 			wantErr: "--max-concurrent must be >= 0",
@@ -180,6 +198,28 @@ func TestParseCLI(t *testing.T) {
 				}
 				if !c.diagnostic.callToolSet {
 					t.Error("callToolSet must be true")
+				}
+			},
+		},
+		{
+			name:    "tls_cert_only",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile},
+			wantErr: "--tls-cert and --tls-key must be given together",
+		},
+		{
+			name:    "tls_missing_file_fails",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile, "--tls-key", filepath.Join(t.TempDir(), "nope")},
+			wantErr: "cannot read TLS file",
+		},
+		{
+			// Stdio ignores the TLS options: unreadable files must not block
+			// startup (same contract as the key sources).
+			name:     "stdio_ignores_unreadable_tls_files",
+			args:     []string{"--dir", "d", "--scripts", "s", "--tls-cert", filepath.Join(t.TempDir(), "nope"), "--tls-key", filepath.Join(t.TempDir(), "nope")},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != "" || c.server.tlsKey != "" {
+					t.Errorf("tlsCert/tlsKey = %q/%q, want zero values in stdio mode", c.server.tlsCert, c.server.tlsKey)
 				}
 			},
 		},
