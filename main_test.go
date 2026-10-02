@@ -2607,6 +2607,230 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	}
 }
 
+// TestWatchChangesWatchedDirDeleted pins F-9: the watcher must log the
+// error and keep running when the watched directory disappears mid-watch —
+// it must return only on ctx cancellation, not on the deletion.
+func TestWatchChangesWatchedDirDeleted(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() {})
+	}()
+
+	// Let the watcher goroutine finish NewWatcher/Add before the deletion,
+	// so the test exercises the mid-watch failure path (a deletion landing
+	// before Add is the fail-fast "failed to watch directory" branch).
+	time.Sleep(200 * time.Millisecond)
+	if err := os.RemoveAll(tmpDir); err != nil {
+		t.Fatalf("failed to delete watched dir: %v", err)
+	}
+
+	// Give the watcher time to observe the deletion (it must not exit).
+	select {
+	case err := <-done:
+		t.Fatalf("watchChanges exited with %v after the watched dir was deleted; it must keep running", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+}
+
+// TestWatchChangesRenameTriggersChange pins F-9: renaming a file (fsnotify
+// Rename — on linux this arrives as a Move event) must fire the debounced
+// onChange, like create/write/remove do.
+func TestWatchChangesRenameTriggersChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	go func() {
+		_ = watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	// The first rename can race watcher registration (a lost event is legal
+	// for fsnotify); retry with a fresh rename until the fire is observed.
+	for i := 0; i < 10; i++ {
+		if err := os.Rename(scriptPath, filepath.Join(tmpDir, "beta.sh")); err != nil {
+			t.Fatalf("failed to rename script: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if calls.Load() > 0 {
+			break
+		}
+		// Prepare for the next attempt: rename back.
+		_ = os.Rename(filepath.Join(tmpDir, "beta.sh"), scriptPath)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("onChange did not fire on rename")
+	}
+}
+
+// TestWatchChangesPermissionError pins F-9: a watcher permission error
+// (chmod the watched dir unreadable → inotify can no longer track it) must
+// be logged and swallowed, not fatal. Skipped when running as root —
+// uid 0 bypasses file permissions, so the error is not reproducible (the
+// sandbox and CI run as root; real user installs are covered).
+func TestWatchChangesPermissionError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: file permissions do not apply, inotify EACCES not reproducible")
+	}
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+	defer func() {
+		_ = os.Chmod(tmpDir, 0o755)
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && err != context.Canceled {
+				t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("watchChanges did not stop after cancel")
+		}
+	}()
+
+	time.Sleep(200 * time.Millisecond) // let the watcher finish NewWatcher/Add
+	if err := os.Chmod(tmpDir, 0); err != nil {
+		t.Fatalf("chmod failed: %v", err)
+	}
+
+	// The watcher must survive the permission error (the documented
+	// resilience: "log the error but don't crash").
+	select {
+	case err := <-done:
+		t.Fatalf("watchChanges exited %v after the permission error; it must keep running", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestWatchToolsRemovesDeletedTool pins F-9: deleting a script must remove
+// its tool from the registry (RemoveTools), leaving the rest intact.
+func TestWatchToolsRemovesDeletedTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	alphaPath := filepath.Join(tmpDir, "alpha.sh")
+	betaPath := filepath.Join(tmpDir, "beta.sh")
+	if err := os.WriteFile(alphaPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create alpha: %v", err)
+	}
+	if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+		t.Fatalf("failed to create beta: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry.replace([]discoveredTool{
+		{Name: "alpha", Path: alphaPath, Description: "alpha", Params: []paramSpec{}},
+		{Name: "beta", Path: betaPath, Description: "beta", Params: []paramSpec{}},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// Bounded remove retries: a lost fsnotify event is recovered by the next
+	// delete attempt (re-write + delete keeps the path registered for the
+	// inotify watch), same pattern as the add/change tests.
+	var names []string
+	removed := false
+	for i := 0; i < 10 && !removed; i++ {
+		if err := os.Remove(betaPath); err != nil {
+			// First attempt: the file may not exist yet for the watcher; recreate.
+			if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+				t.Fatalf("failed to recreate beta: %v", err)
+			}
+			if err := os.Remove(betaPath); err != nil {
+				t.Fatalf("failed to delete beta: %v", err)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools failed: %v", err)
+			}
+			if len(res.Tools) == 1 {
+				removed = true
+				break
+			}
+			names = []string{res.Tools[0].Name}
+			if len(res.Tools) > 1 {
+				names = append(names, res.Tools[1].Name)
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !removed {
+		cancel()
+		t.Fatalf("watchTools did not remove the deleted tool after 10 attempts: got %v", names)
+	}
+
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Name != "alpha" {
+		t.Fatalf("remaining tools = %d (%v), want exactly alpha", len(res.Tools), names)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
 func TestResolveToolPaths(t *testing.T) {
 	tmpDir := t.TempDir()
 
