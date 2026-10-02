@@ -1492,10 +1492,14 @@ func TestParseCLI(t *testing.T) {
 		check    func(t *testing.T, c cliConfig)
 	}{
 		{
-			name:   "version_short_circuits_validation",
-			args:   []string{"--version"},
+			name:    "version_short_circuits_validation",
+			args:    []string{"--version"},
 			wantErr: "",
-			check:  func(t *testing.T, c cliConfig) { if !c.version { t.Error("version not set") } },
+			check: func(t *testing.T, c cliConfig) {
+				if !c.version {
+					t.Error("version not set")
+				}
+			},
 		},
 		{
 			name:    "missing_dir",
@@ -1513,29 +1517,49 @@ func TestParseCLI(t *testing.T) {
 			wantErr: "--dir and --scripts are required",
 		},
 		{
-			name:    "server_mode_defaults",
-			args:    []string{"--dir", "d", "--scripts", "s"},
-			wantErr: "",
+			name:     "server_mode_defaults",
+			args:     []string{"--dir", "d", "--scripts", "s"},
+			wantErr:  "",
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.host != "127.0.0.1" { t.Errorf("host = %q, want default 127.0.0.1", c.host) }
-				if c.port != 0 { t.Errorf("port = %d, want 0 (stdio)", c.port) }
-				if c.timeout != defaultToolTimeout { t.Errorf("timeout = %v, want default", c.timeout) }
-				if c.maxConcurrent != defaultMaxConcurrentTools { t.Errorf("maxConcurrent = %d", c.maxConcurrent) }
-				if c.apiKey != "" { t.Errorf("apiKey = %q, want empty", c.apiKey) }
+				if c.host != "127.0.0.1" {
+					t.Errorf("host = %q, want default 127.0.0.1", c.host)
+				}
+				if c.port != 0 {
+					t.Errorf("port = %d, want 0 (stdio)", c.port)
+				}
+				if c.timeout != defaultToolTimeout {
+					t.Errorf("timeout = %v, want default", c.timeout)
+				}
+				if c.maxConcurrent != defaultMaxConcurrentTools {
+					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				}
+				if c.apiKey != "" {
+					t.Errorf("apiKey = %q, want empty", c.apiKey)
+				}
 			},
 		},
 		{
-			name:    "server_mode_http_full",
-			args:    []string{"--dir", "d", "--scripts", "s", "--host", "0.0.0.0", "--port", "9090", "--api-key", "tk", "--timeout", "1h", "--max-concurrent", "4", "--watch", "--insecure-no-auth"},
-			wantErr: "",
+			name:     "server_mode_http_full",
+			args:     []string{"--dir", "d", "--scripts", "s", "--host", "0.0.0.0", "--port", "9090", "--api-key", "tk", "--timeout", "1h", "--max-concurrent", "4", "--watch", "--insecure-no-auth"},
+			wantErr:  "",
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.host != "0.0.0.0" || c.port != 9090 { t.Errorf("host/port = %q/%d", c.host, c.port) }
-				if c.apiKey != "tk" || !c.apiKeyFromFlag { t.Errorf("apiKey = %q fromFlag=%v", c.apiKey, c.apiKeyFromFlag) }
-				if c.timeout != time.Hour { t.Errorf("timeout = %v", c.timeout) }
-				if c.maxConcurrent != 4 { t.Errorf("maxConcurrent = %d", c.maxConcurrent) }
-				if !c.watch || !c.insecureNoAuth { t.Errorf("watch/insecure = %v/%v", c.watch, c.insecureNoAuth) }
+				if c.host != "0.0.0.0" || c.port != 9090 {
+					t.Errorf("host/port = %q/%d", c.host, c.port)
+				}
+				if c.apiKey != "tk" || !c.apiKeyFromFlag {
+					t.Errorf("apiKey = %q fromFlag=%v", c.apiKey, c.apiKeyFromFlag)
+				}
+				if c.timeout != time.Hour {
+					t.Errorf("timeout = %v", c.timeout)
+				}
+				if c.maxConcurrent != 4 {
+					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				}
+				if !c.watch || !c.insecureNoAuth {
+					t.Errorf("watch/insecure = %v/%v", c.watch, c.insecureNoAuth)
+				}
 			},
 		},
 		{
@@ -1543,8 +1567,12 @@ func TestParseCLI(t *testing.T) {
 			args:     []string{"--dir", "d", "--scripts", "s", "--api-key-file", keyFile},
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey != "filetoken" { t.Errorf("apiKey = %q, want trimmed filetoken", c.apiKey) }
-				if c.apiKeyFromFlag { t.Error("apiKeyFromFlag must be false for the file source") }
+				if c.apiKey != "filetoken" {
+					t.Errorf("apiKey = %q, want trimmed filetoken", c.apiKey)
+				}
+				if c.apiKeyFromFlag {
+					t.Error("apiKeyFromFlag must be false for the file source")
+				}
 			},
 		},
 		{
@@ -1552,7 +1580,9 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--api-key", "flag", "--api-key-file", keyFile},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey != "flag" || !c.apiKeyFromFlag { t.Errorf("apiKey = %q fromFlag=%v, want flag/true", c.apiKey, c.apiKeyFromFlag) }
+				if c.apiKey != "flag" || !c.apiKeyFromFlag {
+					t.Errorf("apiKey = %q fromFlag=%v, want flag/true", c.apiKey, c.apiKeyFromFlag)
+				}
 			},
 		},
 		{
@@ -1564,7 +1594,11 @@ func TestParseCLI(t *testing.T) {
 			name:    "no_timeout",
 			args:    []string{"--dir", "d", "--scripts", "s", "--no-timeout"},
 			wantErr: "",
-			check:   func(t *testing.T, c cliConfig) { if c.timeout != 0 { t.Errorf("timeout = %v, want 0", c.timeout) } },
+			check: func(t *testing.T, c cliConfig) {
+				if c.timeout != 0 {
+					t.Errorf("timeout = %v, want 0", c.timeout)
+				}
+			},
 		},
 		{
 			name:    "timeout_and_no_timeout_exclusive",
@@ -1587,7 +1621,9 @@ func TestParseCLI(t *testing.T) {
 			wantMode: modeListTools,
 			check: func(t *testing.T, c cliConfig) {
 				got := strings.Join(c.ignoredFlags, ",")
-				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") { t.Errorf("ignoredFlags = %v", c.ignoredFlags) }
+				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") {
+					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+				}
 			},
 		},
 		{
@@ -1596,15 +1632,23 @@ func TestParseCLI(t *testing.T) {
 			wantMode: modeCallTool,
 			check: func(t *testing.T, c cliConfig) {
 				got := strings.Join(c.ignoredFlags, ",")
-				if !strings.Contains(got, "--watch") || !strings.Contains(got, "--port") { t.Errorf("ignoredFlags = %v", c.ignoredFlags) }
-				if !c.callToolSet { t.Error("callToolSet must be true") }
+				if !strings.Contains(got, "--watch") || !strings.Contains(got, "--port") {
+					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+				}
+				if !c.callToolSet {
+					t.Error("callToolSet must be true")
+				}
 			},
 		},
 		{
 			name:     "call_tool_present_empty_value_active",
 			args:     []string{"--dir", "d", "--scripts", "s", "--call-tool", ""},
 			wantMode: modeCallTool,
-			check:    func(t *testing.T, c cliConfig) { if !c.callToolSet { t.Error("callToolSet must be true even with an empty value") } },
+			check: func(t *testing.T, c cliConfig) {
+				if !c.callToolSet {
+					t.Error("callToolSet must be true even with an empty value")
+				}
+			},
 		},
 		{
 			name:    "cors_exclusive",
