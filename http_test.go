@@ -155,7 +155,6 @@ func newTestMCPServer(t *testing.T) *mcp.Server {
 }
 
 // postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
-// postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
 // the response status code. An empty auth value omits the Authorization header.
 func postInitializeStatus(t *testing.T, url, auth string) int {
 	t.Helper()
@@ -165,7 +164,6 @@ func postInitializeStatus(t *testing.T, url, auth string) int {
 	return resp.StatusCode
 }
 
-// doInitialize POSTs a JSON-RPC initialize request and returns the response.
 // doInitialize POSTs a JSON-RPC initialize request and returns the response.
 // Empty auth/origin values omit the corresponding headers.
 func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
@@ -218,10 +216,6 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
-// end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
-// rejected (400) without being read into memory. Chunked (ContentLength -1)
-// so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
 // TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
 // end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
 // rejected (400) without being read into memory. Chunked (ContentLength -1)

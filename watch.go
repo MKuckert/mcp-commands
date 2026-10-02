@@ -13,16 +13,9 @@ const watchDebounceDelay = 100 * time.Millisecond
 // prodWatcherErrors is the watcher-error source for watchChanges. Production
 // returns the watcher's own channel; tests inject a synthetic one (a real
 // fsnotify error is not deterministically reproducible — chmod on an already-
-// prodWatcherErrors is the watcher-error source for watchChanges. Production
-// returns the watcher's own channel; tests inject a synthetic one (a real
-// fsnotify error is not deterministically reproducible — chmod on an already-
 // watched inode does not produce one).
 func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 
-// watchChanges watches dir with fsnotify and invokes onChange once per
-// debounced burst of Create/Write/Remove/Rename events. Watcher errors are
-// logged to env.stderr but do not stop the loop, ensuring robust operation
-// even if the watched directory is deleted or permissions change. It returns
 // watchChanges watches dir with fsnotify and invokes onChange once per
 // debounced burst of Create/Write/Remove/Rename events. Watcher errors are
 // logged to env.stderr but do not stop the loop, ensuring robust operation
@@ -81,12 +74,6 @@ func watchChanges(ctx context.Context, env liveEnv, dir string, onChange func())
 	}
 }
 
-// watchTools watches the scripts directory and re-discovers + re-registers
-// the tools on every debounced change (built on watchChanges). initialTools
-// is the set the caller already discovered and registered at startup: the
-// initial registration is re-asserted from it (no second directory scan,
-// which used to duplicate the caller's scan and re-emit identical tool
-// registrations, N list_changed notifications, at boot) and skipped
 // watchTools watches the scripts directory and re-discovers + re-registers
 // the tools on every debounced change (built on watchChanges). initialTools
 // is the set the caller already discovered and registered at startup: the

@@ -19,7 +19,6 @@ const (
 )
 
 // serverConfig carries every server-mode option: the fully resolved (fail-
-// serverConfig carries every server-mode option: the fully resolved (fail-
 // fast, in parseCLI) result of the server flags. run consumes it as a whole.
 type serverConfig struct {
 	dir            string
@@ -34,7 +33,6 @@ type serverConfig struct {
 	maxConcurrent  int // 0 = default
 }
 
-// diagnostic carries every diagnostic-mode option (--list-tools / --call-
 // diagnostic carries every diagnostic-mode option (--list-tools / --call-
 // tool). runDiagnostic consumes it as a whole.
 type diagnostic struct {
@@ -51,8 +49,6 @@ type diagnostic struct {
 
 // cliConfig is the fully resolved and validated result of parseCLI. main
 // dispatches on mode: the server mode consumes cfg.server, the diagnostic
-// cliConfig is the fully resolved and validated result of parseCLI. main
-// dispatches on mode: the server mode consumes cfg.server, the diagnostic
 // modes cfg.diagnostic.
 type cliConfig struct {
 	version    bool
@@ -62,14 +58,9 @@ type cliConfig struct {
 }
 
 // errMissingRequiredFlags is the sentinel parseCLI returns when --dir/
-// errMissingRequiredFlags is the sentinel parseCLI returns when --dir/
 // --scripts are absent; main prints the usage line for it specifically.
 var errMissingRequiredFlags = errors.New("--dir and --scripts are required")
 
-// flagParseError wraps a raw flag-package parse error (undefined flag,
-// invalid value, -h) together with the rendered full flag help, so main
-// can restore the flag package's user-visible conventions: -h → help on
-// stdout, exit 0; other parse errors → error + help on stderr, exit 2 —
 // flagParseError wraps a raw flag-package parse error (undefined flag,
 // invalid value, -h) together with the rendered full flag help, so main
 // can restore the flag package's user-visible conventions: -h → help on

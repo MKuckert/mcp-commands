@@ -167,9 +167,6 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 // TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
 // result is identical to the registered set must emit no RemoveTools/AddTool
 // churn and no tools/list_changed notifications, while a genuine change
-// TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
-// result is identical to the registered set must emit no RemoveTools/AddTool
-// churn and no tools/list_changed notifications, while a genuine change
 // still reloads.
 func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	t.Parallel()
@@ -414,7 +411,6 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 }
 
 // TestWatchToolsWatchedDirDeleted: rediscovery must warn and the watcher
-// TestWatchToolsWatchedDirDeleted: rediscovery must warn and the watcher
 // must keep running when the scripts directory disappears mid-watch.
 func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 	t.Parallel()
@@ -485,8 +481,6 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 
 // TestWatchChangesRenameTriggersChange: renaming a file (fsnotify
 // Rename — on linux this arrives as a Move event) must fire the debounced
-// TestWatchChangesRenameTriggersChange: renaming a file (fsnotify
-// Rename — on linux this arrives as a Move event) must fire the debounced
 // onChange, like create/write/remove do.
 func TestWatchChangesRenameTriggersChange(t *testing.T) {
 	t.Parallel()
@@ -524,15 +518,6 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 	}
 }
 
-// TestWatchChangesPermissionError: a watcher permission error
-// (chmod the watched dir unreadable → inotify can no longer track it) must
-// be logged and swallowed, not fatal. Skipped when running as root —
-// uid 0 bypasses file permissions, so the error is not reproducible (the
-// sandbox and CI run as root; real user installs are covered).
-// A real fsnotify permission error is not deterministically reproducible
-// (chmod on an already-watched inode does not produce one, and root cannot
-// trip it at all), so the error path is exercised through the watcherErrors
-// injection seam: a synthetic error must be logged and must not stop the
 // TestWatchChangesPermissionError: a watcher permission error
 // (chmod the watched dir unreadable → inotify can no longer track it) must
 // be logged and swallowed, not fatal. Skipped when running as root —
@@ -599,7 +584,6 @@ func TestWatchChangesPermissionError(t *testing.T) {
 	}
 }
 
-// TestWatchToolsRemovesDeletedTool: deleting a script must remove
 // TestWatchToolsRemovesDeletedTool: deleting a script must remove
 // its tool from the registry (RemoveTools), leaving the rest intact.
 func TestWatchToolsRemovesDeletedTool(t *testing.T) {

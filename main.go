@@ -14,9 +14,6 @@ var serverVersion = "0.8.2"
 // resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
 // both are accessible. Shared by the server-mode run() and the diagnostic
 // branch so the resolution behavior and error text stay identical in all
-// resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
-// both are accessible. Shared by the server-mode run() and the diagnostic
-// branch so the resolution behavior and error text stay identical in all
 // modes.
 func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err error) {
 	scriptsAbs, err = filepath.Abs(scriptsDir)

@@ -14,8 +14,6 @@ const defaultMaxConcurrentTools = 16
 
 // toolRegistry manages the dynamic registration and deregistration of tools
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing
-// toolRegistry manages the dynamic registration and deregistration of tools
-// within the MCP server. It ensures thread-safe updates via a mutex, allowing
 // tools to be swapped out at runtime when changes are detected in the scripts directory.
 type toolRegistry struct {
 	server        *mcp.Server
@@ -37,7 +35,6 @@ func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration
 }
 
 // execSlot bounds how many tool subprocesses may run at once. It is a
-// execSlot bounds how many tool subprocesses may run at once. It is a
 // fixed-size buffered channel: each running execution holds one slot.
 type execSlot struct {
 	sem   chan struct{}
@@ -52,7 +49,6 @@ func newExecSlot(limit int) *execSlot {
 }
 
 // tryAcquire grabs a slot without blocking: false means the server is at
-// tryAcquire grabs a slot without blocking: false means the server is at
 // capacity (the caller returns a clean "at capacity" tool result).
 func (s *execSlot) tryAcquire() bool {
 	select {
@@ -65,8 +61,6 @@ func (s *execSlot) tryAcquire() bool {
 
 func (s *execSlot) release() { <-s.sem }
 
-// replace unregisters all currently tracked tools and registers a new set of tools.
-// It defines the InputSchema dynamically based on each tool's Param declarations,
 // replace unregisters all currently tracked tools and registers a new set of tools.
 // It defines the InputSchema dynamically based on each tool's Param declarations,
 // allowing tools to accept typed parameters with proper schema validation.
@@ -119,10 +113,6 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 // the currently registered one: an unchanged set (e.g. a touched file whose
 // frontmatter did not change) triggers no RemoveTools/AddTool churn and no
 // tools/list_changed notifications. It returns false when the set
-// replaceIfChanged re-registers only when the discovered set differs from
-// the currently registered one: an unchanged set (e.g. a touched file whose
-// frontmatter did not change) triggers no RemoveTools/AddTool churn and no
-// tools/list_changed notifications. It returns false when the set
 // was identical and the replace was skipped.
 func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
 	r.mu.Lock()
@@ -135,8 +125,6 @@ func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
 	return true
 }
 
-// toolsEqual compares two discovered tool sets element-wise (order included;
-// discoverTools yields ReadDir order, i.e. stable by filename). The Timeout
 // toolsEqual compares two discovered tool sets element-wise (order included;
 // discoverTools yields ReadDir order, i.e. stable by filename). The Timeout
 // pointer is compared by value, the Params slice structurally.
@@ -162,9 +150,6 @@ func toolsEqual(a, b []discoveredTool) bool {
 	return true
 }
 
-// registeredDescription assembles the registered tool description: the
-// frontmatter description plus the " (timeout: …)" suffix (the suffix alone
-// when the description is empty). Shared by the registry and the
 // registeredDescription assembles the registered tool description: the
 // frontmatter description plus the " (timeout: …)" suffix (the suffix alone
 // when the description is empty). Shared by the registry and the

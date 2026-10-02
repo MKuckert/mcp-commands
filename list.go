@@ -18,9 +18,6 @@ const (
 // prodResolveWrapWidth returns the wrap width for --list-tools output: the
 // terminal window width (in runes) when stdout is a TTY (re-queried at every
 // print so window resizes are honored), falling back to listWrapWidth when
-// prodResolveWrapWidth returns the wrap width for --list-tools output: the
-// terminal window width (in runes) when stdout is a TTY (re-queried at every
-// print so window resizes are honored), falling back to listWrapWidth when
 // stdout is not a *os.File, not a terminal, or the query fails.
 func prodResolveWrapWidth(stdout io.Writer) int {
 	file, ok := stdout.(*os.File)
@@ -38,8 +35,6 @@ func prodResolveWrapWidth(stdout io.Writer) int {
 	return width
 }
 
-// listParamDecl renders one parameter for a tool signature: key:shorttype if
-// required, [key:shorttype] if optional. Short types: string→str,
 // listParamDecl renders one parameter for a tool signature: key:shorttype if
 // required, [key:shorttype] if optional. Short types: string→str,
 // number→num, boolean→bool.
@@ -64,11 +59,6 @@ func listParamDecl(p paramSpec) string {
 // deduplicated with the last declaration winning for type/required, rendered
 // at the first-occurrence position (mirrors buildInputSchema, whose
 // required array keeps first-occurrence order) — so the signature always
-// toolListSignature renders the name(<decls>) signature line for a tool: one
-// declaration per parameter, joined by ", ". Duplicate parameter names are
-// deduplicated with the last declaration winning for type/required, rendered
-// at the first-occurrence position (mirrors buildInputSchema, whose
-// required array keeps first-occurrence order) — so the signature always
 // matches the registered schema. A tool with no parameters renders as name().
 func toolListSignature(name string, params []paramSpec) string {
 	decls := make(map[string]string, len(params))
@@ -86,11 +76,6 @@ func toolListSignature(name string, params []paramSpec) string {
 	return name + "(" + strings.Join(parts, ", ") + ")"
 }
 
-// wordWrap word-wraps s: each returned line is indent + content, where the
-// total width always includes the indent (content budget = width − len(indent)).
-// Rune-based; greedy (each line is filled as far as it fits); breaks at runs
-// of whitespace, which collapse to a single space; never splits a word. A
-// single unbreakable token longer than the budget is emitted whole on its own
 // wordWrap word-wraps s: each returned line is indent + content, where the
 // total width always includes the indent (content budget = width − len(indent)).
 // Rune-based; greedy (each line is filled as far as it fits); breaks at runs
@@ -144,12 +129,6 @@ func wordWrap(s string, indent string, width int) []string {
 	return lines
 }
 
-// renderToolList renders the --list-tools output: one block per tool, in
-// discovery order, separated by exactly one blank line. Each block starts
-// with the name(<decls>) signature line, followed by the registered
-// description (frontmatter description plus the timeout suffix, resolved
-// with the registry's precedence) word-wrapped to width (which includes the
-// indent; the caller supplies resolveWrapWidth's result so the TTY query is
 // renderToolList renders the --list-tools output: one block per tool, in
 // discovery order, separated by exactly one blank line. Each block starts
 // with the name(<decls>) signature line, followed by the registered

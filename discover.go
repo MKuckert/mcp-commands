@@ -35,9 +35,6 @@ type discoveredTool struct {
 // discoverTools scans the given directory for executable files and symlinks
 // resolving to executables. It skips subdirectories and non-executable files.
 // For each valid executable, it extracts the description and parameters, then
-// discoverTools scans the given directory for executable files and symlinks
-// resolving to executables. It skips subdirectories and non-executable files.
-// For each valid executable, it extracts the description and parameters, then
 // constructs a discoveredTool record for later registration with the MCP server.
 func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error) {
 	entries, err := os.ReadDir(scriptsDir)
@@ -93,13 +90,6 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 	return tools, nil
 }
 
-// extractFrontmatter reads the first scanHeaderLines lines of a file in a
-// single pass and collects the tool's frontmatter: the first Description:
-// line (first occurrence wins; populates the MCP tool description), all
-// Param: annotations (invalid ones log a stderr warning and are skipped),
-// and the first Timeout: value (first occurrence wins; nil when undeclared
-// so the global applies, &0 for NONE/0; an invalid value logs a stderr
-// warning and yields nil so the global applies). An unreadable file yields
 // extractFrontmatter reads the first scanHeaderLines lines of a file in a
 // single pass and collects the tool's frontmatter: the first Description:
 // line (first occurrence wins; populates the MCP tool description), all
@@ -168,8 +158,6 @@ func warnParam(filePath, reason, fullLine string, stderr io.Writer) {
 	fmt.Fprintf(stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n", filePath, reason, fullLine)
 }
 
-// parseParamAnnotation parses a single parameter annotation string.
-// It expects format: <name> <type> <required|optional> "<description>"
 // parseParamAnnotation parses a single parameter annotation string.
 // It expects format: <name> <type> <required|optional> "<description>"
 // Returns error if validation fails (warning already logged to stderr).

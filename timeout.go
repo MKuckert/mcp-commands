@@ -16,8 +16,6 @@ const (
 
 // timeoutUnits maps the allowed duration units to their values. Sub-second
 // units are not meaningful for tool timeouts and are deliberately absent;
-// timeoutUnits maps the allowed duration units to their values. Sub-second
-// units are not meaningful for tool timeouts and are deliberately absent;
 // tokens are matched prefix-based, so "1h30m5s" and "1h 30m 5s" both parse.
 var timeoutUnits = map[string]time.Duration{
 	"s": time.Second,
@@ -25,11 +23,6 @@ var timeoutUnits = map[string]time.Duration{
 	"h": time.Hour,
 }
 
-// parseTimeoutDuration parses a formatted timeout duration string: a list of
-// <digits><unit> tokens (units s, m, h; e.g. "5m", "60s", "1h 30m 5s",
-// "1h30m5s"); whitespace between tokens is optional. Sub-second units,
-// decimals, signs, and bare units are rejected. The literal NONE
-// (case-insensitive, surrounding whitespace trimmed) and a result of 0 both
 // parseTimeoutDuration parses a formatted timeout duration string: a list of
 // <digits><unit> tokens (units s, m, h; e.g. "5m", "60s", "1h 30m 5s",
 // "1h30m5s"); whitespace between tokens is optional. Sub-second units,
@@ -84,7 +77,6 @@ func parseTimeoutDuration(raw string) (time.Duration, error) {
 }
 
 // matchTimeoutUnit matches a unit at the start of s and returns its
-// matchTimeoutUnit matches a unit at the start of s and returns its
 // multiplier plus the remainder of the string.
 func matchTimeoutUnit(s string) (time.Duration, string, bool) {
 	for _, unit := range []string{"s", "m", "h"} {
@@ -95,10 +87,6 @@ func matchTimeoutUnit(s string) (time.Duration, string, bool) {
 	return 0, "", false
 }
 
-// resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
-// before the server starts. --timeout and --no-timeout are mutually exclusive
-// (passing both is a startup error); an explicitly-set --timeout must parse
-// (an explicit --timeout= is therefore rejected); an unset --timeout yields
 // resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
 // before the server starts. --timeout and --no-timeout are mutually exclusive
 // (passing both is a startup error); an explicitly-set --timeout must parse
@@ -120,9 +108,6 @@ func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Durati
 // resolveToolTimeout resolves a tool's effective timeout with the registry's
 // precedence: a per-tool Timeout: always wins over the global, even
 // --no-timeout. Shared by the registry and the --list-tools renderer so the
-// resolveToolTimeout resolves a tool's effective timeout with the registry's
-// precedence: a per-tool Timeout: always wins over the global, even
-// --no-timeout. Shared by the registry and the --list-tools renderer so the
 // two call sites cannot drift.
 func resolveToolTimeout(tool discoveredTool, global time.Duration) time.Duration {
 	if tool.Timeout != nil {
@@ -131,8 +116,6 @@ func resolveToolTimeout(tool discoveredTool, global time.Duration) time.Duration
 	return global
 }
 
-// timeoutSuffix renders the resolved timeout for the registered tool
-// description so the LLM knows its budget: "(timeout: 30s)" or
 // timeoutSuffix renders the resolved timeout for the registered tool
 // description so the LLM knows its budget: "(timeout: 30s)" or
 // "(timeout: none)" when no deadline applies.

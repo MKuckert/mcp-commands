@@ -83,10 +83,6 @@ func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
 // 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
 // including unparseable values and non-IP hostnames — is treated as
 // non-loopback, the conservative choice: a hostname that resolves outside
-// isLoopbackHost reports whether host binds only to the local machine: the
-// 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
-// including unparseable values and non-IP hostnames — is treated as
-// non-loopback, the conservative choice: a hostname that resolves outside
 // loopback binds externally.
 func isLoopbackHost(host string) bool {
 	if host == "localhost" {
@@ -106,10 +102,6 @@ func isLoopbackHost(host string) bool {
 // returns a warning to log when the server runs unauthenticated, and an
 // error when it would start unauthenticated on a non-loopback host without
 // the explicit --insecure-no-auth escape hatch (an unguarded remote
-// checkHTTPSecurityPolicy validates the auth posture of an HTTP bind. It
-// returns a warning to log when the server runs unauthenticated, and an
-// error when it would start unauthenticated on a non-loopback host without
-// the explicit --insecure-no-auth escape hatch (an unguarded remote
 // command-execution endpoint).
 func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning string, err error) {
 	if apiKey != "" || isLoopbackHost(host) {
@@ -121,7 +113,6 @@ func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning str
 	return fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host), nil
 }
 
-// corsConfig holds the resolved CORS and streamable-HTTP mode options for the
 // corsConfig holds the resolved CORS and streamable-HTTP mode options for the
 // HTTP transport.
 type corsConfig struct {
@@ -152,8 +143,6 @@ func (c corsConfig) summary() string {
 
 // parseBoolEnv parses a boolean environment variable value: "" → false;
 // "1"/"true"/"yes" (case-insensitive) → true; anything else → error (fail
-// parseBoolEnv parses a boolean environment variable value: "" → false;
-// "1"/"true"/"yes" (case-insensitive) → true; anything else → error (fail
 // loud, no silent misparse).
 func parseBoolEnv(name, value string) (bool, error) {
 	switch strings.ToLower(value) {
@@ -166,8 +155,6 @@ func parseBoolEnv(name, value string) (bool, error) {
 	}
 }
 
-// validateOrigin requires an exact http/https origin: a parsable URL with an
-// http or https scheme, a non-empty host, and no path, userinfo, query, or
 // validateOrigin requires an exact http/https origin: a parsable URL with an
 // http or https scheme, a non-empty host, and no path, userinfo, query, or
 // fragment (https://host[:port] only).
@@ -188,12 +175,6 @@ func validateOrigin(origin string) error {
 	return nil
 }
 
-// resolveCORS resolves flags over env and validates origins. Returns an
-// error for malformed origins or a contradictory --allowed-origins +
-// --allow-all-origins combination. allowedOriginsFlag is empty when the flag
-// was not given (the flag's zero value is unset, so "flag wins" is
-// well-defined); for the bool allowAllFlag, allowAllSet distinguishes an
-// explicit --allow-all-origins[=false] from a plain default, and the env var
 // resolveCORS resolves flags over env and validates origins. Returns an
 // error for malformed origins or a contradictory --allowed-origins +
 // --allow-all-origins combination. allowedOriginsFlag is empty when the flag
@@ -241,8 +222,6 @@ func resolveCORS(allowedOriginsFlag string, allowAllFlag, allowAllSet, disableLo
 	}, nil
 }
 
-// newBearerAuthHandler wraps next, requiring an
-// "Authorization: Bearer <token>" header that matches token.
 // newBearerAuthHandler wraps next, requiring an
 // "Authorization: Bearer <token>" header that matches token.
 // Mismatches get 401 with a WWW-Authenticate: Bearer header.
@@ -303,11 +282,6 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 	})
 }
 
-// buildHTTPHandler returns the streamable MCP handler, always constructed
-// stateless (the app keeps no per-session state, so protocol sessions are
-// vestigial). It is wrapped (innermost) in a request-body size limit
-// (maxHTTPBodyBytes); when token is non-empty it is wrapped in bearer-token
-// auth middleware; when CORS is enabled it is wrapped (outermost) in the
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
 // vestigial). It is wrapped (innermost) in a request-body size limit
