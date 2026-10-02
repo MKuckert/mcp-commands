@@ -41,6 +41,7 @@ const (
 	maxHTTPBodyBytes          = 10 << 20 // 10 MiB request-body cap
 	httpReadHeaderTimeout     = 5 * time.Second
 	httpIdleTimeout           = 2 * time.Minute
+	toolKillWaitDelay         = 5 * time.Second // Wait backstop after a deadline kill
 	scanHeaderLines           = 30
 	scanDescriptionPrefix     = "Description:"
 	scanParamPrefix           = "Param:"
@@ -52,7 +53,7 @@ const (
 	listIndent                = "     " // included in the wrap width budget
 )
 
-var serverVersion = "0.8.0"
+var serverVersion = "0.8.1"
 
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
 
@@ -572,6 +573,7 @@ type toolRegistry struct {
 	slot          *execSlot     // bounds concurrent tool executions
 	mu            sync.Mutex
 	names         []string
+	current       []discoveredTool // last registered set (for the change-diff in replaceIfChanged)
 	lastHandler   mcp.ToolHandler
 }
 
@@ -623,6 +625,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 	}
 
 	r.names = make([]string, 0, len(tools))
+	r.current = tools
 	for _, discoveredTool := range tools {
 		toolName := discoveredTool.Name
 		toolPath := discoveredTool.Path
@@ -667,6 +670,47 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
+}
+
+// replaceIfChanged re-registers only when the discovered set differs from
+// the currently registered one: an unchanged set (e.g. a touched file whose
+// frontmatter did not change) triggers no RemoveTools/AddTool churn and no
+// tools/list_changed notifications. It returns false when the set
+// was identical and the replace was skipped.
+func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
+	r.mu.Lock()
+	unchanged := toolsEqual(r.current, tools)
+	r.mu.Unlock()
+	if unchanged {
+		return false
+	}
+	r.replace(tools)
+	return true
+}
+
+// toolsEqual compares two discovered tool sets element-wise (order included;
+// discoverTools yields ReadDir order, i.e. stable by filename). The Timeout
+// pointer is compared by value, the Params slice structurally.
+func toolsEqual(a, b []discoveredTool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Path != b[i].Path || a[i].Description != b[i].Description {
+			return false
+		}
+		ta, tb := a[i].Timeout, b[i].Timeout
+		if (ta == nil) != (tb == nil) {
+			return false
+		}
+		if ta != nil && *ta != *tb {
+			return false
+		}
+		if !reflect.DeepEqual(a[i].Params, b[i].Params) {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveToolTimeout resolves a tool's effective timeout with the registry's
@@ -847,6 +891,12 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
+// watcherErrors is the watcher-error source for watchChanges, indirected so
+// tests can inject a synthetic error channel (a real fsnotify error is not
+// deterministically reproducible — chmod on an already-watched inode does
+// not produce one). Production returns the watcher's own channel.
+var watcherErrors = func(w *fsnotify.Watcher) <-chan error { return w.Errors }
+
 // watchChanges watches dir with fsnotify and invokes onChange once per
 // debounced burst of Create/Write/Remove/Rename events. Watcher errors are
 // logged to stderr but do not stop the loop, ensuring robust operation even
@@ -890,13 +940,13 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 				}
 			}
 
-		case err, ok := <-watcher.Errors:
+		case err, ok := <-watcherErrors(watcher):
 			if !ok {
 				return fmt.Errorf("watcher error channel closed unexpectedly")
 			}
 			// Log the error but don't crash the watcher
 			// This handles cases like permission denied, file not found, etc.
-			fmt.Fprintf(os.Stderr, "Warning: file watcher error: %v\n", err)
+			fmt.Fprintf(errOut, "Warning: file watcher error: %v\n", err)
 
 		case <-debounceTimer.C:
 			debounceActive = false
@@ -919,14 +969,16 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 
 	return watchChanges(ctx, scriptsDir, func() {
-		// After debounce delay, rediscover tools
+		// After debounce delay, rediscover tools. The diff-skip avoids
+		// the remove/re-add churn and N list_changed notifications for a
+		// no-op rescan (e.g. a touched file with unchanged frontmatter).
 		tools, err := discoverTools(scriptsDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return
 		}
 
-		registry.replace(tools)
+		registry.replaceIfChanged(tools)
 	})
 }
 
@@ -966,6 +1018,11 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 
 	cmd := exec.CommandContext(execCtx, scriptPath, cliArgs...)
 	cmd.Dir = dir
+	armToolProcess(cmd)
+	// Backstop: a grandchild that detaches the process group (setsid) and
+	// keeps an output pipe open would otherwise block Wait forever; after the
+	// delay the pipes are closed and Wait returns.
+	cmd.WaitDelay = toolKillWaitDelay
 
 	// Bounded capture: a tool printing gigabytes costs O(1 MiB) per stream,
 	// not O(output size); combineToolOutput applies the final cap.
@@ -974,6 +1031,9 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
+	// Override CommandContext's direct-child kill before Start so exec's
+	// context watcher always kills the complete process group.
+	cmd.Cancel = func() error { return killToolProcess(cmd) }
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -1051,7 +1111,7 @@ var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
+var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
@@ -1206,13 +1266,57 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 	return 0
 }
 
-// resolveAPIKey returns the token from the flag value if non-empty,
-// otherwise from MCP_COMMANDS_API_KEY. Returns "" if neither is set.
-func resolveAPIKey(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
+// apiKeySource identifies where the configured token came from.
+type apiKeySource int
+
+const (
+	apiKeySourceNone apiKeySource = iota
+	apiKeySourceFlag
+	apiKeySourceFile
+	apiKeySourceEnv
+)
+
+func (s apiKeySource) String() string {
+	switch s {
+	case apiKeySourceFlag:
+		return "flag"
+	case apiKeySourceFile:
+		return "file"
+	case apiKeySourceEnv:
+		return "env"
+	default:
+		return "none"
 	}
-	return os.Getenv(apiKeyEnvVar)
+}
+
+// resolvedAPIKey is the HTTP auth token together with its source
+// (--api-key > --api-key-file > MCP_COMMANDS_API_KEY). The zero value is
+// "no token configured" (unauthenticated).
+type resolvedAPIKey struct {
+	Token  string
+	Source apiKeySource
+}
+
+// resolveAPIKey resolves the HTTP auth token, returning an error when a
+// --api-key-file was given but unreadable. File content is TrimSpace'd so
+// hand-written files with a trailing newline work.
+func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
+	if flagValue != "" {
+		return resolvedAPIKey{Token: flagValue, Source: apiKeySourceFlag}, nil
+	}
+	if fileValue != "" {
+		data, err := os.ReadFile(fileValue)
+		if err != nil {
+			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
+		}
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
+		}
+	}
+	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
+		return resolvedAPIKey{Token: envToken, Source: apiKeySourceEnv}, nil
+	}
+	return resolvedAPIKey{}, nil
 }
 
 // isLoopbackHost reports whether host binds only to the local machine: the
@@ -1456,35 +1560,116 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 	return h
 }
 
-func main() {
-	dirFlag := flag.String("dir", "", "Working directory for tool execution (required)")
-	scriptsFlag := flag.String("scripts", "", "Directory containing executable scripts (required)")
-	watchFlag := flag.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
-	hostFlag := flag.String("host", "127.0.0.1", "IP address for HTTP server")
-	portFlag := flag.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
-	apiKeyFlag := flag.String("api-key", "", "API token required by HTTP clients (or set MCP_COMMANDS_API_KEY)")
-	insecureNoAuthFlag := flag.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
-	maxConcurrentFlag := flag.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
-	allowedOriginsFlag := flag.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
-	allowAllOriginsFlag := flag.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
-	disableLocalhostProtectionFlag := flag.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
-	versionFlag := flag.Bool("version", false, "Print version and exit")
-	timeoutFlag := flag.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
-	noTimeoutFlag := flag.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
-	listToolsFlag := flag.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
-	callToolFlag := flag.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
-	paramsFlag := flag.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
-	flag.Parse()
+// cliMode selects the operating mode resolved from the flags.
+type cliMode int
 
+const (
+	modeServer cliMode = iota
+	modeListTools
+	modeCallTool
+)
+
+// cliConfig is the fully resolved and validated result of parseCLI. main
+// consumes it directly; run/runDiagnostic take their fields positionally
+// (a wider struct-ification of those signatures is a future refactor).
+type cliConfig struct {
+	version        bool
+	mode           cliMode
+	dir            string
+	scriptsDir     string
+	watch          bool
+	host           string
+	port           int
+	apiKey         resolvedAPIKey // server+HTTP mode only; zero value = unauthenticated
+	cors           corsConfig
+	timeout        time.Duration // 0 = no global timeout (--no-timeout)
+	insecureNoAuth bool
+	maxConcurrent  int // 0 = default
+	listTools      bool
+	callTool       string
+	callToolSet    bool // --call-tool present (active even when its value is "")
+	params         string
+	ignoredFlags   []string
+}
+
+// errMissingRequiredFlags is the sentinel parseCLI returns when --dir/
+// --scripts are absent; main prints the usage line for it specifically.
+var errMissingRequiredFlags = errors.New("--dir and --scripts are required")
+
+// flagParseError wraps a raw flag-package parse error (undefined flag,
+// invalid value, -h) together with the rendered full flag help, so main
+// can restore the flag package's user-visible conventions: -h → help on
+// stdout, exit 0; other parse errors → error + help on stderr, exit 2 —
+// matching the pre-extraction flag.ExitOnError behavior.
+type flagParseError struct {
+	err   error
+	usage string
+}
+
+func (e *flagParseError) Error() string { return e.err.Error() }
+func (e *flagParseError) Unwrap() error { return e.err }
+
+// usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
+const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]"
+
+// parseCLI resolves and validates every flag (all fail-fast branches live
+// here) and returns the ready-to-consume config. It takes the argument
+// slice so tests can exercise every branch; main passes os.Args[1:].
+func parseCLI(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // errors are formatted by the caller
+
+	dirFlag := fs.String("dir", "", "Working directory for tool execution (required)")
+	scriptsFlag := fs.String("scripts", "", "Directory containing executable scripts (required)")
+	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
+	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
+	portFlag := fs.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
+	apiKeyFlag := fs.String("api-key", "", "API token for HTTP mode (alternatives: --api-key-file, MCP_COMMANDS_API_KEY)")
+	apiKeyFileFlag := fs.String("api-key-file", "", "Read the API token from a file (content is trimmed; trailing newline ok)")
+	insecureNoAuthFlag := fs.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
+	maxConcurrentFlag := fs.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
+	allowedOriginsFlag := fs.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
+	allowAllOriginsFlag := fs.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
+	disableLocalhostProtectionFlag := fs.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
+	versionFlag := fs.Bool("version", false, "Print version and exit")
+	timeoutFlag := fs.String("timeout", "", "Global per-tool timeout as a formatted duration (e.g. 5m, 1h 30m 5s, NONE); default 5m")
+	noTimeoutFlag := fs.Bool("no-timeout", false, "Disable the global tool timeout (mutually exclusive with --timeout)")
+	listToolsFlag := fs.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
+	callToolFlag := fs.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
+	paramsFlag := fs.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
+
+	if err := fs.Parse(args); err != nil {
+		// Wrapped so main can restore the flag package's parse-error
+		// convention (help to stderr, exit 2) and -h (help to stdout,
+		// exit 0); validation errors keep the regular Error:/exit 1 path.
+		var usage strings.Builder
+		fs.SetOutput(&usage)
+		fs.Usage() // "Usage of mcp-commands:" + every flag and description
+		fs.SetOutput(io.Discard)
+		return cliConfig{}, &flagParseError{err: err, usage: usage.String()}
+	}
+
+	cfg := cliConfig{
+		dir:            *dirFlag,
+		scriptsDir:     *scriptsFlag,
+		watch:          *watchFlag,
+		host:           *hostFlag,
+		port:           *portFlag,
+		insecureNoAuth: *insecureNoAuthFlag,
+		maxConcurrent:  *maxConcurrentFlag,
+		listTools:      *listToolsFlag,
+		callTool:       *callToolFlag,
+		params:         *paramsFlag,
+	}
+
+	// --version works without the required flags and skips all validation.
 	if *versionFlag {
-		fmt.Println(serverVersion)
-		os.Exit(0)
+		cfg.version = true
+		return cfg, nil
 	}
 
 	if *dirFlag == "" || *scriptsFlag == "" {
-		fmt.Fprintf(os.Stderr, "Error: --dir and --scripts are required\n")
-		fmt.Fprintf(os.Stderr, "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]\n")
-		os.Exit(1)
+		return cliConfig{}, errMissingRequiredFlags
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
@@ -1492,7 +1677,7 @@ func main() {
 	timeoutSet := false
 	callToolSet := false
 	visited := make(map[string]bool)
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		visited[f.Name] = true
 		switch f.Name {
 		case "allow-all-origins":
@@ -1503,56 +1688,102 @@ func main() {
 			callToolSet = true
 		}
 	})
-	cors, err := resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+
+	var err error
+	cfg.cors, err = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return cliConfig{}, err
 	}
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
-	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	cfg.timeout, err = resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return cliConfig{}, err
 	}
 
 	callToolActive := *callToolFlag != "" || callToolSet
-	if *listToolsFlag && callToolActive {
-		fmt.Fprintln(os.Stderr, "Error: --list-tools and --call-tool are mutually exclusive")
-		os.Exit(1)
+	cfg.callToolSet = callToolSet
+	cfg.mode = modeServer
+	if callToolActive {
+		cfg.mode = modeCallTool
+	} else if *listToolsFlag {
+		cfg.mode = modeListTools
 	}
-	if *maxConcurrentFlag < 0 {
-		fmt.Fprintf(os.Stderr, "Error: --max-concurrent must be >= 0 (got %d)\n", *maxConcurrentFlag)
-		os.Exit(1)
+	if cfg.listTools && callToolActive {
+		return cliConfig{}, errors.New("--list-tools and --call-tool are mutually exclusive")
 	}
-	if *listToolsFlag || callToolActive {
-		// --watch is honored with --list-tools (live list) and ignored with
-		// --call-tool; the server-mode flags are always ignored. Presence is
-		// visit-tracked, so default-valued forms (--port=0, --host=127.0.0.1,
-		// --watch=false) are noticed too.
-		var ignored []string
+	if cfg.maxConcurrent < 0 {
+		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.maxConcurrent)
+	}
+	if cfg.mode != modeServer {
+		// The server-mode flags are always ignored in diagnostic modes
+		// (presence is visit-tracked, so default-valued forms like
+		// --port=0, --host=127.0.0.1, --watch=false are noticed too).
 		for _, name := range serverModeFlagNames {
 			if visited[name] {
-				ignored = append(ignored, "--"+name)
+				cfg.ignoredFlags = append(cfg.ignoredFlags, "--"+name)
 			}
 		}
-		if callToolActive && visited["watch"] {
-			ignored = append(ignored, "--watch")
+		// --watch is honored with --list-tools and ignored with --call-tool;
+		// appended last to preserve the pre-refactor notice ordering.
+		if cfg.mode == modeCallTool && visited["watch"] {
+			cfg.ignoredFlags = append(cfg.ignoredFlags, "--watch")
 		}
-		os.Exit(runDiagnostic(os.Stdout, os.Stderr, *dirFlag, *scriptsFlag, *listToolsFlag, *watchFlag, *callToolFlag, callToolSet, *paramsFlag, timeout, ignored))
+		return cfg, nil
 	}
 
-	if err := run(context.Background(), *dirFlag, *scriptsFlag, *watchFlag, *hostFlag, *portFlag, *apiKeyFlag, cors, timeout, *insecureNoAuthFlag, *maxConcurrentFlag); err != nil {
+	// HTTP mode only: in stdio mode the auth sources are documented as
+	// ignored, so an unreadable --api-key-file must not block a stdio
+	// server from starting. (Diagnostic modes ignore the key flags and
+	// report them via the ignored-flags notice.)
+	if cfg.port > 0 {
+		cfg.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	}
+	return cfg, err
+}
+
+func main() {
+	cfg, err := parseCLI(os.Args[1:])
+	if err != nil {
+		var parseErr *flagParseError
+		if errors.As(err, &parseErr) {
+			if errors.Is(err, flag.ErrHelp) {
+				// Full flag help (every flag and its description), exit 0.
+				fmt.Fprint(os.Stdout, parseErr.usage)
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprint(os.Stderr, parseErr.usage)
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if errors.Is(err, errMissingRequiredFlags) {
+			fmt.Fprintln(os.Stderr, usageLine)
+		}
+		os.Exit(1)
+	}
+	if cfg.version {
+		fmt.Println(serverVersion)
+		os.Exit(0)
+	}
+	if cfg.mode != modeServer {
+		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.dir, cfg.scriptsDir, cfg.listTools, cfg.watch, cfg.callTool, cfg.callToolSet, cfg.params, cfg.timeout, cfg.ignoredFlags))
+	}
+	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey.Token, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+// errOut is run()'s stderr sink, indirected so tests can capture the
+// zero-tools warning and the startup banner. It is os.Stderr by
+// default; tests swap it and restore via t.Cleanup. main.go's own error
+// reporting keeps using os.Stderr directly.
+var errOut io.Writer = os.Stderr
+
 func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, port int, apiKey string, cors corsConfig, timeout time.Duration, insecureNoAuth bool, maxConcurrent int) error {
 	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	apiKey = resolveAPIKey(apiKey)
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {
@@ -1565,7 +1796,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 	}
 
 	if len(tools) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
+		fmt.Fprintf(errOut, "Warning: No executable scripts found in %s\n", scriptsAbs)
 	}
 
 	impl := &mcp.Implementation{
@@ -1579,7 +1810,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 	if watch {
 		go func() {
 			if err := watchTools(sigCtx, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "Warning: watch loop stopped: %v\n", err)
+				fmt.Fprintf(errOut, "Warning: watch loop stopped: %v\n", err)
 			}
 		}()
 	}
@@ -1591,7 +1822,7 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		if warning, err := checkHTTPSecurityPolicy(host, apiKey, insecureNoAuth); err != nil {
 			return err
 		} else if warning != "" {
-			fmt.Fprintln(os.Stderr, warning)
+			fmt.Fprintln(errOut, warning)
 		}
 
 		handler := buildHTTPHandler(server, apiKey, cors)
@@ -1625,13 +1856,13 @@ func run(ctx context.Context, dir, scriptsDir string, watch bool, host string, p
 		if len(notes) > 0 {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
-		fmt.Fprintf(os.Stderr, "%s\n", line)
+		fmt.Fprintf(errOut, "%s\n", line)
 		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "Starting stdio server\n")
+	fmt.Fprintf(errOut, "Starting stdio server\n")
 	return server.Run(sigCtx, &mcp.StdioTransport{})
 }

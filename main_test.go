@@ -4,19 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -279,7 +283,7 @@ func TestWatchTools(t *testing.T) {
 
 	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
 
-	// Bounded write retries (F-22): fsnotify events can be lost under load
+	// Bounded write retries: fsnotify events can be lost under load
 	// (inotify queue overflow), so re-write and re-poll until the reload
 	// lands; the same content still fires a fresh event.
 	var lastCount int
@@ -356,7 +360,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}()
 
 	// Bounded write retries: a lost fsnotify event is recovered by the next
-	// write (see TestWatchTools). (F-22)
+	// write (see TestWatchTools).
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
@@ -1401,15 +1405,23 @@ func TestValidateRequiredParams(t *testing.T) {
 
 func TestResolveAPIKey(t *testing.T) {
 	tests := []struct {
-		name string
-		flag string
-		env  string
-		want string
+		name       string
+		flag       string
+		file       string // content written to a temp file when fileSet
+		fileSet    bool
+		fileMiss   bool // path set but file missing → error
+		env        string
+		want       string
+		wantSource apiKeySource
 	}{
-		{name: "flag_only", flag: "from-flag", env: "", want: "from-flag"},
-		{name: "env_only", flag: "", env: "from-env", want: "from-env"},
-		{name: "both_set_flag_wins", flag: "from-flag", env: "from-env", want: "from-flag"},
-		{name: "neither_set", flag: "", env: "", want: ""},
+		{name: "flag_only", flag: "from-flag", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "env_only", env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file", wantSource: apiKeySourceFile},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file", wantSource: apiKeySourceFile},
+		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "missing_file_errors", fileMiss: true},
+		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
 	}
 
 	for _, tt := range tests {
@@ -1417,11 +1429,431 @@ func TestResolveAPIKey(t *testing.T) {
 			// t.Setenv to "" counts as empty for resolveAPIKey.
 			t.Setenv(apiKeyEnvVar, tt.env)
 
-			if got := resolveAPIKey(tt.flag); got != tt.want {
-				t.Errorf("resolveAPIKey(%q) = %q, want %q", tt.flag, got, tt.want)
+			var filePath string
+			if tt.fileSet || tt.fileMiss {
+				if tt.fileMiss {
+					filePath = filepath.Join(t.TempDir(), "missing.txt")
+				} else {
+					filePath = filepath.Join(t.TempDir(), "key.txt")
+					if err := os.WriteFile(filePath, []byte(tt.file), 0o600); err != nil {
+						t.Fatalf("failed to write key file: %v", err)
+					}
+				}
+			}
+
+			got, err := resolveAPIKey(tt.flag, filePath)
+			if tt.fileMiss {
+				if err == nil {
+					t.Fatalf("expected an error for the missing key file, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAPIKey returned unexpected error: %v", err)
+			}
+			if got.Token != tt.want {
+				t.Errorf("resolveAPIKey token = %q, want %q", got.Token, tt.want)
+			}
+			if got.Source != tt.wantSource {
+				t.Errorf("resolveAPIKey source = %v, want %v", got.Source, tt.wantSource)
 			}
 		})
 	}
+}
+
+// TestParseCLI: every fail-fast branch of the CLI front end.
+// These are the branches that were untestable while the logic lived in main()
+// (which calls os.Exit); the extraction into parseCLI makes each one assertable.
+func TestParseCLI(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "key.txt")
+	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantErr  string // substring; empty = success
+		wantMode cliMode
+		check    func(t *testing.T, c cliConfig)
+	}{
+		{
+			name:    "version_short_circuits_validation",
+			args:    []string{"--version"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if !c.version {
+					t.Error("version not set")
+				}
+			},
+		},
+		{
+			name:    "missing_dir",
+			args:    []string{"--scripts", "s"},
+			wantErr: "--dir and --scripts are required",
+		},
+		{
+			name:    "missing_scripts",
+			args:    []string{"--dir", "d"},
+			wantErr: "--dir and --scripts are required",
+		},
+		{
+			name:    "missing_both",
+			args:    []string{},
+			wantErr: "--dir and --scripts are required",
+		},
+		{
+			name:     "server_mode_defaults",
+			args:     []string{"--dir", "d", "--scripts", "s"},
+			wantErr:  "",
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.host != "127.0.0.1" {
+					t.Errorf("host = %q, want default 127.0.0.1", c.host)
+				}
+				if c.port != 0 {
+					t.Errorf("port = %d, want 0 (stdio)", c.port)
+				}
+				if c.timeout != defaultToolTimeout {
+					t.Errorf("timeout = %v, want default", c.timeout)
+				}
+				if c.maxConcurrent != defaultMaxConcurrentTools {
+					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				}
+				if c.apiKey.Token != "" {
+					t.Errorf("apiKey = %q, want empty", c.apiKey)
+				}
+			},
+		},
+		{
+			name:     "server_mode_http_full",
+			args:     []string{"--dir", "d", "--scripts", "s", "--host", "0.0.0.0", "--port", "9090", "--api-key", "tk", "--timeout", "1h", "--max-concurrent", "4", "--watch", "--insecure-no-auth"},
+			wantErr:  "",
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.host != "0.0.0.0" || c.port != 9090 {
+					t.Errorf("host/port = %q/%d", c.host, c.port)
+				}
+				if c.apiKey.Token != "tk" || c.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want tk/flag", c.apiKey)
+				}
+				if c.timeout != time.Hour {
+					t.Errorf("timeout = %v", c.timeout)
+				}
+				if c.maxConcurrent != 4 {
+					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
+				}
+				if !c.watch || !c.insecureNoAuth {
+					t.Errorf("watch/insecure = %v/%v", c.watch, c.insecureNoAuth)
+				}
+			},
+		},
+		{
+			name:     "api_key_file_resolved",
+			args:     []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", keyFile},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.apiKey.Token != "filetoken" || c.apiKey.Source != apiKeySourceFile {
+					t.Errorf("apiKey = %v, want filetoken/file", c.apiKey)
+				}
+			},
+		},
+		{
+			name:    "api_key_flag_wins_over_file",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key", "flag", "--api-key-file", keyFile},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.apiKey.Token != "flag" || c.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want flag/flag", c.apiKey)
+				}
+			},
+		},
+		{
+			name:    "api_key_file_missing_fails",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
+			wantErr: "--api-key-file",
+		},
+		{
+			// Stdio ignores the key sources: an unreadable file must not
+			// block startup (README: all key sources ignored without --port).
+			name:     "stdio_ignores_unreadable_key_file",
+			args:     []string{"--dir", "d", "--scripts", "s", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.apiKey.Source != apiKeySourceNone {
+					t.Errorf("apiKey = %v, want zero value in stdio mode", c.apiKey)
+				}
+			},
+		},
+		{
+			name:    "no_timeout",
+			args:    []string{"--dir", "d", "--scripts", "s", "--no-timeout"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.timeout != 0 {
+					t.Errorf("timeout = %v, want 0", c.timeout)
+				}
+			},
+		},
+		{
+			name:    "timeout_and_no_timeout_exclusive",
+			args:    []string{"--dir", "d", "--scripts", "s", "--timeout", "5m", "--no-timeout"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "max_concurrent_negative",
+			args:    []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "-1"},
+			wantErr: "--max-concurrent must be >= 0",
+		},
+		{
+			name:    "list_tools_and_call_tool_exclusive",
+			args:    []string{"--dir", "d", "--scripts", "s", "--list-tools", "--call-tool", "x"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:     "list_tools_mode_reports_ignored_server_flags",
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk"},
+			wantMode: modeListTools,
+			check: func(t *testing.T, c cliConfig) {
+				got := strings.Join(c.ignoredFlags, ",")
+				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") {
+					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+				}
+			},
+		},
+		{
+			name:     "call_tool_mode_ignores_watch",
+			args:     []string{"--dir", "d", "--scripts", "s", "--call-tool", "x", "--watch", "--port", "80"},
+			wantMode: modeCallTool,
+			check: func(t *testing.T, c cliConfig) {
+				got := strings.Join(c.ignoredFlags, ",")
+				if !strings.Contains(got, "--watch") || !strings.Contains(got, "--port") {
+					t.Errorf("ignoredFlags = %v", c.ignoredFlags)
+				}
+				if !c.callToolSet {
+					t.Error("callToolSet must be true")
+				}
+			},
+		},
+		{
+			name:     "call_tool_present_empty_value_active",
+			args:     []string{"--dir", "d", "--scripts", "s", "--call-tool", ""},
+			wantMode: modeCallTool,
+			check: func(t *testing.T, c cliConfig) {
+				if !c.callToolSet {
+					t.Error("callToolSet must be true even with an empty value")
+				}
+			},
+		},
+		{
+			name:    "cors_exclusive",
+			args:    []string{"--dir", "d", "--scripts", "s", "--allowed-origins", "a", "--allow-all-origins"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "bad_timeout",
+			args:    []string{"--dir", "d", "--scripts", "s", "--timeout", "bogus"},
+			wantErr: "invalid timeout",
+		},
+		{
+			name:    "unknown_flag",
+			args:    []string{"--dir", "d", "--scripts", "s", "--no-such-flag"},
+			wantErr: "flag provided but not defined",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := parseCLI(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.mode != tt.wantMode {
+				t.Errorf("mode = %v, want %v", cfg.mode, tt.wantMode)
+			}
+			if tt.check != nil {
+				tt.check(t, cfg)
+			}
+		})
+	}
+}
+
+// TestRunHTTPEndToEnd: run() served over real HTTP,
+// exercised by a real MCP client (auth, list, call, clean shutdown), plus
+// the zero-tools warning.
+func TestRunHTTPEndToEnd(t *testing.T) {
+	t.Run("one_tool_authenticated", func(t *testing.T) {
+		dir := t.TempDir()
+		scripts := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scripts, "hello.sh"), []byte("#!/bin/bash\necho hello-world\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		port := freePort(t)
+		buf := &captureWriter{}
+		swapErrOut(t, buf)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- run(ctx, dir, scripts, false, "127.0.0.1", port, "sekret", corsConfig{}, defaultToolTimeout, false, 16)
+		}()
+
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+		if !waitForHTTP(t, endpoint) {
+			t.Fatal("server did not come up")
+		}
+
+		client := mcp.NewClient(&mcp.Implementation{Name: "e2e"}, nil)
+		transport := &mcp.StreamableClientTransport{
+			Endpoint:   endpoint,
+			HTTPClient: &http.Client{Transport: &bearerTransport{token: "sekret"}},
+			MaxRetries: 0,
+		}
+		session, err := client.Connect(ctx, transport, nil)
+		if err != nil {
+			t.Fatalf("client connect: %v", err)
+		}
+		defer session.Close()
+
+		res, err := session.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools: %v", err)
+		}
+		if len(res.Tools) != 1 || res.Tools[0].Name != "hello" {
+			t.Fatalf("tools = %+v, want exactly hello", res.Tools)
+		}
+
+		call, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "hello"})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if call.IsError || len(call.Content) == 0 {
+			t.Fatalf("call = %+v, want non-error output", call)
+		}
+		if got := call.Content[0].(*mcp.TextContent).Text; !strings.Contains(got, "hello-world") {
+			t.Errorf("output = %q, want to contain hello-world", got)
+		}
+
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run returned %v after cancel, want nil", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not stop after cancel")
+		}
+	})
+
+	t.Run("zero_tools_warns", func(t *testing.T) {
+		dir := t.TempDir()
+		scripts := t.TempDir() // empty
+		port := freePort(t)
+		buf := &captureWriter{}
+		swapErrOut(t, buf)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- run(ctx, dir, scripts, false, "127.0.0.1", port, "", corsConfig{}, defaultToolTimeout, false, 16)
+		}()
+
+		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+		if !waitForHTTP(t, endpoint) {
+			t.Fatal("server did not come up")
+		}
+
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if strings.Contains(buf.String(), "No executable scripts found") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("zero-tools warning not captured, stderr = %q", buf.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run returned %v after cancel, want nil", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("run did not stop after cancel")
+		}
+	})
+}
+
+// bearerTransport injects the Authorization header on every request.
+type bearerTransport struct{ token string }
+
+func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// captureWriter is a goroutine-safe strings.Builder for errOut swapping.
+type captureWriter struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *captureWriter) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *captureWriter) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+// swapErrOut redirects run()'s stderr sink for the duration of the test,
+// restoring the previous value (os.Stderr in practice) on cleanup.
+func swapErrOut(t *testing.T, w io.Writer) {
+	t.Helper()
+	prev := errOut
+	errOut = w
+	t.Cleanup(func() { errOut = prev })
+}
+
+// freePort returns a port the kernel just freed from a throwaway listener.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port
+}
+
+// waitForHTTP polls the endpoint until any HTTP response arrives.
+func waitForHTTP(t *testing.T, url string) bool {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 func TestBearerAuthMiddleware(t *testing.T) {
@@ -1542,7 +1974,7 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBuildHTTPHandlerRejectsOversizedBody covers F-3's maxHTTPBodyBytes cap
+// TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
 // end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
 // rejected (400) without being read into memory. Chunked (ContentLength -1)
 // so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
@@ -1914,6 +2346,139 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 }
 
+// TestToolsEqual covers the change-diff: every field a rescan can
+// change must invalidate the skip, and an unchanged set must compare equal.
+func TestToolsEqual(t *testing.T) {
+	timeout5 := 5 * time.Minute
+	timeout0 := time.Duration(0)
+	tests := []struct {
+		name string
+		a, b discoveredTool
+		want bool
+	}{
+		{name: "identical", a: discoveredTool{Name: "t", Path: "/x", Description: "d"}, b: discoveredTool{Name: "t", Path: "/x", Description: "d"}, want: true},
+		{name: "nil_timeouts_equal", a: discoveredTool{Name: "t"}, b: discoveredTool{Name: "t"}, want: true},
+		{name: "different_names", a: discoveredTool{Name: "a"}, b: discoveredTool{Name: "b"}, want: false},
+		{name: "different_paths", a: discoveredTool{Name: "t", Path: "/x"}, b: discoveredTool{Name: "t", Path: "/y"}, want: false},
+		{name: "different_descriptions", a: discoveredTool{Name: "t", Description: "one"}, b: discoveredTool{Name: "t", Description: "two"}, want: false},
+		{name: "nil_vs_zero_timeout", a: discoveredTool{Name: "t"}, b: discoveredTool{Name: "t", Timeout: &timeout0}, want: false},
+		{name: "timeout_values_differ", a: discoveredTool{Name: "t", Timeout: &timeout5}, b: discoveredTool{Name: "t", Timeout: &timeout0}, want: false},
+		{name: "params_differ", a: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p", Type: "string", Required: true}}}, b: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p", Type: "number"}}}, want: false},
+		{name: "params_reordered", a: discoveredTool{Name: "t", Params: []paramSpec{{Name: "p"}, {Name: "q"}}}, b: discoveredTool{Name: "t", Params: []paramSpec{{Name: "q"}, {Name: "p"}}}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolsEqual([]discoveredTool{tt.a}, []discoveredTool{tt.b}); got != tt.want {
+				t.Errorf("toolsEqual = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if toolsEqual([]discoveredTool{{Name: "a"}, {Name: "b"}}, []discoveredTool{{Name: "a"}}) {
+		t.Error("different lengths must not compare equal")
+	}
+}
+
+// TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
+// result is identical to the registered set must emit no RemoveTools/AddTool
+// churn and no tools/list_changed notifications, while a genuine change
+// still reloads.
+func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	initial, err := discoverTools(tmpDir)
+	if err != nil {
+		t.Fatalf("discoverTools failed: %v", err)
+	}
+	registry.replace(initial)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+
+	var changed atomic.Int32
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { changed.Add(1) },
+	})
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		_ = watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// The startup replace runs unconditionally (the startup double-scan is out
+	// of scope); wait for its notification(s) to drain, then take a baseline.
+	deadline := time.Now().Add(5 * time.Second)
+	for changed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	baseline := changed.Load()
+
+	// No-op touches: same content → identical set → must be skipped. Bounded
+	// retries: a lost fsnotify event is legal, so keep
+	// touching until a rescan window has elapsed with zero notifications —
+	// that silence is the assertion.
+	noopSawChange := false
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to touch script: %v", err)
+		}
+		time.Sleep(600 * time.Millisecond) // several debounce windows
+		if changed.Load() != baseline {
+			noopSawChange = true
+			break
+		}
+		if i > 2 { // a few clean windows: the skip is working
+			break
+		}
+	}
+	if noopSawChange {
+		t.Fatalf("no-op rescan emitted %d list_changed notification(s) above baseline, want 0", changed.Load()-baseline)
+	}
+
+	// A real frontmatter change must reload.
+	for i := 0; i < 10; i++ {
+		if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\n# Description: alpha v2\necho alpha\n"), 0o755); err != nil {
+			t.Fatalf("failed to update script: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for changed.Load() == baseline && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if changed.Load() != baseline {
+			break
+		}
+	}
+	if changed.Load() == baseline {
+		t.Fatal("a genuine description change did not trigger a reload after 10 attempts")
+	}
+
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	// Contains, not equality: the description format belongs to
+	// resolveToolTimeout and may change cosmetically.
+	if len(res.Tools) != 1 || !strings.Contains(res.Tools[0].Description, "alpha v2") || !strings.Contains(res.Tools[0].Description, "5m") {
+		t.Fatalf("tools after reload = %+v, want the updated description", res.Tools)
+	}
+}
+
 func TestResolvedTimeoutViaRegistry(t *testing.T) {
 	tmpDir := t.TempDir()
 	sleepPath := filepath.Join(tmpDir, "sleep5.sh")
@@ -2080,7 +2645,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 
 	// Hot reload: editing only the Timeout: line re-registers the tool.
 	// Bounded write retries: a lost fsnotify event is recovered by the next
-	// write (see TestWatchTools). (F-22)
+	// write (see TestWatchTools).
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
@@ -2558,6 +3123,293 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	}
 }
 
+// TestWatchToolsWatchedDirDeleted: rediscovery must warn and the watcher
+// must keep running when the scripts directory disappears mid-watch.
+func TestWatchToolsWatchedDirDeleted(t *testing.T) {
+	tmpDir := t.TempDir()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+
+	stderr, err := os.CreateTemp(t.TempDir(), "watch-stderr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() {
+		os.Stderr = prevStderr
+		stderr.Close()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(ctx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// Let the watcher goroutine finish NewWatcher/Add before the deletion,
+	// so the test exercises the mid-watch failure path (a deletion landing
+	// before Add is the fail-fast "failed to watch directory" branch).
+	time.Sleep(200 * time.Millisecond)
+	if err := os.RemoveAll(tmpDir); err != nil {
+		t.Fatalf("failed to delete watched dir: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		output, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatalf("failed to read stderr: %v", err)
+		}
+		if strings.Contains(string(output), "Warning: failed to rediscover tools:") {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("watchTools exited with %v after the watched dir was deleted; stderr = %q", err, output)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rediscovery warning not logged; stderr = %q", output)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Give the watcher time to observe the deletion (it must not exit).
+	select {
+	case err := <-done:
+		t.Fatalf("watchTools exited with %v after the watched dir was deleted; it must keep running", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned %v after cancel, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
+// TestWatchChangesRenameTriggersChange: renaming a file (fsnotify
+// Rename — on linux this arrives as a Move event) must fire the debounced
+// onChange, like create/write/remove do.
+func TestWatchChangesRenameTriggersChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "alpha.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	go func() {
+		_ = watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	// The first rename can race watcher registration (a lost event is legal
+	// for fsnotify); retry with a fresh rename until the fire is observed.
+	for i := 0; i < 10; i++ {
+		if err := os.Rename(scriptPath, filepath.Join(tmpDir, "beta.sh")); err != nil {
+			t.Fatalf("failed to rename script: %v", err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for calls.Load() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if calls.Load() > 0 {
+			break
+		}
+		// Prepare for the next attempt: rename back.
+		_ = os.Rename(filepath.Join(tmpDir, "beta.sh"), scriptPath)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("onChange did not fire on rename")
+	}
+}
+
+// TestWatchChangesPermissionError: a watcher permission error
+// (chmod the watched dir unreadable → inotify can no longer track it) must
+// be logged and swallowed, not fatal. Skipped when running as root —
+// uid 0 bypasses file permissions, so the error is not reproducible (the
+// sandbox and CI run as root; real user installs are covered).
+// A real fsnotify permission error is not deterministically reproducible
+// (chmod on an already-watched inode does not produce one, and root cannot
+// trip it at all), so the error path is exercised through the watcherErrors
+// injection seam: a synthetic error must be logged and must not stop the
+// loop — and the loop must keep processing real events afterwards.
+func TestWatchChangesPermissionError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	injected := make(chan error, 1)
+	prev := watcherErrors
+	watcherErrors = func(w *fsnotify.Watcher) <-chan error { return injected }
+	t.Cleanup(func() { watcherErrors = prev })
+
+	buf := &captureWriter{}
+	swapErrOut(t, buf)
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+	}()
+
+	// Let the loop arm, then deliver the synthetic watcher error.
+	time.Sleep(100 * time.Millisecond)
+	injected <- errors.New("permission denied (synthetic)")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "file watcher error") {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher error was not logged, stderr = %q", buf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "permission denied (synthetic)") {
+		t.Fatalf("warning must name the error, stderr = %q", buf.String())
+	}
+
+	// The loop must survive the error and still process real events.
+	if err := os.WriteFile(filepath.Join(tmpDir, "trigger.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("trigger write failed: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for calls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("onChange never fired after the synthetic watcher error — the loop is not alive")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
+	}
+}
+
+// TestWatchToolsRemovesDeletedTool: deleting a script must remove
+// its tool from the registry (RemoveTools), leaving the rest intact.
+func TestWatchToolsRemovesDeletedTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	alphaPath := filepath.Join(tmpDir, "alpha.sh")
+	betaPath := filepath.Join(tmpDir, "beta.sh")
+	if err := os.WriteFile(alphaPath, []byte("#!/bin/bash\necho alpha\n"), 0o755); err != nil {
+		t.Fatalf("failed to create alpha: %v", err)
+	}
+	if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+		t.Fatalf("failed to create beta: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry.replace([]discoveredTool{
+		{Name: "alpha", Path: alphaPath, Description: "alpha", Params: []paramSpec{}},
+		{Name: "beta", Path: betaPath, Description: "beta", Params: []paramSpec{}},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	defer clientSession.Close()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+	}()
+
+	// Bounded remove retries: a lost fsnotify event is recovered by the next
+	// delete attempt (re-write + delete keeps the path registered for the
+	// inotify watch), same pattern as the add/change tests.
+	var names []string
+	removed := false
+	for i := 0; i < 10 && !removed; i++ {
+		if err := os.Remove(betaPath); err != nil {
+			// First attempt: the file may not exist yet for the watcher; recreate.
+			if err := os.WriteFile(betaPath, []byte("#!/bin/bash\necho beta\n"), 0o755); err != nil {
+				t.Fatalf("failed to recreate beta: %v", err)
+			}
+			if err := os.Remove(betaPath); err != nil {
+				t.Fatalf("failed to delete beta: %v", err)
+			}
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools failed: %v", err)
+			}
+			if len(res.Tools) == 1 {
+				removed = true
+				break
+			}
+			// The registry swaps remove-then-add, so the live list is
+			// transiently empty between the two; a 0-tool snapshot is a
+			// valid in-flight state, not an error — keep polling.
+			names = nil
+			for _, tool := range res.Tools {
+				names = append(names, tool.Name)
+			}
+			if time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !removed {
+		cancel()
+		t.Fatalf("watchTools did not remove the deleted tool after 10 attempts: got %v", names)
+	}
+
+	// Let any in-flight rescan settle before the final check.
+	time.Sleep(300 * time.Millisecond)
+	res, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	var remaining []string
+	for _, tool := range res.Tools {
+		remaining = append(remaining, tool.Name)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Name != "alpha" {
+		t.Fatalf("remaining tools = %v, want exactly [alpha]", remaining)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchTools returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
 func TestResolveToolPaths(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -2971,7 +3823,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 	})
 }
 
-// --- Tier 1 hardening tests (REVIEW.md F-6 and the F-1/F-2/F-4 behaviors) ---
+// --- Tier 1 hardening tests (output capture and security behaviors) ---
 
 func TestBoundedWriter(t *testing.T) {
 	w := newBoundedWriter(10)
@@ -3002,7 +3854,7 @@ func TestBoundedWriter(t *testing.T) {
 }
 
 func TestCombineToolOutputTruncation(t *testing.T) {
-	// The 1 MiB branch of combineToolOutput was previously untested (F-6).
+	// The 1 MiB branch of combineToolOutput was previously untested.
 	suffixLen := len(fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes))
 
 	t.Run("2MiB_stdout_is_capped_and_tagged", func(t *testing.T) {
@@ -3093,7 +3945,7 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
 		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
 		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
-		// The F-1 case: remote bind, no key, no escape hatch → refuse.
+		// The remote-bind case: no key, no escape hatch → refuse.
 		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
 		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
 		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
