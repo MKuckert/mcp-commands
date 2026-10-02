@@ -29,6 +29,17 @@ Status: **Complete** — all units landed; pending Code Reviewer sign-off (check
 8. **F-7 test caveat**: this sandbox's seccomp profile silently swallows `kill(2)` (even single-target SIGKILL) toward processes Go `exec`'d — group kills from a Go caller are untestable here, while the same calls from shell processes work. The test therefore probes delivery first (`assertGroupKillDelivered`) and **skips with a visible reason** in such sandboxes; it runs for real on ordinary systems/CI. Code unchanged: `Setpgid` + `kill(−pid)` + `WaitDelay` is the standard pattern.
 9. `-race` cannot run in this sandbox (ThreadSanitizer unsupported) — race coverage by inspection, same convention as Tier 1.
 
+## PR review round (addressed before merge)
+
+- `resolveAPIKey` returns `resolvedAPIKey{Token, Source}` with a `flag`/`file`/`env`/`none` source enum (user request); `cliConfig.apiKey` reuses the struct.
+- Token resolution only in HTTP mode: stdio (`--port 0`) ignores the key sources, so an unreadable `--api-key-file` no longer blocks a stdio start (matches README).
+- The F-7 group kill now goes through `cmd.Cancel` (exec invokes it on ctx done) instead of a competing goroutine — removes the race where CommandContext's own kill let `Wait` return first; no lingering goroutine.
+- `watchChanges` logs through `errOut` and reads errors from an injectable `watcherErrors` seam; the permission test injects a synthetic error and asserts the warning + that the loop keeps processing real events (chmod on a watched inode does not produce a real fsnotify error, and root can't trip EACCES).
+- `-h` / parse errors print the full rendered flag help (every flag + description) with the flag package's exit-code conventions (0 for help, 2 for parse errors).
+- The Unix-only tests (process-group kill) moved to `toolproc_unix_test.go` (`//go:build !windows`) so `GOOS=windows` test builds compile.
+- `swapErrOut(t, w)` saves and restores the previous sink.
+- `REVIEW.md`: restored the pruned F-13 / F-26 / F-27 rows (they stay queued, unimplemented); README: "every HTTP request" → non-preflight MCP requests.
+
 ## Verification
 
 - `go vet ./...` + `go test ./...` green (sandbox env: `GOCACHE/GOPATH/TMPDIR` under `/workspace/.goenv`)

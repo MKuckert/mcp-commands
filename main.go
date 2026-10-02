@@ -891,6 +891,12 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
+// watcherErrors is the watcher-error source for watchChanges, indirected so
+// tests can inject a synthetic error channel (a real fsnotify error is not
+// deterministically reproducible — chmod on an already-watched inode does
+// not produce one). Production returns the watcher's own channel.
+var watcherErrors = func(w *fsnotify.Watcher) <-chan error { return w.Errors }
+
 // watchChanges watches dir with fsnotify and invokes onChange once per
 // debounced burst of Create/Write/Remove/Rename events. Watcher errors are
 // logged to stderr but do not stop the loop, ensuring robust operation even
@@ -934,13 +940,13 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 				}
 			}
 
-		case err, ok := <-watcher.Errors:
+		case err, ok := <-watcherErrors(watcher):
 			if !ok {
 				return fmt.Errorf("watcher error channel closed unexpectedly")
 			}
 			// Log the error but don't crash the watcher
 			// This handles cases like permission denied, file not found, etc.
-			fmt.Fprintf(os.Stderr, "Warning: file watcher error: %v\n", err)
+			fmt.Fprintf(errOut, "Warning: file watcher error: %v\n", err)
 
 		case <-debounceTimer.C:
 			debounceActive = false
@@ -1031,20 +1037,16 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	// CommandContext signals only the direct child; the whole process group
 	// (script plus grandchildren — the canonical shell-tool shape) must die
 	// with the deadline, or the 5-minute budget is not a real budget.
-	// The killer lives only as long as the call: it fires on the deadline
-	// and retires on natural exit, so a fast tool leaves no lingering
-	// goroutine (one per call, 5-minute default, would be a slow leak).
-	processDone := make(chan struct{})
-	go func() {
-		select {
-		case <-execCtx.Done():
-			_ = killToolProcess(cmd)
-		case <-processDone:
-		}
-	}()
+	// CommandContext's default Cancel signals only the direct child; the
+	// whole process group (script plus grandchildren — the canonical
+	// shell-tool shape) must die with the deadline, or the 5-minute budget
+	// is not a real budget. Overriding Cancel lets exec itself perform the
+	// group kill when the context finishes: no competing goroutine, no
+	// race with the built-in kill, and an already-exited process is a
+	// tolerated no-op (exec ignores the returned error).
+	cmd.Cancel = func() error { return killToolProcess(cmd) }
 
 	waitErr := cmd.Wait()
-	close(processDone)
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
 
 	if waitErr != nil {
@@ -1272,28 +1274,57 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 	return 0
 }
 
-// resolveAPIKey resolves the HTTP auth token with precedence
-// --api-key > --api-key-file > MCP_COMMANDS_API_KEY, returning the token
-// ("" when none is configured) and an error when a --api-key-file was
-// given but unreadable. File content is TrimSpace'd so hand-written files
-// with a trailing newline work.
-func resolveAPIKey(flagValue, fileValue string) (token string, err error) {
+// apiKeySource identifies where the configured token came from.
+type apiKeySource int
+
+const (
+	apiKeySourceNone apiKeySource = iota
+	apiKeySourceFlag
+	apiKeySourceFile
+	apiKeySourceEnv
+)
+
+func (s apiKeySource) String() string {
+	switch s {
+	case apiKeySourceFlag:
+		return "flag"
+	case apiKeySourceFile:
+		return "file"
+	case apiKeySourceEnv:
+		return "env"
+	default:
+		return "none"
+	}
+}
+
+// resolvedAPIKey is the HTTP auth token together with its source
+// (--api-key > --api-key-file > MCP_COMMANDS_API_KEY). The zero value is
+// "no token configured" (unauthenticated).
+type resolvedAPIKey struct {
+	Token  string
+	Source apiKeySource
+}
+
+// resolveAPIKey resolves the HTTP auth token, returning an error when a
+// --api-key-file was given but unreadable. File content is TrimSpace'd so
+// hand-written files with a trailing newline work.
+func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
 	if flagValue != "" {
-		return flagValue, nil
+		return resolvedAPIKey{Token: flagValue, Source: apiKeySourceFlag}, nil
 	}
 	if fileValue != "" {
 		data, err := os.ReadFile(fileValue)
 		if err != nil {
-			return "", fmt.Errorf("cannot read --api-key-file: %w", err)
+			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
 		}
 		if token := strings.TrimSpace(string(data)); token != "" {
-			return token, nil
+			return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
 		}
 	}
 	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
-		return envToken, nil
+		return resolvedAPIKey{Token: envToken, Source: apiKeySourceEnv}, nil
 	}
-	return "", nil
+	return resolvedAPIKey{}, nil
 }
 
 // isLoopbackHost reports whether host binds only to the local machine: the
@@ -1557,7 +1588,7 @@ type cliConfig struct {
 	watch          bool
 	host           string
 	port           int
-	apiKey         string // server mode only; "" = unauthenticated
+	apiKey         resolvedAPIKey // server+HTTP mode only; zero value = unauthenticated
 	cors           corsConfig
 	timeout        time.Duration // 0 = no global timeout (--no-timeout)
 	insecureNoAuth bool
@@ -1574,10 +1605,14 @@ type cliConfig struct {
 var errMissingRequiredFlags = errors.New("--dir and --scripts are required")
 
 // flagParseError wraps a raw flag-package parse error (undefined flag,
-// invalid value, -h). main maps it to the flag package's user-visible
-// conventions: -h → usage on stdout, exit 0; other parse errors → usage on
-// stderr, exit 2 — matching the pre-extraction flag.ExitOnError behavior.
-type flagParseError struct{ err error }
+// invalid value, -h) together with the rendered full flag help, so main
+// can restore the flag package's user-visible conventions: -h → help on
+// stdout, exit 0; other parse errors → error + help on stderr, exit 2 —
+// matching the pre-extraction flag.ExitOnError behavior.
+type flagParseError struct {
+	err   error
+	usage string
+}
 
 func (e *flagParseError) Error() string { return e.err.Error() }
 func (e *flagParseError) Unwrap() error { return e.err }
@@ -1613,9 +1648,13 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	if err := fs.Parse(args); err != nil {
 		// Wrapped so main can restore the flag package's parse-error
-		// convention (usage to stderr, exit 2) and -h (usage to stdout,
+		// convention (help to stderr, exit 2) and -h (help to stdout,
 		// exit 0); validation errors keep the regular Error:/exit 1 path.
-		return cliConfig{}, &flagParseError{err: err}
+		var usage strings.Builder
+		fs.SetOutput(&usage)
+		fs.Usage() // "Usage of mcp-commands:" + every flag and description
+		fs.SetOutput(io.Discard)
+		return cliConfig{}, &flagParseError{err: err, usage: usage.String()}
 	}
 
 	cfg := cliConfig{
@@ -1701,9 +1740,13 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cfg, nil
 	}
 
-	// Server mode only: resolve the token here (diagnostic modes ignore the
-	// key flags and report them via the ignored-flags notice).
-	cfg.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	// HTTP mode only: in stdio mode the auth sources are documented as
+	// ignored, so an unreadable --api-key-file must not block a stdio
+	// server from starting. (Diagnostic modes ignore the key flags and
+	// report them via the ignored-flags notice.)
+	if cfg.port > 0 {
+		cfg.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	}
 	return cfg, err
 }
 
@@ -1713,11 +1756,12 @@ func main() {
 		var parseErr *flagParseError
 		if errors.As(err, &parseErr) {
 			if errors.Is(err, flag.ErrHelp) {
-				fmt.Println(usageLine)
+				// Full flag help (every flag and its description), exit 0.
+				fmt.Fprint(os.Stdout, parseErr.usage)
 				os.Exit(0)
 			}
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			fmt.Fprintln(os.Stderr, usageLine)
+			fmt.Fprint(os.Stderr, parseErr.usage)
 			os.Exit(2)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1733,7 +1777,7 @@ func main() {
 	if cfg.mode != modeServer {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.dir, cfg.scriptsDir, cfg.listTools, cfg.watch, cfg.callTool, cfg.callToolSet, cfg.params, cfg.timeout, cfg.ignoredFlags))
 	}
-	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
+	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey.Token, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

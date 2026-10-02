@@ -11,18 +11,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -1407,22 +1405,23 @@ func TestValidateRequiredParams(t *testing.T) {
 
 func TestResolveAPIKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		flag     string
-		file     string // content written to a temp file when fileSet
-		fileSet  bool
-		fileMiss bool // path set but file missing → error
-		env      string
-		want     string
+		name       string
+		flag       string
+		file       string // content written to a temp file when fileSet
+		fileSet    bool
+		fileMiss   bool // path set but file missing → error
+		env        string
+		want       string
+		wantSource apiKeySource
 	}{
-		{name: "flag_only", flag: "from-flag", want: "from-flag"},
-		{name: "env_only", env: "from-env", want: "from-env"},
-		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file"},
-		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag"},
-		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file"},
-		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env"},
+		{name: "flag_only", flag: "from-flag", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "env_only", env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file", wantSource: apiKeySourceFile},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantSource: apiKeySourceFlag},
+		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file", wantSource: apiKeySourceFile},
+		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
 		{name: "missing_file_errors", fileMiss: true},
-		{name: "neither_set", want: ""},
+		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
 	}
 
 	for _, tt := range tests {
@@ -1445,15 +1444,18 @@ func TestResolveAPIKey(t *testing.T) {
 			got, err := resolveAPIKey(tt.flag, filePath)
 			if tt.fileMiss {
 				if err == nil {
-					t.Fatalf("expected an error for the missing key file, got token %q", got)
+					t.Fatalf("expected an error for the missing key file, got %v", got)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("resolveAPIKey returned unexpected error: %v", err)
 			}
-			if got != tt.want {
-				t.Errorf("resolveAPIKey = %q, want %q", got, tt.want)
+			if got.Token != tt.want {
+				t.Errorf("resolveAPIKey token = %q, want %q", got.Token, tt.want)
+			}
+			if got.Source != tt.wantSource {
+				t.Errorf("resolveAPIKey source = %v, want %v", got.Source, tt.wantSource)
 			}
 		})
 	}
@@ -1518,7 +1520,7 @@ func TestParseCLI(t *testing.T) {
 				if c.maxConcurrent != defaultMaxConcurrentTools {
 					t.Errorf("maxConcurrent = %d", c.maxConcurrent)
 				}
-				if c.apiKey != "" {
+				if c.apiKey.Token != "" {
 					t.Errorf("apiKey = %q, want empty", c.apiKey)
 				}
 			},
@@ -1532,8 +1534,8 @@ func TestParseCLI(t *testing.T) {
 				if c.host != "0.0.0.0" || c.port != 9090 {
 					t.Errorf("host/port = %q/%d", c.host, c.port)
 				}
-				if c.apiKey != "tk" {
-					t.Errorf("apiKey = %q", c.apiKey)
+				if c.apiKey.Token != "tk" || c.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want tk/flag", c.apiKey)
 				}
 				if c.timeout != time.Hour {
 					t.Errorf("timeout = %v", c.timeout)
@@ -1548,28 +1550,40 @@ func TestParseCLI(t *testing.T) {
 		},
 		{
 			name:     "api_key_file_resolved",
-			args:     []string{"--dir", "d", "--scripts", "s", "--api-key-file", keyFile},
+			args:     []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", keyFile},
 			wantMode: modeServer,
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey != "filetoken" {
-					t.Errorf("apiKey = %q, want trimmed filetoken", c.apiKey)
+				if c.apiKey.Token != "filetoken" || c.apiKey.Source != apiKeySourceFile {
+					t.Errorf("apiKey = %v, want filetoken/file", c.apiKey)
 				}
 			},
 		},
 		{
 			name:    "api_key_flag_wins_over_file",
-			args:    []string{"--dir", "d", "--scripts", "s", "--api-key", "flag", "--api-key-file", keyFile},
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key", "flag", "--api-key-file", keyFile},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey != "flag" {
-					t.Errorf("apiKey = %q, want flag", c.apiKey)
+				if c.apiKey.Token != "flag" || c.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v, want flag/flag", c.apiKey)
 				}
 			},
 		},
 		{
 			name:    "api_key_file_missing_fails",
-			args:    []string{"--dir", "d", "--scripts", "s", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
 			wantErr: "--api-key-file",
+		},
+		{
+			// Stdio ignores the key sources: an unreadable file must not
+			// block startup (README: all key sources ignored without --port).
+			name:     "stdio_ignores_unreadable_key_file",
+			args:     []string{"--dir", "d", "--scripts", "s", "--api-key-file", filepath.Join(t.TempDir(), "nope")},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.apiKey.Source != apiKeySourceNone {
+					t.Errorf("apiKey = %v, want zero value in stdio mode", c.apiKey)
+				}
+			},
 		},
 		{
 			name:    "no_timeout",
@@ -1682,8 +1696,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		}
 		port := freePort(t)
 		buf := &captureWriter{}
-		t.Cleanup(func() { swapErrOut(buf) })
-		swapErrOut(buf)
+		swapErrOut(t, buf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
@@ -1743,8 +1756,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		scripts := t.TempDir() // empty
 		port := freePort(t)
 		buf := &captureWriter{}
-		t.Cleanup(func() { swapErrOut(buf) })
-		swapErrOut(buf)
+		swapErrOut(t, buf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1808,9 +1820,13 @@ func (c *captureWriter) String() string {
 	return c.buf.String()
 }
 
-// swapErrOut redirects run()'s stderr sink; pair with t.Cleanup.
-func swapErrOut(w io.Writer) {
+// swapErrOut redirects run()'s stderr sink for the duration of the test,
+// restoring the previous value (os.Stderr in practice) on cleanup.
+func swapErrOut(t *testing.T, w io.Writer) {
+	t.Helper()
+	prev := errOut
 	errOut = w
+	t.Cleanup(func() { errOut = prev })
 }
 
 // freePort returns a port the kernel just freed from a throwaway listener.
@@ -3191,44 +3207,66 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 // be logged and swallowed, not fatal. Skipped when running as root —
 // uid 0 bypasses file permissions, so the error is not reproducible (the
 // sandbox and CI run as root; real user installs are covered).
+// A real fsnotify permission error is not deterministically reproducible
+// (chmod on an already-watched inode does not produce one, and root cannot
+// trip it at all), so the error path is exercised through the watcherErrors
+// injection seam: a synthetic error must be logged and must not stop the
+// loop — and the loop must keep processing real events afterwards.
 func TestWatchChangesPermissionError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: file permissions do not apply, inotify EACCES not reproducible")
-	}
 	tmpDir := t.TempDir()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	injected := make(chan error, 1)
+	prev := watcherErrors
+	watcherErrors = func(w *fsnotify.Watcher) <-chan error { return injected }
+	t.Cleanup(func() { watcherErrors = prev })
+
+	buf := &captureWriter{}
+	swapErrOut(t, buf)
 
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
 		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
 	}()
-	defer func() {
-		_ = os.Chmod(tmpDir, 0o755)
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil && err != context.Canceled {
-				t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("watchChanges did not stop after cancel")
-		}
-	}()
 
-	time.Sleep(200 * time.Millisecond) // let the watcher finish NewWatcher/Add
-	if err := os.Chmod(tmpDir, 0); err != nil {
-		t.Fatalf("chmod failed: %v", err)
+	// Let the loop arm, then deliver the synthetic watcher error.
+	time.Sleep(100 * time.Millisecond)
+	injected <- errors.New("permission denied (synthetic)")
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "file watcher error") {
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher error was not logged, stderr = %q", buf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), "permission denied (synthetic)") {
+		t.Fatalf("warning must name the error, stderr = %q", buf.String())
 	}
 
-	// The watcher must survive the permission error (the documented
-	// resilience: "log the error but don't crash").
+	// The loop must survive the error and still process real events.
+	if err := os.WriteFile(filepath.Join(tmpDir, "trigger.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("trigger write failed: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for calls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("onChange never fired after the synthetic watcher error — the loop is not alive")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
 	select {
 	case err := <-done:
-		t.Fatalf("watchChanges exited %v after the permission error; it must keep running", err)
-	case <-time.After(500 * time.Millisecond):
+		if err != nil && err != context.Canceled {
+			t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchChanges did not stop after cancel")
 	}
 }
 
@@ -3859,100 +3897,6 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 	}
 	if !utf8.ValidString(text.Text) {
 		t.Fatal("result text is not valid UTF-8")
-	}
-}
-
-// assertGroupKillDelivered verifies that kill(−pid, SIGKILL) reaches the
-// whole group in the current environment (spawn a script whose child inherits
-// its process group, group-kill, expect both dead). It returns false when the
-// environment silently swallows group signals — some sandboxes' seccomp
-// profiles block kill(2) toward Go-exec'd children — in which case the
-// caller must skip rather than fail.
-func assertGroupKillDelivered(t *testing.T) bool {
-	t.Helper()
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "grp.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/bash\nsleep 60 &\nsleep 60\n"), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
-	cmd := exec.Command(scriptPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start: %v", err)
-	}
-	time.Sleep(200 * time.Millisecond)
-	if err := killToolProcess(cmd); err != nil {
-		t.Fatalf("group kill failed: %v", err)
-	}
-	defer cmd.Wait()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		alive := syscall.Kill(cmd.Process.Pid, 0) == nil
-		if !alive {
-			return true // direct child died → group signal was delivered
-		}
-		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
-			return false
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// TestExecuteToolKillsProcessGroup: the timeout must kill the whole
-// process group, not only the direct child — a shell script's grandchildren
-// (the canonical tool shape) must not outlive their budget.
-func TestExecuteToolKillsProcessGroup(t *testing.T) {
-	if !assertGroupKillDelivered(t) {
-		t.Skip("this sandbox does not deliver process-group signals to Go-exec'd processes; group kill cannot be verified here")
-	}
-	tmpDir := t.TempDir()
-	pidFile := filepath.Join(tmpDir, "grandchild.pid")
-	scriptPath := filepath.Join(tmpDir, "spawner.sh")
-	script := "#!/bin/bash\nsleep 60 &\necho $! > " + pidFile + "\nsleep 30\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("failed to create script: %v", err)
-	}
-
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 2*time.Second, tmpDir)
-	if err != nil {
-		t.Fatalf("executeTool returned unexpected error: %v", err)
-	}
-	if !result.IsError {
-		t.Fatal("expected an IsError timeout result")
-	}
-	if _, ok := result.Content[0].(*mcp.TextContent); !ok {
-		t.Fatalf("unexpected content type %T", result.Content[0])
-	}
-	text := result.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "timed out") {
-		t.Fatalf("expected a timeout message, got: %q", text)
-	}
-
-	grandPidRaw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("script never wrote the grandchild pid: %v", err)
-	}
-	grandPid, err := strconv.Atoi(strings.TrimSpace(string(grandPidRaw)))
-	if err != nil {
-		t.Fatalf("unparseable pid %q: %v", grandPidRaw, err)
-	}
-
-	// The grandchild must be dead after executeTool returns.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if err := syscall.Kill(grandPid, 0); err == nil {
-			if time.Now().After(deadline) {
-				t.Fatalf("grandchild %d survived past the timeout kill", grandPid)
-			}
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		if !errors.Is(err, syscall.ESRCH) {
-			t.Fatalf("kill(pid, 0) = %v, want ESRCH (process gone)", err)
-		}
-		break // gone
 	}
 }
 
