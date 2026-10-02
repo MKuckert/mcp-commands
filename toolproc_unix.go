@@ -3,6 +3,8 @@
 package main
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -15,10 +17,14 @@ func armToolProcess(cmd *exec.Cmd) {
 }
 
 // killToolProcess SIGKILLs the tool's entire process group (−pid). It is a
-// no-op when the process never started.
+// no-op when the process never started or has already exited.
 func killToolProcess(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
 }
