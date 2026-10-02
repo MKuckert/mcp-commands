@@ -4,7 +4,7 @@
     "adapter": "Delve",
     "request": "launch",
     "mode": "exec",
-    "program": "${ZED_WORKTREE_ROOT}/src/mcp-commands",
+    "program": "${ZED_WORKTREE_ROOT}/mcp-commands",
     "args": [
       "--dir",
       ".",
@@ -16,7 +16,7 @@
     ],
     "build": {
       "command": "go",
-      "cwd": "${ZED_WORKTREE_ROOT}/src/",
+      "cwd": "${ZED_WORKTREE_ROOT}/",
       "args": ["build"],
     },
   },
