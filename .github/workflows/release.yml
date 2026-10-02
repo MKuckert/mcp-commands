@@ -27,7 +27,7 @@ jobs:
           go-version: "stable"
 
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7.2.3

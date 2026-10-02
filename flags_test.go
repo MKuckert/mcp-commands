@@ -178,12 +178,17 @@ func TestParseCLI(t *testing.T) {
 		},
 		{
 			name:     "list_tools_mode_reports_ignored_server_flags",
-			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk"},
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk", "--tls-cert", tlsCertFile, "--tls-key", tlsKeyFile},
 			wantMode: modeListTools,
 			check: func(t *testing.T, c cliConfig) {
 				got := strings.Join(c.diagnostic.ignoredFlags, ",")
-				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") {
-					t.Errorf("ignoredFlags = %v", c.diagnostic.ignoredFlags)
+				for _, want := range []string{"--port", "--api-key", "--tls-cert", "--tls-key"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("ignoredFlags = %v, want to include %s", c.diagnostic.ignoredFlags, want)
+					}
+				}
+				if c.server.tlsCert != "" || c.server.tlsKey != "" {
+					t.Errorf("tlsCert/tlsKey = %q/%q, want zero values in diagnostic mode", c.server.tlsCert, c.server.tlsKey)
 				}
 			},
 		},
