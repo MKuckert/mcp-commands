@@ -746,11 +746,11 @@ func timeoutSuffix(timeout time.Duration) string {
 	return "(timeout: none)"
 }
 
-// resolveWrapWidth returns the wrap width for --list-tools output: the
+// prodResolveWrapWidth returns the wrap width for --list-tools output: the
 // terminal window width (in runes) when stdout is a TTY (re-queried at every
 // print so window resizes are honored), falling back to listWrapWidth when
 // stdout is not a *os.File, not a terminal, or the query fails.
-var resolveWrapWidth = func(stdout io.Writer) int {
+func prodResolveWrapWidth(stdout io.Writer) int {
 	file, ok := stdout.(*os.File)
 	if !ok {
 		return listWrapWidth
@@ -891,18 +891,18 @@ func mustJSONMarshal(v any) json.RawMessage {
 	return data
 }
 
-// watcherErrors is the watcher-error source for watchChanges, indirected so
-// tests can inject a synthetic error channel (a real fsnotify error is not
-// deterministically reproducible — chmod on an already-watched inode does
-// not produce one). Production returns the watcher's own channel.
-var watcherErrors = func(w *fsnotify.Watcher) <-chan error { return w.Errors }
+// prodWatcherErrors is the watcher-error source for watchChanges. Production
+// returns the watcher's own channel; tests inject a synthetic one (a real
+// fsnotify error is not deterministically reproducible — chmod on an already-
+// watched inode does not produce one).
+func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 
 // watchChanges watches dir with fsnotify and invokes onChange once per
 // debounced burst of Create/Write/Remove/Rename events. Watcher errors are
-// logged to stderr but do not stop the loop, ensuring robust operation even
-// if the watched directory is deleted or permissions change. It returns when
-// ctx is done or the watcher channels close.
-func watchChanges(ctx context.Context, dir string, onChange func()) error {
+// logged to env.stderr but do not stop the loop, ensuring robust operation
+// even if the watched directory is deleted or permissions change. It returns
+// when ctx is done or the watcher channels close.
+func watchChanges(ctx context.Context, env liveEnv, dir string, onChange func()) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
@@ -940,13 +940,13 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 				}
 			}
 
-		case err, ok := <-watcherErrors(watcher):
+		case err, ok := <-env.watcherErrors(watcher):
 			if !ok {
 				return fmt.Errorf("watcher error channel closed unexpectedly")
 			}
 			// Log the error but don't crash the watcher
 			// This handles cases like permission denied, file not found, etc.
-			fmt.Fprintf(errOut, "Warning: file watcher error: %v\n", err)
+			fmt.Fprintf(env.stderr, "Warning: file watcher error: %v\n", err)
 
 		case <-debounceTimer.C:
 			debounceActive = false
@@ -959,22 +959,22 @@ func watchChanges(ctx context.Context, dir string, onChange func()) error {
 // changes, re-discovering and re-registering the tools on every debounced
 // change (built on watchChanges; the interval parameter is retained for the
 // existing call sites but the debounce is the fixed watchDebounceDelay).
-func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
+func watchTools(ctx context.Context, env liveEnv, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
 	// Initial discovery
 	tools, err := discoverTools(scriptsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: initial tool discovery failed: %v\n", err)
+		fmt.Fprintf(env.stderr, "Warning: initial tool discovery failed: %v\n", err)
 	} else {
 		registry.replace(tools)
 	}
 
-	return watchChanges(ctx, scriptsDir, func() {
+	return watchChanges(ctx, env, scriptsDir, func() {
 		// After debounce delay, rediscover tools. The diff-skip avoids
 		// the remove/re-add churn and N list_changed notifications for a
 		// no-op rescan (e.g. a touched file with unchanged frontmatter).
 		tools, err := discoverTools(scriptsDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to rediscover tools: %v\n", err)
+			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return
 		}
 
@@ -1090,10 +1090,9 @@ func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err er
 	return dirAbs, scriptsAbs, nil
 }
 
-// clearScreen clears the terminal (ANSI erase-screen + cursor-home). It is a
-// no-op when stdout is not a TTY, so piped output simply accumulates. It is
-// a package variable so tests can inject a recorder.
-var clearScreen = func(stdout io.Writer) {
+// prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
+// is a no-op when stdout is not a TTY, so piped output simply accumulates.
+func prodClearScreen(stdout io.Writer) {
 	file, ok := stdout.(*os.File)
 	if !ok || !term.IsTerminal(int(file.Fd())) {
 		return
@@ -1101,10 +1100,34 @@ var clearScreen = func(stdout io.Writer) {
 	_, _ = stdout.Write([]byte("\x1b[2J\x1b[H"))
 }
 
-// notifySignals wraps signal.NotifyContext as a package variable so tests can
-// inject a cancelable context in place of real SIGINT/SIGTERM.
-var notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+// prodNotifySignals wraps signal.NotifyContext (SIGINT/SIGTERM cancel the
+// context).
+func prodNotifySignals(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(ctx, sig...)
+}
+
+// liveEnv bundles the live system dependencies of the CLI front end: the
+// standard streams, signal handling, and the TTY-dependent behaviors. main
+// constructs one via prodLiveEnv; tests construct local fakes and pass them
+// in — no package-level mutable state, so every test can t.Parallel().
+type liveEnv struct {
+	stdout           io.Writer
+	stderr           io.Writer
+	resolveWrapWidth func(stdout io.Writer) int
+	clearScreen      func(stdout io.Writer)
+	notifySignals    func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc)
+	watcherErrors    func(w *fsnotify.Watcher) <-chan error
+}
+
+func prodLiveEnv() liveEnv {
+	return liveEnv{
+		stdout:           os.Stdout,
+		stderr:           os.Stderr,
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals:    prodNotifySignals,
+		watcherErrors:    prodWatcherErrors,
+	}
 }
 
 // serverModeFlagNames lists the flags that configure the MCP server, in a
@@ -1118,27 +1141,27 @@ var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "a
 // the process exits after the diagnostic completes, except the live
 // --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
 // goes to stdout; warnings and operational errors go to stderr.
-func runDiagnostic(stdout, stderr io.Writer, diag diagnostic) int {
+func runDiagnostic(env liveEnv, diag diagnostic) int {
 	if len(diag.ignoredFlags) > 0 {
-		fmt.Fprintf(stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
+		fmt.Fprintf(env.stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
 	}
 	if diag.listTools {
-		return runListTools(stdout, stderr, diag.dir, diag.scriptsDir, diag.watch, diag.timeout)
+		return runListTools(env, diag.dir, diag.scriptsDir, diag.watch, diag.timeout)
 	}
 	if diag.callTool == "" {
 		// Only reachable when --call-tool= was explicitly passed (an
 		// omitted flag is handled by main and never reaches here).
-		fmt.Fprintln(stderr, "Error: --call-tool requires a non-empty tool name")
+		fmt.Fprintln(env.stderr, "Error: --call-tool requires a non-empty tool name")
 		return 1
 	}
 	dirAbs, scriptsAbs, err := resolveToolPaths(diag.dir, diag.scriptsDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
+		fmt.Fprintf(env.stderr, "Error: %v\n", err)
 		return 1
 	}
-	code, err := runCallTool(stdout, scriptsAbs, dirAbs, diag.timeout, diag.callTool, diag.params)
+	code, err := runCallTool(env, scriptsAbs, dirAbs, diag.timeout, diag.callTool, diag.params)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
+		fmt.Fprintf(env.stderr, "Error: %v\n", err)
 	}
 	return code
 }
@@ -1156,7 +1179,7 @@ func runDiagnostic(stdout, stderr io.Writer, diag diagnostic) int {
 // line and never start the script. A non-object --params is rejected by
 // parseToolArguments, which maps an explicitly empty value and JSON null to
 // {} (same leniency as the MCP handler).
-func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
+func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
 	tools, err := discoverTools(scriptsAbs)
 	if err != nil {
 		return 1, fmt.Errorf("failed to discover tools: %w", err)
@@ -1189,7 +1212,7 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 	}
 
 	if err := validateRequiredParams(args, tool.Params); err != nil {
-		fmt.Fprintln(stdout, err.Error())
+		fmt.Fprintln(env.stdout, err.Error())
 		return 1, nil
 	}
 
@@ -1209,7 +1232,7 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 		}
 		b.WriteString(text.Text)
 	}
-	fmt.Fprintln(stdout, b.String())
+	fmt.Fprintln(env.stdout, b.String())
 
 	if result.IsError {
 		return 1, nil
@@ -1224,23 +1247,23 @@ func runCallTool(stdout io.Writer, scriptsAbs, dirAbs string, globalTimeout time
 // re-prints the full list with the existing per-scan stderr warnings, until
 // the process is signaled. Path resolution errors are a startup failure
 // (stderr, exit 1).
-func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, timeout time.Duration) int {
+func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
 	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
+		fmt.Fprintf(env.stderr, "Error: %v\n", err)
 		return 1
 	}
 
 	printList := func(tools []discoveredTool) {
 		if len(tools) == 0 {
-			fmt.Fprintf(stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
+			fmt.Fprintf(env.stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
 		}
-		fmt.Fprint(stdout, renderToolList(tools, timeout, resolveWrapWidth(stdout)))
+		fmt.Fprint(env.stdout, renderToolList(tools, timeout, env.resolveWrapWidth(env.stdout)))
 	}
 
 	tools, err := discoverTools(scriptsAbs)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
+		fmt.Fprintf(env.stderr, "Error: %v\n", err)
 		return 1
 	}
 	printList(tools)
@@ -1249,19 +1272,19 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 		return 0
 	}
 
-	sigCtx, cancel := notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, cancel := env.notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := watchChanges(sigCtx, scriptsAbs, func() {
-		clearScreen(stdout)
+	if err := watchChanges(sigCtx, env, scriptsAbs, func() {
+		env.clearScreen(env.stdout)
 		tools, err := discoverTools(scriptsAbs)
 		if err != nil {
-			fmt.Fprintf(stderr, "Warning: failed to rediscover tools: %v\n", err)
+			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return
 		}
 		printList(tools)
 	}); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(stderr, "Warning: watch loop stopped: %v\n", err)
+		fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
 	}
 	return 0
 }
@@ -1791,23 +1814,18 @@ func main() {
 		fmt.Println(serverVersion)
 		os.Exit(0)
 	}
+	env := prodLiveEnv()
 	if cfg.mode != modeServer {
-		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.diagnostic))
+		os.Exit(runDiagnostic(env, cfg.diagnostic))
 	}
-	if err := run(context.Background(), cfg.server); err != nil {
+	if err := run(context.Background(), env, cfg.server); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// errOut is run()'s stderr sink, indirected so tests can capture the
-// zero-tools warning and the startup banner. It is os.Stderr by
-// default; tests swap it and restore via t.Cleanup. main.go's own error
-// reporting keeps using os.Stderr directly.
-var errOut io.Writer = os.Stderr
-
-func run(ctx context.Context, cfg serverConfig) error {
-	sigCtx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
+	sigCtx, cancel := env.notifySignals(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(cfg.dir, cfg.scriptsDir)
@@ -1821,7 +1839,7 @@ func run(ctx context.Context, cfg serverConfig) error {
 	}
 
 	if len(tools) == 0 {
-		fmt.Fprintf(errOut, "Warning: No executable scripts found in %s\n", scriptsAbs)
+		fmt.Fprintf(env.stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
 	}
 
 	impl := &mcp.Implementation{
@@ -1834,8 +1852,8 @@ func run(ctx context.Context, cfg serverConfig) error {
 
 	if cfg.watch {
 		go func() {
-			if err := watchTools(sigCtx, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(errOut, "Warning: watch loop stopped: %v\n", err)
+			if err := watchTools(sigCtx, env, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
 			}
 		}()
 	}
@@ -1847,7 +1865,7 @@ func run(ctx context.Context, cfg serverConfig) error {
 		if warning, err := checkHTTPSecurityPolicy(cfg.host, cfg.apiKey.Token, cfg.insecureNoAuth); err != nil {
 			return err
 		} else if warning != "" {
-			fmt.Fprintln(errOut, warning)
+			fmt.Fprintln(env.stderr, warning)
 		}
 
 		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)
@@ -1881,13 +1899,13 @@ func run(ctx context.Context, cfg serverConfig) error {
 		if len(notes) > 0 {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
-		fmt.Fprintf(errOut, "%s\n", line)
+		fmt.Fprintf(env.stderr, "%s\n", line)
 		if err := serverHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
 		return nil
 	}
 
-	fmt.Fprintf(errOut, "Starting stdio server\n")
+	fmt.Fprintf(env.stderr, "Starting stdio server\n")
 	return server.Run(sigCtx, &mcp.StdioTransport{})
 }

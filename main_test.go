@@ -275,10 +275,11 @@ func TestWatchTools(t *testing.T) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
@@ -353,10 +354,11 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// Bounded write retries: a lost fsnotify event is recovered by the next
@@ -1696,12 +1698,12 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		}
 		port := freePort(t)
 		buf := &captureWriter{}
-		swapErrOut(t, buf)
+		env := liveEnvFor(t, nil, buf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
-			done <- run(ctx, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, apiKey: resolvedAPIKey{Token: "sekret", Source: apiKeySourceFlag}, timeout: defaultToolTimeout})
+			done <- run(ctx, env, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, apiKey: resolvedAPIKey{Token: "sekret", Source: apiKeySourceFlag}, timeout: defaultToolTimeout})
 		}()
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -1756,13 +1758,13 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 		scripts := t.TempDir() // empty
 		port := freePort(t)
 		buf := &captureWriter{}
-		swapErrOut(t, buf)
+		env := liveEnvFor(t, nil, buf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan error, 1)
 		go func() {
-			done <- run(ctx, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, timeout: defaultToolTimeout})
+			done <- run(ctx, env, serverConfig{dir: dir, scriptsDir: scripts, host: "127.0.0.1", port: port, timeout: defaultToolTimeout})
 		}()
 
 		endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
@@ -1802,7 +1804,7 @@ func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// captureWriter is a goroutine-safe strings.Builder for errOut swapping.
+// captureWriter is a goroutine-safe strings.Builder for env.stderr capture.
 type captureWriter struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -1820,13 +1822,15 @@ func (c *captureWriter) String() string {
 	return c.buf.String()
 }
 
-// swapErrOut redirects run()'s stderr sink for the duration of the test,
-// restoring the previous value (os.Stderr in practice) on cleanup.
-func swapErrOut(t *testing.T, w io.Writer) {
+// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
+// capture) and production behavior for everything else. Tests construct
+// local envs — no shared state — so they can run in parallel.
+func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
 	t.Helper()
-	prev := errOut
-	errOut = w
-	t.Cleanup(func() { errOut = prev })
+	env := prodLiveEnv()
+	env.stdout = stdout
+	env.stderr = stderr
+	return env
 }
 
 // freePort returns a port the kernel just freed from a throwaway listener.
@@ -2417,8 +2421,9 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 	go func() {
-		_ = watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+		_ = watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// The startup replace runs unconditionally (the startup double-scan is out
@@ -2637,10 +2642,11 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// Hot reload: editing only the Timeout: line re-registers the tool.
@@ -3054,11 +3060,12 @@ func TestWatchChanges(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// Re-write until the change is observed: the first write can race the
@@ -3100,11 +3107,12 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	time.Sleep(500 * time.Millisecond) // several debounce windows, no events
@@ -3134,19 +3142,15 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prevStderr := os.Stderr
-	os.Stderr = stderr
-	t.Cleanup(func() {
-		os.Stderr = prevStderr
-		stderr.Close()
-	})
+	t.Cleanup(func() { stderr.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, stderr)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(ctx, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(ctx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// Let the watcher goroutine finish NewWatcher/Add before the deletion,
@@ -3207,10 +3211,11 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 
 	var calls atomic.Int32
 	go func() {
-		_ = watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+		_ = watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// The first rename can race watcher registration (a lost event is legal
@@ -3251,17 +3256,14 @@ func TestWatchChangesPermissionError(t *testing.T) {
 	defer cancel()
 
 	injected := make(chan error, 1)
-	prev := watcherErrors
-	watcherErrors = func(w *fsnotify.Watcher) <-chan error { return injected }
-	t.Cleanup(func() { watcherErrors = prev })
-
 	buf := &captureWriter{}
-	swapErrOut(t, buf)
+	env := liveEnvFor(t, nil, buf)
+	env.watcherErrors = func(w *fsnotify.Watcher) <-chan error { return injected }
 
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// Let the loop arm, then deliver the synthetic watcher error.
@@ -3338,9 +3340,10 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// Bounded remove retries: a lost fsnotify event is recovered by the next
@@ -3435,7 +3438,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("zero_tools_empty_stdout_exit_0", func(t *testing.T) {
 		emptyDir := t.TempDir()
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: emptyDir, scriptsDir: emptyDir, listTools: true, timeout: 5 * time.Minute})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -3450,7 +3453,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		missing := filepath.Join(tmpDir, "no-such-scripts")
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: missing, listTools: true, timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
 		}
@@ -3468,7 +3471,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			t.Fatalf("failed to create script: %v", err)
 		}
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--port"}})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: tmpDir, listTools: true, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--port"}})
 		if code != 0 {
 			t.Fatalf("exit code = %d, want 0", code)
 		}
@@ -3493,23 +3496,18 @@ func TestRunDiagnosticListTools(t *testing.T) {
 
 		var clears atomic.Int32
 		var cancel context.CancelFunc
-		oldClear := clearScreen
-		clearScreen = func(io.Writer) { clears.Add(1) }
-		oldNotify := notifySignals
-		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+
+		var stdout, stderr bytes.Buffer
+		env := liveEnvFor(t, &stdout, &stderr)
+		env.clearScreen = func(io.Writer) { clears.Add(1) }
+		env.notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
 			c, c2 := context.WithCancel(ctx)
 			cancel = c2
 			return c, func() {}
 		}
-		defer func() {
-			clearScreen = oldClear
-			notifySignals = oldNotify
-		}()
-
-		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
+			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -3560,23 +3558,18 @@ func TestRunDiagnosticListTools(t *testing.T) {
 
 		var clears atomic.Int32
 		var cancel context.CancelFunc
-		oldClear := clearScreen
-		clearScreen = func(io.Writer) { clears.Add(1) }
-		oldNotify := notifySignals
-		notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
+
+		var stdout, stderr bytes.Buffer
+		env := liveEnvFor(t, &stdout, &stderr)
+		env.clearScreen = func(io.Writer) { clears.Add(1) }
+		env.notifySignals = func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
 			c, c2 := context.WithCancel(ctx)
 			cancel = c2
 			return c, func() {}
 		}
-		defer func() {
-			clearScreen = oldClear
-			notifySignals = oldNotify
-		}()
-
-		var stdout, stderr bytes.Buffer
 		done := make(chan int, 1)
 		go func() {
-			done <- runDiagnostic(&stdout, &stderr, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
+			done <- runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: 5 * time.Minute})
 		}()
 
 		// Initial print.
@@ -3644,7 +3637,7 @@ func TestRunCallTool(t *testing.T) {
 	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
 		os.Remove(marker)
 		var buf bytes.Buffer
-		code, err = runCallTool(&buf, scriptsDir, tmpDir, global, name, params)
+		code, err = runCallTool(liveEnvFor(t, &buf, &buf), scriptsDir, tmpDir, global, name, params)
 		stdout = buf.String()
 		return code, err, stdout
 	}
@@ -3783,7 +3776,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("explicitly_empty_call_tool_is_startup_error", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, params: "{}", timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, callToolSet: true, params: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
@@ -3797,7 +3790,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--watch"}})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: 5 * time.Minute, ignoredFlags: []string{"--host", "--watch"}})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}
@@ -3813,7 +3806,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("unreadable_scripts_dir_exit_1", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(&stdout, &stderr, diagnostic{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, params: "{}", timeout: 5 * time.Minute})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: filepath.Join(tmpDir, "no-such"), callTool: "ok", callToolSet: true, params: "{}", timeout: 5 * time.Minute})
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
