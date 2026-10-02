@@ -3123,18 +3123,30 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	}
 }
 
-// TestWatchChangesWatchedDirDeleted: the watcher must log the
-// error and keep running when the watched directory disappears mid-watch —
-// it must return only on ctx cancellation, not on the deletion.
-func TestWatchChangesWatchedDirDeleted(t *testing.T) {
+// TestWatchToolsWatchedDirDeleted: rediscovery must warn and the watcher
+// must keep running when the scripts directory disappears mid-watch.
+func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 	tmpDir := t.TempDir()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+
+	stderr, err := os.CreateTemp(t.TempDir(), "watch-stderr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() {
+		os.Stderr = prevStderr
+		stderr.Close()
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, tmpDir, func() {})
+		done <- watchTools(ctx, tmpDir, registry, 20*time.Millisecond)
 	}()
 
 	// Let the watcher goroutine finish NewWatcher/Add before the deletion,
@@ -3145,10 +3157,30 @@ func TestWatchChangesWatchedDirDeleted(t *testing.T) {
 		t.Fatalf("failed to delete watched dir: %v", err)
 	}
 
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		output, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatalf("failed to read stderr: %v", err)
+		}
+		if strings.Contains(string(output), "Warning: failed to rediscover tools:") {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("watchTools exited with %v after the watched dir was deleted; stderr = %q", err, output)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rediscovery warning not logged; stderr = %q", output)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	// Give the watcher time to observe the deletion (it must not exit).
 	select {
 	case err := <-done:
-		t.Fatalf("watchChanges exited with %v after the watched dir was deleted; it must keep running", err)
+		t.Fatalf("watchTools exited with %v after the watched dir was deleted; it must keep running", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
@@ -3156,10 +3188,10 @@ func TestWatchChangesWatchedDirDeleted(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil && err != context.Canceled {
-			t.Fatalf("watchChanges returned %v after cancel, want context.Canceled", err)
+			t.Fatalf("watchTools returned %v after cancel, want context.Canceled", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("watchChanges did not stop after cancel")
+		t.Fatal("watchTools did not stop after cancel")
 	}
 }
 
