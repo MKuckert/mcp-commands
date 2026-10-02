@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// TestParseCLI: every fail-fast branch of the CLI front end.
+// These are the branches that were untestable while the logic lived in main()
+// (which calls os.Exit); the extraction into parseCLI makes each one assertable.
+
 func TestParseCLI(t *testing.T) {
 	t.Parallel()
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
@@ -228,7 +232,3 @@ func TestParseCLI(t *testing.T) {
 		})
 	}
 }
-
-// TestRunHTTPEndToEnd: run() served over real HTTP,
-// exercised by a real MCP client (auth, list, call, clean shutdown), plus
-// the zero-tools warning.

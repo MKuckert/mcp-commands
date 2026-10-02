@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// TestToolsEqual covers the change-diff: every field a rescan can
+// change must invalidate the skip, and an unchanged set must compare equal.
 
 func TestToolsEqual(t *testing.T) {
 	t.Parallel()
@@ -41,11 +45,6 @@ func TestToolsEqual(t *testing.T) {
 		t.Error("different lengths must not compare equal")
 	}
 }
-
-// TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
-// result is identical to the registered set must emit no RemoveTools/AddTool
-// churn and no tools/list_changed notifications, while a genuine change
-// still reloads.
 
 func TestResolvedTimeoutViaRegistry(t *testing.T) {
 	t.Parallel()

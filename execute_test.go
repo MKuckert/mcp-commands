@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +11,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestArgumentsToCLIArgsValidatesKeys(t *testing.T) {

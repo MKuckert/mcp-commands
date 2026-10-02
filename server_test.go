@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +13,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// TestRunHTTPEndToEnd: run() served over real HTTP,
+// exercised by a real MCP client (auth, list, call, clean shutdown), plus
+// the zero-tools warning.
 
 func TestRunHTTPEndToEnd(t *testing.T) {
 	t.Parallel()
@@ -146,6 +151,10 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
+// capture) and production behavior for everything else. Tests construct
+// local envs — no shared state — so they can run in parallel.
 
 func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
 	t.Helper()
@@ -576,5 +585,3 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 		}
 	})
 }
-
-// --- Tier 1 hardening tests (output capture and security behaviors) ---

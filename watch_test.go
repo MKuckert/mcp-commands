@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/fsnotify/fsnotify"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestWatchTools(t *testing.T) {
@@ -162,6 +163,11 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 		t.Fatal("watchTools did not stop after cancel")
 	}
 }
+
+// TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
+// result is identical to the registered set must emit no RemoveTools/AddTool
+// churn and no tools/list_changed notifications, while a genuine change
+// still reloads.
 
 func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	t.Parallel()

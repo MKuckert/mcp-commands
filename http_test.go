@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestResolveAPIKey(t *testing.T) {
@@ -71,10 +72,6 @@ func TestResolveAPIKey(t *testing.T) {
 	}
 }
 
-// TestParseCLI: every fail-fast branch of the CLI front end.
-// These are the branches that were untestable while the logic lived in main()
-// (which calls os.Exit); the extraction into parseCLI makes each one assertable.
-
 func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	r.Header.Set("Authorization", "Bearer "+b.token)
@@ -98,10 +95,6 @@ func (c *captureWriter) String() string {
 	defer c.mu.Unlock()
 	return c.buf.String()
 }
-
-// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
-// capture) and production behavior for everything else. Tests construct
-// local envs — no shared state — so they can run in parallel.
 
 func TestBearerAuthMiddleware(t *testing.T) {
 	t.Parallel()
@@ -606,9 +599,6 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 		t.Errorf("Vary = %q, want absent (CORS disabled)", got)
 	}
 }
-
-// TestToolsEqual covers the change-diff: every field a rescan can
-// change must invalidate the skip, and an unchanged set must compare equal.
 
 func TestHTTPSecurityPolicy(t *testing.T) {
 	t.Parallel()
