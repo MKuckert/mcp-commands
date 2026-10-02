@@ -14,7 +14,7 @@ Status: **Complete** — all units landed; pending Code Reviewer sign-off (check
 - [x] F-11: diff new vs current tool set; skip re-registration (and N `tools/list_changed` notifications) when the set is unchanged
 - [x] F-12: mark done (UTF-8 boundary back-off landed with F-2 in commit 459a9ba, tested in `TestCombineToolOutputTruncation`)
 - [x] F-23: Makefile `VERSION` 0.2.0 → 0.8.1, `buildall` in `.PHONY`; `serverVersion` → `0.8.1`
-- [x] Docs: README auth section documents `--api-key-file` + deprecation; usage line updated
+- [x] Docs: README auth section documents `--api-key-file` and recommends file/env token sources; usage line updated
 - [x] REVIEW.md: mark F-7…F-12, F-23 ✅ with this branch's commits
 
 ## Design decisions (deviations/choices vs REVIEW proposal)
