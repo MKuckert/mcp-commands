@@ -15,7 +15,7 @@ Status: **In progress** — tick boxes as units land.
 - [x] F-12: mark done (UTF-8 boundary back-off landed with F-2 in commit 459a9ba, tested in `TestCombineToolOutputTruncation`)
 - [ ] F-23: Makefile `VERSION` 0.2.0 → 0.8.1, `buildall` in `.PHONY`; `serverVersion` → `0.8.1`
 - [x] Docs: README auth section documents `--api-key-file` + deprecation; usage line updated
-- [ ] REVIEW.md: mark F-7…F-12, F-23 ✅ with this branch's commits
+- [x] REVIEW.md: mark F-7…F-12, F-23 ✅ with this branch's commits
 
 ## Design decisions (deviations/choices vs REVIEW proposal)
 
