@@ -224,7 +224,3 @@ func parseParamAnnotation(annotation, filePath, fullLine string) (paramSpec, err
 		Description: description,
 	}, nil
 }
-
-// parseToolArguments unmarshals the JSON arguments provided by the MCP client
-// into a Go map. It handles empty or null payloads by returning an empty map,
-// preventing unmarshal errors when tools are called without arguments.

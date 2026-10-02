@@ -7,6 +7,10 @@ import (
 	"regexp"
 )
 
+// parseToolArguments unmarshals the JSON arguments provided by the MCP client
+// into a Go map. It handles empty or null payloads by returning an empty map,
+// preventing unmarshal errors when tools are called without arguments.
+
 func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -71,11 +75,6 @@ func buildInputSchema(params []paramSpec) json.RawMessage {
 	return mustJSONMarshal(schema)
 }
 
-// argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
-// formatted for execution. It enforces strict naming rules for keys to prevent
-// injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
-// false -> omitted). Slices are expanded into multiple flags (e.g., --key val1 --key val2).
-
 func mustJSONMarshal(v any) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -83,8 +82,3 @@ func mustJSONMarshal(v any) json.RawMessage {
 	}
 	return data
 }
-
-// prodWatcherErrors is the watcher-error source for watchChanges. Production
-// returns the watcher's own channel; tests inject a synthetic one (a real
-// fsnotify error is not deterministically reproducible — chmod on an already-
-// watched inode does not produce one).

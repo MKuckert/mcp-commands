@@ -15,6 +15,11 @@ const (
 
 )
 
+// prodResolveWrapWidth returns the wrap width for --list-tools output: the
+// terminal window width (in runes) when stdout is a TTY (re-queried at every
+// print so window resizes are honored), falling back to listWrapWidth when
+// stdout is not a *os.File, not a terminal, or the query fails.
+
 func prodResolveWrapWidth(stdout io.Writer) int {
 	file, ok := stdout.(*os.File)
 	if !ok {

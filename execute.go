@@ -1,20 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
-	"time"
-
-	"bytes"
-	"errors"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"reflect"
 	"sort"
+	"time"
 	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const maxToolOutputBytes = 1 << 20
+
+// argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
+// formatted for execution. It enforces strict naming rules for keys to prevent
+// injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
+// false -> omitted). Slices are expanded into multiple flags (e.g., --key val1 --key val2).
 
 func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	if len(args) == 0 {
@@ -162,10 +167,6 @@ func combineToolOutput(stdout, stderr []byte) string {
 	return string(combined[:cut]) + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
-// toolRegistry manages the dynamic registration and deregistration of tools
-// within the MCP server. It ensures thread-safe updates via a mutex, allowing
-// tools to be swapped out at runtime when changes are detected in the scripts directory.
-
 func validateRequiredParams(args map[string]any, params []paramSpec) error {
 	for _, p := range params {
 		if p.Required {
@@ -241,8 +242,3 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 
 	return textResult(combinedOutput, false), nil
 }
-
-// resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
-// both are accessible. Shared by the server-mode run() and the diagnostic
-// branch so the resolution behavior and error text stay identical in all
-// modes.

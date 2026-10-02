@@ -10,6 +10,11 @@ import (
 
 const watchDebounceDelay = 100 * time.Millisecond
 
+// prodWatcherErrors is the watcher-error source for watchChanges. Production
+// returns the watcher's own channel; tests inject a synthetic one (a real
+// fsnotify error is not deterministically reproducible — chmod on an already-
+// watched inode does not produce one).
+
 func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 
 // watchChanges watches dir with fsnotify and invokes onChange once per

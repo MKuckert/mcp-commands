@@ -14,6 +14,10 @@ const (
 	toolKillWaitDelay = 5 * time.Second // Wait backstop after a deadline kill
 )
 
+// timeoutUnits maps the allowed duration units to their values. Sub-second
+// units are not meaningful for tool timeouts and are deliberately absent;
+// tokens are matched prefix-based, so "1h30m5s" and "1h 30m 5s" both parse.
+
 var timeoutUnits = map[string]time.Duration{
 	"s": time.Second,
 	"m": time.Minute,
@@ -105,7 +109,10 @@ func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Durati
 	return defaultToolTimeout, nil
 }
 
-// paramTypes is the allowed set of Param: types.
+// resolveToolTimeout resolves a tool's effective timeout with the registry's
+// precedence: a per-tool Timeout: always wins over the global, even
+// --no-timeout. Shared by the registry and the --list-tools renderer so the
+// two call sites cannot drift.
 
 func resolveToolTimeout(tool discoveredTool, global time.Duration) time.Duration {
 	if tool.Timeout != nil {
@@ -114,10 +121,9 @@ func resolveToolTimeout(tool discoveredTool, global time.Duration) time.Duration
 	return global
 }
 
-// registeredDescription assembles the registered tool description: the
-// frontmatter description plus the " (timeout: …)" suffix (the suffix alone
-// when the description is empty). Shared by the registry and the
-// --list-tools renderer so the two never drift apart.
+// timeoutSuffix renders the resolved timeout for the registered tool
+// description so the LLM knows its budget: "(timeout: 30s)" or
+// "(timeout: none)" when no deadline applies.
 
 func timeoutSuffix(timeout time.Duration) string {
 	if timeout > 0 {
@@ -125,8 +131,3 @@ func timeoutSuffix(timeout time.Duration) string {
 	}
 	return "(timeout: none)"
 }
-
-// prodResolveWrapWidth returns the wrap width for --list-tools output: the
-// terminal window width (in runes) when stdout is a TTY (re-queried at every
-// print so window resizes are honored), falling back to listWrapWidth when
-// stdout is not a *os.File, not a terminal, or the query fails.

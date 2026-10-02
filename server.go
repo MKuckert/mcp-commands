@@ -5,19 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/term"
-	"net/http"
-	"os/signal"
-	"syscall"
 )
 
 const serverName = "mcp-commands"
+
+// prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
+// is a no-op when stdout is not a TTY, so piped output simply accumulates.
 
 func prodClearScreen(stdout io.Writer) {
 	file, ok := stdout.(*os.File)
@@ -221,8 +224,6 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 	}
 	return 0
 }
-
-// apiKeySource identifies where the configured token came from.
 
 func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	sigCtx, cancel := env.notifySignals(ctx, syscall.SIGINT, syscall.SIGTERM)

@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+// cliMode selects the operating mode resolved from the flags.
+
 type cliMode int
 
 const (

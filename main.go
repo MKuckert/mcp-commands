@@ -11,6 +11,11 @@ import (
 
 var serverVersion = "0.8.2"
 
+// resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
+// both are accessible. Shared by the server-mode run() and the diagnostic
+// branch so the resolution behavior and error text stay identical in all
+// modes.
+
 func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err error) {
 	scriptsAbs, err = filepath.Abs(scriptsDir)
 	if err != nil {
@@ -28,9 +33,6 @@ func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err er
 	}
 	return dirAbs, scriptsAbs, nil
 }
-
-// prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
-// is a no-op when stdout is not a TTY, so piped output simply accumulates.
 
 func main() {
 	cfg, err := parseCLI(os.Args[1:])

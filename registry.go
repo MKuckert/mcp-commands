@@ -1,16 +1,20 @@
 package main
 
 import (
-	"fmt"
-	"time"
-
 	"context"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"fmt"
 	"reflect"
 	"sync"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const defaultMaxConcurrentTools = 16
+
+// toolRegistry manages the dynamic registration and deregistration of tools
+// within the MCP server. It ensures thread-safe updates via a mutex, allowing
+// tools to be swapped out at runtime when changes are detected in the scripts directory.
 
 type toolRegistry struct {
 	server        *mcp.Server
@@ -152,10 +156,10 @@ func toolsEqual(a, b []discoveredTool) bool {
 	return true
 }
 
-// resolveToolTimeout resolves a tool's effective timeout with the registry's
-// precedence: a per-tool Timeout: always wins over the global, even
-// --no-timeout. Shared by the registry and the --list-tools renderer so the
-// two call sites cannot drift.
+// registeredDescription assembles the registered tool description: the
+// frontmatter description plus the " (timeout: …)" suffix (the suffix alone
+// when the description is empty). Shared by the registry and the
+// --list-tools renderer so the two never drift apart.
 
 func registeredDescription(desc string, timeout time.Duration) string {
 	suffix := timeoutSuffix(timeout)
@@ -164,7 +168,3 @@ func registeredDescription(desc string, timeout time.Duration) string {
 	}
 	return desc + " " + suffix
 }
-
-// timeoutSuffix renders the resolved timeout for the registered tool
-// description so the LLM knows its budget: "(timeout: 30s)" or
-// "(timeout: none)" when no deadline applies.

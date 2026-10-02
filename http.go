@@ -3,13 +3,14 @@ package main
 import (
 	"crypto/subtle"
 	"fmt"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
@@ -24,6 +25,8 @@ const (
 	allowedOriginsEnvVar  = "MCP_COMMANDS_ALLOWED_ORIGINS"
 	allowAllOriginsEnvVar = "MCP_COMMANDS_ALLOW_ALL_ORIGINS"
 )
+
+// apiKeySource identifies where the configured token came from.
 
 type apiKeySource int
 
@@ -321,5 +324,3 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 	}
 	return h
 }
-
-// cliMode selects the operating mode resolved from the flags.
