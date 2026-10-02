@@ -46,7 +46,6 @@ const (
 	scanDescriptionPrefix     = "Description:"
 	scanParamPrefix           = "Param:"
 	scanTimeoutPrefix         = "Timeout:"
-	watchToolsInterval        = 2 * time.Second
 	watchDebounceDelay        = 100 * time.Millisecond
 	serverName                = "mcp-commands"
 	listWrapWidth             = 160     // non-TTY fallback for --list-tools wrapping
@@ -574,7 +573,6 @@ type toolRegistry struct {
 	mu            sync.Mutex
 	names         []string
 	current       []discoveredTool // last registered set (for the change-diff in replaceIfChanged)
-	lastHandler   mcp.ToolHandler
 }
 
 func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration, maxConcurrent int) *toolRegistry {
@@ -667,7 +665,6 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 			InputSchema: buildInputSchema(toolParams),
 		}, handlerFunc)
 
-		r.lastHandler = handlerFunc
 		r.names = append(r.names, toolName)
 	}
 }
@@ -955,18 +952,15 @@ func watchChanges(ctx context.Context, env liveEnv, dir string, onChange func())
 	}
 }
 
-// watchTools runs a continuous loop that watches the scripts directory for
-// changes, re-discovering and re-registering the tools on every debounced
-// change (built on watchChanges; the interval parameter is retained for the
-// existing call sites but the debounce is the fixed watchDebounceDelay).
-func watchTools(ctx context.Context, env liveEnv, scriptsDir string, registry *toolRegistry, interval time.Duration) error {
-	// Initial discovery
-	tools, err := discoverTools(scriptsDir)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "Warning: initial tool discovery failed: %v\n", err)
-	} else {
-		registry.replace(tools)
-	}
+// watchTools watches the scripts directory and re-discovers + re-registers
+// the tools on every debounced change (built on watchChanges). initialTools
+// is the set the caller already discovered and registered at startup: the
+// initial registration is re-asserted from it (no second directory scan,
+// which used to duplicate the caller's scan and re-emit identical tool
+// registrations, N list_changed notifications, at boot) and skipped
+// entirely when the registry already matches it.
+func watchTools(ctx context.Context, env liveEnv, scriptsDir string, registry *toolRegistry, initialTools []discoveredTool) error {
+	registry.replaceIfChanged(initialTools)
 
 	return watchChanges(ctx, env, scriptsDir, func() {
 		// After debounce delay, rediscover tools. The diff-skip avoids
@@ -1852,7 +1846,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 	if cfg.watch {
 		go func() {
-			if err := watchTools(sigCtx, env, scriptsAbs, registry, watchToolsInterval); err != nil && !errors.Is(err, context.Canceled) {
+			if err := watchTools(sigCtx, env, scriptsAbs, registry, tools); err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
 			}
 		}()

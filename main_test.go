@@ -279,7 +279,7 @@ func TestWatchTools(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, []discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 	}()
 
 	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
@@ -358,7 +358,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, []discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 	}()
 
 	// Bounded write retries: a lost fsnotify event is recovered by the next
@@ -2423,7 +2423,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	defer cancel()
 	env := liveEnvFor(t, io.Discard, io.Discard)
 	go func() {
-		_ = watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
+		_ = watchTools(watchCtx, env, tmpDir, registry, initial)
 	}()
 
 	// The startup replace runs unconditionally (the startup double-scan is out
@@ -2646,7 +2646,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, []discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 	}()
 
 	// Hot reload: editing only the Timeout: line re-registers the tool.
@@ -2712,21 +2712,23 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 		},
 	})
 
-	handler := registry.lastHandler
-	if handler == nil {
-		t.Fatal("lastHandler is nil after replace")
-	}
-
-	req := &mcp.CallToolRequest{
-		Params: &mcp.CallToolParamsRaw{
-			Name:      "convert",
-			Arguments: json.RawMessage(`{}`),
-		},
-	}
-
-	result, err := handler(context.Background(), req)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
-		t.Fatalf("handler returned unexpected error: %v", err)
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "convert"})
+	if err != nil {
+		t.Fatalf("CallTool returned unexpected error: %v", err)
 	}
 	if result == nil || !result.IsError {
 		t.Fatalf("expected IsError result, got %#v", result)
@@ -3150,7 +3152,7 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(ctx, env, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(ctx, env, tmpDir, registry, nil)
 	}()
 
 	// Let the watcher goroutine finish NewWatcher/Add before the deletion,
@@ -3343,7 +3345,10 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 	env := liveEnvFor(t, io.Discard, io.Discard)
 	done := make(chan error, 1)
 	go func() {
-		done <- watchTools(watchCtx, env, tmpDir, registry, 20*time.Millisecond)
+		done <- watchTools(watchCtx, env, tmpDir, registry, []discoveredTool{
+			{Name: "alpha", Path: alphaPath, Description: "alpha", Params: []paramSpec{}},
+			{Name: "beta", Path: betaPath, Description: "beta", Params: []paramSpec{}},
+		})
 	}()
 
 	// Bounded remove retries: a lost fsnotify event is recovered by the next
@@ -4000,19 +4005,29 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 	registry.replace([]discoveredTool{
 		{Name: "slow", Path: slowPath, Description: "slow tool", Timeout: &noTimeout},
 	})
-	handler := registry.lastHandler
-	if handler == nil {
-		t.Fatal("lastHandler is nil after replace")
-	}
 
-	makeReq := func() *mcp.CallToolRequest {
-		return &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "slow"}}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	makeParams := func() *mcp.CallToolParams {
+		return &mcp.CallToolParams{Name: "slow"}
 	}
 
 	// First call holds the only slot.
 	firstDone := make(chan *mcp.CallToolResult, 1)
 	go func() {
-		res, err := handler(context.Background(), makeReq())
+		res, err := clientSession.CallTool(ctx, makeParams())
 		if err != nil {
 			t.Errorf("first call returned error: %v", err)
 		}
@@ -4031,7 +4046,7 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	res, err := handler(context.Background(), makeReq())
+	res, err := clientSession.CallTool(ctx, makeParams())
 	if err != nil {
 		t.Fatalf("second call returned an error: %v (want a clean at-capacity result)", err)
 	}
