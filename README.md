@@ -76,7 +76,7 @@ or via the `MCP_COMMANDS_API_KEY` environment variable:
 MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
-Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. The `--api-key <value>` flag is **deprecated**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime, so the server prints a startup warning whenever the token comes from the flag — use `--api-key-file` or the environment variable instead. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; an unreadable file is a startup error.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. **Prefer `--api-key-file` or `MCP_COMMANDS_API_KEY` over `--api-key <value>`**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; an unreadable file is a startup error.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), **every** HTTP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized`:
 
 ```bash
 curl -s http://localhost:8080 \

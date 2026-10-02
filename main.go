@@ -675,7 +675,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 // replaceIfChanged re-registers only when the discovered set differs from
 // the currently registered one: an unchanged set (e.g. a touched file whose
 // frontmatter did not change) triggers no RemoveTools/AddTool churn and no
-// tools/list_changed notifications (F-11). It returns false when the set
+// tools/list_changed notifications. It returns false when the set
 // was identical and the replace was skipped.
 func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
 	r.mu.Lock()
@@ -963,7 +963,7 @@ func watchTools(ctx context.Context, scriptsDir string, registry *toolRegistry, 
 	}
 
 	return watchChanges(ctx, scriptsDir, func() {
-		// After debounce delay, rediscover tools. The diff-skip (F-11) avoids
+		// After debounce delay, rediscover tools. The diff-skip avoids
 		// the remove/re-add churn and N list_changed notifications for a
 		// no-op rescan (e.g. a touched file with unchanged frontmatter).
 		tools, err := discoverTools(scriptsDir)
@@ -1274,33 +1274,27 @@ func runListTools(stdout, stderr io.Writer, dir, scriptsDir string, watch bool, 
 
 // resolveAPIKey resolves the HTTP auth token with precedence
 // --api-key > --api-key-file > MCP_COMMANDS_API_KEY, returning the token
-// ("" when none is configured), whether the value came from the --api-key
-// flag (so the caller can print the visibility deprecation warning), and an
-// error when a --api-key-file was given but unreadable. File content is
-// TrimSpace'd so hand-written files with a trailing newline work.
-func resolveAPIKey(flagValue, fileValue string) (token string, fromFlag bool, err error) {
+// ("" when none is configured) and an error when a --api-key-file was
+// given but unreadable. File content is TrimSpace'd so hand-written files
+// with a trailing newline work.
+func resolveAPIKey(flagValue, fileValue string) (token string, err error) {
 	if flagValue != "" {
-		return flagValue, true, nil
+		return flagValue, nil
 	}
 	if fileValue != "" {
 		data, err := os.ReadFile(fileValue)
 		if err != nil {
-			return "", false, fmt.Errorf("cannot read --api-key-file: %w", err)
+			return "", fmt.Errorf("cannot read --api-key-file: %w", err)
 		}
 		if token := strings.TrimSpace(string(data)); token != "" {
-			return token, false, nil
+			return token, nil
 		}
 	}
 	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
-		return envToken, false, nil
+		return envToken, nil
 	}
-	return "", false, nil
+	return "", nil
 }
-
-// apiKeyFlagWarning is the startup warning printed when the token comes from
-// --api-key <value>: command-line arguments are world-readable via
-// /proc/<pid>/cmdline for the server's entire lifetime.
-const apiKeyFlagWarning = "Warning: --api-key <value> is visible to other local users via /proc/<pid>/cmdline for the server's lifetime; prefer --api-key-file or " + apiKeyEnvVar
 
 // isLoopbackHost reports whether host binds only to the local machine: the
 // 127.0.0.0/8 range, ::1, and the name "localhost". Anything else —
@@ -1554,7 +1548,7 @@ const (
 
 // cliConfig is the fully resolved and validated result of parseCLI. main
 // consumes it directly; run/runDiagnostic take their fields positionally
-// (the wider struct-ification of those signatures is F-14, Tier 3).
+// (a wider struct-ification of those signatures is a future refactor).
 type cliConfig struct {
 	version        bool
 	mode           cliMode
@@ -1564,7 +1558,6 @@ type cliConfig struct {
 	host           string
 	port           int
 	apiKey         string // server mode only; "" = unauthenticated
-	apiKeyFromFlag bool
 	cors           corsConfig
 	timeout        time.Duration // 0 = no global timeout (--no-timeout)
 	insecureNoAuth bool
@@ -1594,7 +1587,7 @@ const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [
 
 // parseCLI resolves and validates every flag (all fail-fast branches live
 // here) and returns the ready-to-consume config. It takes the argument
-// slice so tests can exercise every branch (F-10); main passes os.Args[1:].
+// slice so tests can exercise every branch; main passes os.Args[1:].
 func parseCLI(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // errors are formatted by the caller
@@ -1604,7 +1597,7 @@ func parseCLI(args []string) (cliConfig, error) {
 	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := fs.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
-	apiKeyFlag := fs.String("api-key", "", "DEPRECATED: API token on the command line is visible to local users (see --api-key-file / MCP_COMMANDS_API_KEY)")
+	apiKeyFlag := fs.String("api-key", "", "API token for HTTP mode (alternatives: --api-key-file, MCP_COMMANDS_API_KEY)")
 	apiKeyFileFlag := fs.String("api-key-file", "", "Read the API token from a file (content is trimmed; trailing newline ok)")
 	insecureNoAuthFlag := fs.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
 	maxConcurrentFlag := fs.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
@@ -1710,7 +1703,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	// Server mode only: resolve the token here (diagnostic modes ignore the
 	// key flags and report them via the ignored-flags notice).
-	cfg.apiKey, cfg.apiKeyFromFlag, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
+	cfg.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
 	return cfg, err
 }
 
@@ -1740,11 +1733,6 @@ func main() {
 	if cfg.mode != modeServer {
 		os.Exit(runDiagnostic(os.Stdout, os.Stderr, cfg.dir, cfg.scriptsDir, cfg.listTools, cfg.watch, cfg.callTool, cfg.callToolSet, cfg.params, cfg.timeout, cfg.ignoredFlags))
 	}
-	// HTTP mode only: in stdio mode the token is unused (no auth layer),
-	// so warning about its /proc exposure would be noise.
-	if cfg.apiKeyFromFlag && cfg.port != 0 {
-		fmt.Fprintln(os.Stderr, apiKeyFlagWarning)
-	}
 	if err := run(context.Background(), cfg.dir, cfg.scriptsDir, cfg.watch, cfg.host, cfg.port, cfg.apiKey, cfg.cors, cfg.timeout, cfg.insecureNoAuth, cfg.maxConcurrent); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -1752,7 +1740,7 @@ func main() {
 }
 
 // errOut is run()'s stderr sink, indirected so tests can capture the
-// zero-tools warning and the startup banner (F-10). It is os.Stderr by
+// zero-tools warning and the startup banner. It is os.Stderr by
 // default; tests swap it and restore via t.Cleanup. main.go's own error
 // reporting keeps using os.Stderr directly.
 var errOut io.Writer = os.Stderr

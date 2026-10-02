@@ -285,7 +285,7 @@ func TestWatchTools(t *testing.T) {
 
 	addedScriptPath := filepath.Join(tmpDir, "beta.sh")
 
-	// Bounded write retries (F-22): fsnotify events can be lost under load
+	// Bounded write retries: fsnotify events can be lost under load
 	// (inotify queue overflow), so re-write and re-poll until the reload
 	// lands; the same content still fires a fresh event.
 	var lastCount int
@@ -362,7 +362,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	}()
 
 	// Bounded write retries: a lost fsnotify event is recovered by the next
-	// write (see TestWatchTools). (F-22)
+	// write (see TestWatchTools).
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
@@ -1414,12 +1414,11 @@ func TestResolveAPIKey(t *testing.T) {
 		fileMiss bool // path set but file missing → error
 		env      string
 		want     string
-		wantFlag bool // token must be flagged as coming from --api-key
 	}{
-		{name: "flag_only", flag: "from-flag", want: "from-flag", wantFlag: true},
+		{name: "flag_only", flag: "from-flag", want: "from-flag"},
 		{name: "env_only", env: "from-env", want: "from-env"},
 		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file"},
-		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantFlag: true},
+		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag"},
 		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file"},
 		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env"},
 		{name: "missing_file_errors", fileMiss: true},
@@ -1443,7 +1442,7 @@ func TestResolveAPIKey(t *testing.T) {
 				}
 			}
 
-			got, gotFlag, err := resolveAPIKey(tt.flag, filePath)
+			got, err := resolveAPIKey(tt.flag, filePath)
 			if tt.fileMiss {
 				if err == nil {
 					t.Fatalf("expected an error for the missing key file, got token %q", got)
@@ -1456,26 +1455,11 @@ func TestResolveAPIKey(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("resolveAPIKey = %q, want %q", got, tt.want)
 			}
-			if gotFlag != tt.wantFlag {
-				t.Errorf("fromFlag = %v, want %v", gotFlag, tt.wantFlag)
-			}
 		})
 	}
 }
 
-// TestAPIKeyFlagWarning pins the F-8 deprecation: a token on the command line
-// is world-readable via /proc/<pid>/cmdline, so the warning must name the
-// exposure and point at the safe alternatives.
-func TestAPIKeyFlagWarning(t *testing.T) {
-	if !strings.Contains(apiKeyFlagWarning, "--api-key-file") || !strings.Contains(apiKeyFlagWarning, apiKeyEnvVar) {
-		t.Fatalf("warning must point users at the safe alternatives: %q", apiKeyFlagWarning)
-	}
-	if !strings.Contains(apiKeyFlagWarning, "/proc") {
-		t.Fatalf("warning must name the exposure (cmdline): %q", apiKeyFlagWarning)
-	}
-}
-
-// TestParseCLI pins F-10: every fail-fast branch of the CLI front end.
+// TestParseCLI: every fail-fast branch of the CLI front end.
 // These are the branches that were untestable while the logic lived in main()
 // (which calls os.Exit); the extraction into parseCLI makes each one assertable.
 func TestParseCLI(t *testing.T) {
@@ -1548,8 +1532,8 @@ func TestParseCLI(t *testing.T) {
 				if c.host != "0.0.0.0" || c.port != 9090 {
 					t.Errorf("host/port = %q/%d", c.host, c.port)
 				}
-				if c.apiKey != "tk" || !c.apiKeyFromFlag {
-					t.Errorf("apiKey = %q fromFlag=%v", c.apiKey, c.apiKeyFromFlag)
+				if c.apiKey != "tk" {
+					t.Errorf("apiKey = %q", c.apiKey)
 				}
 				if c.timeout != time.Hour {
 					t.Errorf("timeout = %v", c.timeout)
@@ -1570,9 +1554,6 @@ func TestParseCLI(t *testing.T) {
 				if c.apiKey != "filetoken" {
 					t.Errorf("apiKey = %q, want trimmed filetoken", c.apiKey)
 				}
-				if c.apiKeyFromFlag {
-					t.Error("apiKeyFromFlag must be false for the file source")
-				}
 			},
 		},
 		{
@@ -1580,8 +1561,8 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--api-key", "flag", "--api-key-file", keyFile},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
-				if c.apiKey != "flag" || !c.apiKeyFromFlag {
-					t.Errorf("apiKey = %q fromFlag=%v, want flag/true", c.apiKey, c.apiKeyFromFlag)
+				if c.apiKey != "flag" {
+					t.Errorf("apiKey = %q, want flag", c.apiKey)
 				}
 			},
 		},
@@ -1689,7 +1670,7 @@ func TestParseCLI(t *testing.T) {
 	}
 }
 
-// TestRunHTTPEndToEnd pins F-10's second half: run() served over real HTTP,
+// TestRunHTTPEndToEnd: run() served over real HTTP,
 // exercised by a real MCP client (auth, list, call, clean shutdown), plus
 // the zero-tools warning.
 func TestRunHTTPEndToEnd(t *testing.T) {
@@ -1977,7 +1958,7 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	}
 }
 
-// TestBuildHTTPHandlerRejectsOversizedBody covers F-3's maxHTTPBodyBytes cap
+// TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
 // end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
 // rejected (400) without being read into memory. Chunked (ContentLength -1)
 // so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
@@ -2349,7 +2330,7 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 }
 
-// TestToolsEqual covers the F-11 change-diff: every field a rescan can
+// TestToolsEqual covers the change-diff: every field a rescan can
 // change must invalidate the skip, and an unchanged set must compare equal.
 func TestToolsEqual(t *testing.T) {
 	timeout5 := 5 * time.Minute
@@ -2381,7 +2362,7 @@ func TestToolsEqual(t *testing.T) {
 	}
 }
 
-// TestWatchToolsSkipsIdenticalRescan pins F-11: a debounced rescan whose
+// TestWatchToolsSkipsIdenticalRescan: a debounced rescan whose
 // result is identical to the registered set must emit no RemoveTools/AddTool
 // churn and no tools/list_changed notifications, while a genuine change
 // still reloads.
@@ -2424,7 +2405,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 		_ = watchTools(watchCtx, tmpDir, registry, 20*time.Millisecond)
 	}()
 
-	// The startup replace runs unconditionally (the F-17 double-scan is out
+	// The startup replace runs unconditionally (the startup double-scan is out
 	// of scope); wait for its notification(s) to drain, then take a baseline.
 	deadline := time.Now().Add(5 * time.Second)
 	for changed.Load() == 0 && time.Now().Before(deadline) {
@@ -2433,7 +2414,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	baseline := changed.Load()
 
 	// No-op touches: same content → identical set → must be skipped. Bounded
-	// retries (the F-22 pattern): a lost fsnotify event is legal, so keep
+	// retries: a lost fsnotify event is legal, so keep
 	// touching until a rescan window has elapsed with zero notifications —
 	// that silence is the assertion.
 	noopSawChange := false
@@ -2648,7 +2629,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 
 	// Hot reload: editing only the Timeout: line re-registers the tool.
 	// Bounded write retries: a lost fsnotify event is recovered by the next
-	// write (see TestWatchTools). (F-22)
+	// write (see TestWatchTools).
 	var lastTools []*mcp.Tool
 	refreshed := false
 	for i := 0; i < 10 && !refreshed; i++ {
@@ -3126,7 +3107,7 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	}
 }
 
-// TestWatchChangesWatchedDirDeleted pins F-9: the watcher must log the
+// TestWatchChangesWatchedDirDeleted: the watcher must log the
 // error and keep running when the watched directory disappears mid-watch —
 // it must return only on ctx cancellation, not on the deletion.
 func TestWatchChangesWatchedDirDeleted(t *testing.T) {
@@ -3166,7 +3147,7 @@ func TestWatchChangesWatchedDirDeleted(t *testing.T) {
 	}
 }
 
-// TestWatchChangesRenameTriggersChange pins F-9: renaming a file (fsnotify
+// TestWatchChangesRenameTriggersChange: renaming a file (fsnotify
 // Rename — on linux this arrives as a Move event) must fire the debounced
 // onChange, like create/write/remove do.
 func TestWatchChangesRenameTriggersChange(t *testing.T) {
@@ -3205,7 +3186,7 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 	}
 }
 
-// TestWatchChangesPermissionError pins F-9: a watcher permission error
+// TestWatchChangesPermissionError: a watcher permission error
 // (chmod the watched dir unreadable → inotify can no longer track it) must
 // be logged and swallowed, not fatal. Skipped when running as root —
 // uid 0 bypasses file permissions, so the error is not reproducible (the
@@ -3251,7 +3232,7 @@ func TestWatchChangesPermissionError(t *testing.T) {
 	}
 }
 
-// TestWatchToolsRemovesDeletedTool pins F-9: deleting a script must remove
+// TestWatchToolsRemovesDeletedTool: deleting a script must remove
 // its tool from the registry (RemoveTools), leaving the rest intact.
 func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -3772,7 +3753,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 	})
 }
 
-// --- Tier 1 hardening tests (REVIEW.md F-6 and the F-1/F-2/F-4 behaviors) ---
+// --- Tier 1 hardening tests (output capture and security behaviors) ---
 
 func TestBoundedWriter(t *testing.T) {
 	w := newBoundedWriter(10)
@@ -3803,7 +3784,7 @@ func TestBoundedWriter(t *testing.T) {
 }
 
 func TestCombineToolOutputTruncation(t *testing.T) {
-	// The 1 MiB branch of combineToolOutput was previously untested (F-6).
+	// The 1 MiB branch of combineToolOutput was previously untested.
 	suffixLen := len(fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes))
 
 	t.Run("2MiB_stdout_is_capped_and_tagged", func(t *testing.T) {
@@ -3919,7 +3900,7 @@ func assertGroupKillDelivered(t *testing.T) bool {
 	}
 }
 
-// TestExecuteToolKillsProcessGroup pins F-7: the timeout must kill the whole
+// TestExecuteToolKillsProcessGroup: the timeout must kill the whole
 // process group, not only the direct child — a shell script's grandchildren
 // (the canonical tool shape) must not outlive their budget.
 func TestExecuteToolKillsProcessGroup(t *testing.T) {
@@ -3988,7 +3969,7 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
 		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
 		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
-		// The F-1 case: remote bind, no key, no escape hatch → refuse.
+		// The remote-bind case: no key, no escape hatch → refuse.
 		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
 		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
 		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
