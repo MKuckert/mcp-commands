@@ -145,7 +145,6 @@ func TestBearerAuthMiddleware(t *testing.T) {
 }
 
 // newTestMCPServer builds an mcp.Server with one trivial tool.
-
 func newTestMCPServer(t *testing.T) *mcp.Server {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
@@ -156,8 +155,8 @@ func newTestMCPServer(t *testing.T) *mcp.Server {
 }
 
 // postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
+// postInitializeStatus POSTs a JSON-RPC initialize request to url and returns
 // the response status code. An empty auth value omits the Authorization header.
-
 func postInitializeStatus(t *testing.T, url, auth string) int {
 	t.Helper()
 	resp := doInitialize(t, url, auth, "")
@@ -167,8 +166,8 @@ func postInitializeStatus(t *testing.T, url, auth string) int {
 }
 
 // doInitialize POSTs a JSON-RPC initialize request and returns the response.
+// doInitialize POSTs a JSON-RPC initialize request and returns the response.
 // Empty auth/origin values omit the corresponding headers.
-
 func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
 	t.Helper()
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}`
@@ -198,9 +197,8 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
 	defer httpServer.Close()
 
-	status := postInitializeStatus(t, httpServer.URL, "")
-	if status == http.StatusUnauthorized {
-		t.Fatalf("expected unauthenticated server to serve request, got 401")
+	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusOK {
+		t.Fatalf("unauthenticated request: status = %d, want 200 (only 401s were being checked before; 400/404/500 used to pass silently)", status)
 	}
 }
 
@@ -224,8 +222,11 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 // end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
 // rejected (400) without being read into memory. Chunked (ContentLength -1)
 // so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
+// TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
+// end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
+// rejected (400) without being read into memory. Chunked (ContentLength -1)
+// so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
 // the multi-GB-chunked-body exhaustion vector from the review.
-
 func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)

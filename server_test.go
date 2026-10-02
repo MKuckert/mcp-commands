@@ -19,8 +19,9 @@ import (
 
 // TestRunHTTPEndToEnd: run() served over real HTTP,
 // exercised by a real MCP client (auth, list, call, clean shutdown), plus
+// TestRunHTTPEndToEnd: run() served over real HTTP,
+// exercised by a real MCP client (auth, list, call, clean shutdown), plus
 // the zero-tools warning.
-
 func TestRunHTTPEndToEnd(t *testing.T) {
 	t.Parallel()
 	t.Run("one_tool_authenticated", func(t *testing.T) {
@@ -154,8 +155,9 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 
 // liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
 // capture) and production behavior for everything else. Tests construct
+// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
+// capture) and production behavior for everything else. Tests construct
 // local envs — no shared state — so they can run in parallel.
-
 func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
 	t.Helper()
 	env := prodLiveEnv()

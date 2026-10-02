@@ -20,8 +20,8 @@ import (
 const serverName = "mcp-commands"
 
 // prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
+// prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
 // is a no-op when stdout is not a TTY, so piped output simply accumulates.
-
 func prodClearScreen(stdout io.Writer) {
 	file, ok := stdout.(*os.File)
 	if !ok || !term.IsTerminal(int(file.Fd())) {
@@ -31,8 +31,8 @@ func prodClearScreen(stdout io.Writer) {
 }
 
 // prodNotifySignals wraps signal.NotifyContext (SIGINT/SIGTERM cancel the
+// prodNotifySignals wraps signal.NotifyContext (SIGINT/SIGTERM cancel the
 // context).
-
 func prodNotifySignals(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(ctx, sig...)
 }
@@ -40,8 +40,10 @@ func prodNotifySignals(ctx context.Context, sig ...os.Signal) (context.Context, 
 // liveEnv bundles the live system dependencies of the CLI front end: the
 // standard streams, signal handling, and the TTY-dependent behaviors. main
 // constructs one via prodLiveEnv; tests construct local fakes and pass them
+// liveEnv bundles the live system dependencies of the CLI front end: the
+// standard streams, signal handling, and the TTY-dependent behaviors. main
+// constructs one via prodLiveEnv; tests construct local fakes and pass them
 // in — no package-level mutable state, so every test can t.Parallel().
-
 type liveEnv struct {
 	stdout           io.Writer
 	stderr           io.Writer
@@ -65,16 +67,21 @@ func prodLiveEnv() liveEnv {
 // serverModeFlagNames lists the flags that configure the MCP server, in a
 // stable order for the diagnostic-mode ignored-flags notice. (--watch is
 // honored in --list-tools mode; with --call-tool it is added to the notice
+// serverModeFlagNames lists the flags that configure the MCP server, in a
+// stable order for the diagnostic-mode ignored-flags notice. (--watch is
+// honored in --list-tools mode; with --call-tool it is added to the notice
 // separately.)
-
 var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
 
 // runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
 // returns the process exit code. Diagnostics never start the MCP server:
 // the process exits after the diagnostic completes, except the live
 // --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
+// runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
+// returns the process exit code. Diagnostics never start the MCP server:
+// the process exits after the diagnostic completes, except the live
+// --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
 // goes to stdout; warnings and operational errors go to stderr.
-
 func runDiagnostic(env liveEnv, diag diagnostic) int {
 	if len(diag.ignoredFlags) > 0 {
 		fmt.Fprintf(env.stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
@@ -112,10 +119,21 @@ func runDiagnostic(env liveEnv, diag diagnostic) int {
 // parse, unstartable script) yield a non-nil error for the stderr "Error:"
 // line and never start the script. A non-object --params is rejected by
 // parseToolArguments, which maps an explicitly empty value and JSON null to
+// runCallTool is the --call-tool diagnostic: run a single discovered tool
+// through the same execution path as the MCP handler (required-param
+// validation, JSON→CLI-arg translation, timeout resolution identical to the
+// registry — a per-tool Timeout: wins, Timeout: NONE ⇒ no deadline) and
+// print the result text to the given stdout writer (the dispatch passes
+// os.Stdout; tests pass a buffer). It returns the process exit code: 0 on
+// success; 1 on any failure. Execution failures (missing required param,
+// non-zero script exit, timeout) print the tool's result content to stdout
+// with a nil error; operational failures (discovery, unknown tool, --params
+// parse, unstartable script) yield a non-nil error for the stderr "Error:"
+// line and never start the script. A non-object --params is rejected by
+// parseToolArguments, which maps an explicitly empty value and JSON null to
 // {} (same leniency as the MCP handler).
-
 func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
-	tools, err := discoverTools(scriptsAbs)
+	tools, err := discoverTools(scriptsAbs, env.stderr)
 	if err != nil {
 		return 1, fmt.Errorf("failed to discover tools: %w", err)
 	}
@@ -181,8 +199,13 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 // debounced change to the scripts directory clears the screen (TTY only) and
 // re-prints the full list with the existing per-scan stderr warnings, until
 // the process is signaled. Path resolution errors are a startup failure
+// runListTools is the --list-tools diagnostic: discover and print the tool
+// list (renderToolList, width re-queried at every print) to stdout, then
+// exit 0. With watch it becomes a live list: after the initial print, every
+// debounced change to the scripts directory clears the screen (TTY only) and
+// re-prints the full list with the existing per-scan stderr warnings, until
+// the process is signaled. Path resolution errors are a startup failure
 // (stderr, exit 1).
-
 func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
 	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {
@@ -197,7 +220,7 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 		fmt.Fprint(env.stdout, renderToolList(tools, timeout, env.resolveWrapWidth(env.stdout)))
 	}
 
-	tools, err := discoverTools(scriptsAbs)
+	tools, err := discoverTools(scriptsAbs, env.stderr)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "Error: %v\n", err)
 		return 1
@@ -213,7 +236,7 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 
 	if err := watchChanges(sigCtx, env, scriptsAbs, func() {
 		env.clearScreen(env.stdout)
-		tools, err := discoverTools(scriptsAbs)
+		tools, err := discoverTools(scriptsAbs, env.stderr)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return
@@ -234,7 +257,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		return err
 	}
 
-	tools, err := discoverTools(scriptsAbs)
+	tools, err := discoverTools(scriptsAbs, env.stderr)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}

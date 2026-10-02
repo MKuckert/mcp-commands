@@ -9,8 +9,9 @@ import (
 
 // parseToolArguments unmarshals the JSON arguments provided by the MCP client
 // into a Go map. It handles empty or null payloads by returning an empty map,
+// parseToolArguments unmarshals the JSON arguments provided by the MCP client
+// into a Go map. It handles empty or null payloads by returning an empty map,
 // preventing unmarshal errors when tools are called without arguments.
-
 func parseToolArguments(raw json.RawMessage) (map[string]any, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
@@ -36,8 +37,16 @@ var argumentKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 //
 //	{"type":"object","properties":{...},"required":[...]}
 //
+// buildInputSchema constructs a JSON Schema for a tool's input parameters.
+// It takes a slice of paramSpec and builds a schema with a "properties" object
+// and a "required" array (omitted if empty). Duplicate param names are deduplicated:
+// the last declaration wins for both properties and required status.
+//
+// Returns a json.RawMessage containing:
+//
+//	{"type":"object","properties":{...},"required":[...]}
+//
 // The "required" key is omitted entirely if no params are required.
-
 func buildInputSchema(params []paramSpec) json.RawMessage {
 	properties := make(map[string]any)
 	lastRequired := make(map[string]bool)

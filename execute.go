@@ -19,8 +19,10 @@ const maxToolOutputBytes = 1 << 20
 // argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
 // formatted for execution. It enforces strict naming rules for keys to prevent
 // injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
+// argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
+// formatted for execution. It enforces strict naming rules for keys to prevent
+// injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
 // false -> omitted). Slices are expanded into multiple flags (e.g., --key val1 --key val2).
-
 func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 	if len(args) == 0 {
 		return nil, nil
@@ -73,8 +75,8 @@ func argumentsToCLIArgs(args map[string]any) ([]string, error) {
 }
 
 // textResult builds the single-text CallToolResult that every tool-execution
+// textResult builds the single-text CallToolResult that every tool-execution
 // outcome takes (text + optional IsError flag).
-
 func textResult(text string, isErr bool) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -86,8 +88,11 @@ func textResult(text string, isErr bool) *mcp.CallToolResult {
 // beyond the limit are consumed (the return value stays len(p), err nil, so
 // the subprocess sees a healthy pipe) but not stored; the overflow is
 // remembered. This bounds executeTool's memory to O(limit) per stream no
+// boundedWriter is an io.Writer that accumulates at most limit bytes. Writes
+// beyond the limit are consumed (the return value stays len(p), err nil, so
+// the subprocess sees a healthy pipe) but not stored; the overflow is
+// remembered. This bounds executeTool's memory to O(limit) per stream no
 // matter how much a tool prints.
-
 type boundedWriter struct {
 	buf       bytes.Buffer
 	remaining int
@@ -181,8 +186,10 @@ func validateRequiredParams(args map[string]any, params []paramSpec) error {
 // executeTool runs the script at scriptPath as a subprocess in the specified
 // working directory. It accepts pre-parsed arguments as a map, converts them to
 // CLI flags, and binds the context to a timeout to prevent hanging tools.
+// executeTool runs the script at scriptPath as a subprocess in the specified
+// working directory. It accepts pre-parsed arguments as a map, converts them to
+// CLI flags, and binds the context to a timeout to prevent hanging tools.
 // The output is captured, combined, and returned as an MCP CallToolResult.
-
 func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {

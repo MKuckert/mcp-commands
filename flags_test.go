@@ -10,8 +10,9 @@ import (
 
 // TestParseCLI: every fail-fast branch of the CLI front end.
 // These are the branches that were untestable while the logic lived in main()
+// TestParseCLI: every fail-fast branch of the CLI front end.
+// These are the branches that were untestable while the logic lived in main()
 // (which calls os.Exit); the extraction into parseCLI makes each one assertable.
-
 func TestParseCLI(t *testing.T) {
 	t.Parallel()
 	keyFile := filepath.Join(t.TempDir(), "key.txt")

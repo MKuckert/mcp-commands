@@ -13,8 +13,8 @@ import (
 )
 
 // TestToolsEqual covers the change-diff: every field a rescan can
+// TestToolsEqual covers the change-diff: every field a rescan can
 // change must invalidate the skip, and an unchanged set must compare equal.
-
 func TestToolsEqual(t *testing.T) {
 	t.Parallel()
 	timeout5 := 5 * time.Minute
