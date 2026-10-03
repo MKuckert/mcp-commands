@@ -362,7 +362,8 @@ required-parameter validation before the script starts.
   | Missing required param, non-zero script exit, or timeout | 1 | tool's result on stdout |
   | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
 
-- Server-mode flags (`--host`, `--port`, `--api-key`, `--tls-cert`/`--tls-key`,
+- Server-mode flags (`--host`, `--port`, `--api-key`, `--api-key-file`,
+  `--tls-cert`/`--tls-key`, `--insecure-no-auth`, `--max-concurrent`,
   and the CORS flags `--allowed-origins`, `--allow-all-origins`,
   `--disable-localhost-protection`)
   are ignored in both diagnostic modes, and `--watch` is ignored with
