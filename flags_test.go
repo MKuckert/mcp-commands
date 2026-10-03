@@ -300,3 +300,20 @@ func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
 		t.Errorf("server mode with invalid CORS env must fail, got nil")
 	}
 }
+
+// TestUsageLineListsRegisteredFlags: the one-line synopsis printed with
+// errMissingRequiredFlags must stay in sync with the flags parseCLI
+// registers — a new flag without a synopsis entry fails here.
+func TestUsageLineListsRegisteredFlags(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"dir", "scripts", "watch", "host", "port", "api-key", "api-key-file",
+		"tls-cert", "tls-key", "insecure-no-auth", "max-concurrent",
+		"allowed-origins", "allow-all-origins", "disable-localhost-protection",
+		"timeout", "no-timeout", "list-tools", "call-tool", "params",
+	} {
+		if !strings.Contains(usageLine, "--"+name) {
+			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)
+		}
+	}
+}

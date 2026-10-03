@@ -28,7 +28,7 @@ type serverConfig struct {
 	host           string
 	port           int
 	apiKey         resolvedAPIKey // HTTP mode only; zero value = unauthenticated
-	tlsCert        string // HTTP mode only; non-empty switches to ListenAndServeTLS
+	tlsCert        string         // HTTP mode only; non-empty switches to ListenAndServeTLS
 	tlsKey         string
 	cors           corsConfig
 	timeout        time.Duration // 0 = no global timeout (--no-timeout)
@@ -78,7 +78,7 @@ func (e *flagParseError) Error() string { return e.err.Error() }
 func (e *flagParseError) Unwrap() error { return e.err }
 
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
-const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]"
+const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]"
 
 func parseCLI(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
