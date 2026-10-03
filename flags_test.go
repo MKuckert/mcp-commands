@@ -214,7 +214,14 @@ func TestParseCLI(t *testing.T) {
 		{
 			name:    "tls_missing_file_fails",
 			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile, "--tls-key", filepath.Join(t.TempDir(), "nope")},
-			wantErr: "cannot read TLS file",
+			wantErr: "invalid TLS configuration",
+		},
+		{
+			// A directory opens fine, so a bare os.Stat check would accept it;
+			// the regular-file check is what makes this fail fast.
+			name:    "tls_cert_is_directory",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", t.TempDir(), "--tls-key", tlsKeyFile},
+			wantErr: "not a regular file",
 		},
 		{
 			// Stdio ignores the TLS options: unreadable files must not block

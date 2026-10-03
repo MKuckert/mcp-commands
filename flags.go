@@ -77,6 +77,26 @@ type flagParseError struct {
 func (e *flagParseError) Error() string { return e.err.Error() }
 func (e *flagParseError) Unwrap() error { return e.err }
 
+// checkTLSFile validates a --tls-cert/--tls-key path fail-fast: it must be
+// openable for reading and be a regular file. A bare os.Stat would also
+// accept a directory, or a file lacking read permission, and the failure
+// would surface only inside ListenAndServeTLS, after the listener opens.
+func checkTLSFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("cannot stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return nil
+}
+
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
 const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout]"
 
@@ -222,8 +242,8 @@ func parseCLI(args []string) (cliConfig, error) {
 		}
 		for _, tlsFile := range []string{*tlsCertFlag, *tlsKeyFlag} {
 			if err == nil && tlsFile != "" {
-				if _, statErr := os.Stat(tlsFile); statErr != nil {
-					err = fmt.Errorf("cannot read TLS file %s: %w", tlsFile, statErr)
+				if err = checkTLSFile(tlsFile); err != nil {
+					err = fmt.Errorf("invalid TLS configuration: %w", err)
 				}
 			}
 		}
