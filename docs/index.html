@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>mcp-commands — Turn any script into an MCP tool</title>
-<meta name="description" content="mcp-commands is a lightweight Model Context Protocol server written in Go. Drop in any executable script — Bash, Python, Go, Rust — and LLMs can call it as a native MCP tool.">
+<meta name="description" content="mcp-commands is a lightweight Model Context Protocol server written in Go. Drop in any executable script — Bash, Python, Node, Ruby — and LLMs can call it as a native MCP tool.">
 <link rel="icon" type="image/svg+xml" href="logo.svg">
 <link rel="apple-touch-icon" href="logo.svg">
 <style>
@@ -228,7 +228,7 @@
   <h1>Your scripts are already tools.<br><span class="grad">mcp-commands makes LLMs use them.</span></h1>
   <p class="sub">
     A lightweight <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" style="color:var(--teal-bright)">Model Context Protocol</a> server that turns any executable script into a native MCP tool —
-    no boilerplate servers, no SDKs, <code>Bash</code>, <code>Python</code>, <code>Go</code>, <code>Rust</code>… anything on your <code>PATH</code> game.
+    no boilerplate servers, no SDKs, <code>Bash</code>, <code>Python</code>, <code>Node</code>, <code>Ruby</code>… anything with a shebang is a candidate.
   </p>
   <div class="install">
     <span class="p">$</span><span class="cmd" id="install-cmd">go install github.com/mkuckert/mcp-commands@latest</span>
@@ -269,7 +269,7 @@
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6"/><path d="M16 6l5 6-5 6"/></svg></div>
       <h3>Your scripts, now tools</h3>
-      <p>You already maintain a pile of <b>Bash, Python, Node, Go, Rust</b> scripts. Drop them into a directory and they become native MCP tools — no custom server to write per script.</p>
+      <p>You already maintain a pile of <b>Bash, Python, Node, Ruby</b> scripts. Drop them into a directory and they become native MCP tools — no custom server to write per script.</p>
     </div>
   </div>
 </section>
@@ -284,7 +284,7 @@
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6M16 6l5 6-5 6"/></svg></div>
       <h3>Language agnostic</h3>
-      <p>Bash, Python, Ruby, Go, Rust, or a compiled binary. If it's executable, it's a tool. Shebangs welcome.</p>
+      <p>Bash, Python, Node, Ruby — any executable with a shebang is a tool. (Compiled binaries are discovered too; they just can't carry frontmatter.)</p>
     </div>
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>

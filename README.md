@@ -8,11 +8,11 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 
 - **Real tooling for sandboxed harnesses.** Your AI agent runs in a sandbox, a container, or on dedicated hardware, but you want access to the unrestricted, high-performance toolchain on the real machine — a full compiler install, faster builds, hardware-attached utilities. Run `mcp-commands` on that host over HTTP and bridge it into the sandbox: the agent gains the capability, while the sandbox remains your security boundary.
 - **Cross-platform tooling.** The agent harness lives on one machine, the work happens on another — a Linux build box, a Mac with Apple-silicon tooling, a Windows host. The streamable HTTP transport (`--host`, `--port`, auth, TLS, CORS) makes platform-specific commands reachable from wherever the harness runs.
-- **Your utility scripts, now tools.** You already maintain a pile of Bash, Python, Node.js, Go, or Rust scripts. Drop them into the `--scripts` directory and they become native MCP tools — no custom MCP server to write per script.
+- **Your utility scripts, now tools.** You already maintain a pile of Bash, Python, Node.js, or Ruby scripts. Drop them into the `--scripts` directory and they become native MCP tools — no custom MCP server to write per script.
 
 ## Features
 
-- **Language Agnostic:** Expose scripts written in Bash, Python, Ruby, Go, Rust, or any executable binary.
+- **Language Agnostic:** Expose scripts written in Bash, Python, Ruby, Node.js, or any other executable — compiled binaries are discovered too, they just can't carry frontmatter (`Description:`/`Param:`/`Timeout:` live in the file's first lines).
 - **Dynamic Discovery:** Automatically scans a configured directory for executable files and exposes them as MCP tools.
 - **Hot Reloading (`--watch`):** Add, modify, or remove scripts on the fly. The server detects changes and updates available tools without needing a restart.
 - **Auto-Documentation:** Reads the first few lines of your script for a `Description:` comment and presents it to the LLM to provide context on what the tool does.
