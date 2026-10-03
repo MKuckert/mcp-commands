@@ -119,6 +119,18 @@ Notes:
 
   An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, printing a loud `WARNING: UNAUTHENTICATED HTTP server bound to …` line and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
 
+#### TLS
+
+The HTTP transport is **cleartext by default**: the bearer token and every request body transit unencrypted. For production, terminate TLS — either put a TLS-terminating proxy (Caddy/nginx) in front of the server, or serve HTTPS directly:
+
+```bash
+mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8443 --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+```
+
+- `--tls-cert` and `--tls-key` must be **given together** (exactly one of the two is a startup error), and both files are checked at startup — an unreadable file fails fast before binding.
+- In stdio mode (no `--port`) both flags are ignored, like the other HTTP-only options.
+- The startup log carries a `TLS` note: `Starting HTTP server on <addr> (…, TLS)`.
+
 #### Concurrency Cap
 
 The server runs at most `--max-concurrent` tool subprocesses at once (default **16**, `0` selects the default). A call arriving when the cap is full gets a clean in-band MCP error — `mcp-commands is at capacity (16 concurrent tool executions); please retry shortly` — that the client can retry, instead of piling up unbounded subprocesses. Lower it on small hosts; raise it for bursty clients.
@@ -144,7 +156,7 @@ Notes:
 - **Behavior change in 0.5.0 — the HTTP transport is always stateless:** each request stands on its own. go-sdk v1.6.1 still issues a vestigial `Mcp-Session-Id` header on `initialize` but ignores it on later requests, so clients that stored and resend a session ID keep working. A request missing the `Mcp-Protocol-Version` header defaults to `2025-03-26` (the oldest supported version). `GET` (SSE stream) returns 405.
 - **Use a fetch-based client**, e.g. the official MCP TypeScript SDK — raw `EventSource` cannot work in any mode. Fetch clients must send `Accept: application/json, text/event-stream` on POST (the SDK returns 400 otherwise; the TS SDK does both automatically).
 - **Do not set `MCPGODEBUG=enableoriginverification=1`** to "fix" CORS failures: it makes the SDK 403 *all* cross-origin requests inside the handler, where the CORS middleware cannot recover.
-- **Production requires TLS:** the server is HTTP-only; put a TLS-terminating proxy (Caddy/nginx) in front for browser use — the proxy can also add CORS as an alternative to these flags.
+- **Production requires TLS:** the server is cleartext HTTP by default; put a TLS-terminating proxy (Caddy/nginx) in front for browser use — the proxy can also add CORS as an alternative to these flags — or serve HTTPS directly with `--tls-cert`/`--tls-key` (see [TLS](#tls)).
 - A client example with the MCP TS SDK:
 
 ```js
@@ -208,6 +220,7 @@ HTTP server:
 | `--port <port>` | `0` (stdio) | A non-zero value switches to HTTP mode. |
 | `--api-key <token>` | _(none)_ | Bearer token. Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. |
 | `--api-key-file <path>` | _(none)_ | Read the token from a file (content trimmed); the token never appears in a process listing. |
+| `--tls-cert <path>` / `--tls-key <path>` | _(none)_ | Serve HTTPS directly (PEM files, required together; startup-checked). Ignored in stdio mode. |
 | `--insecure-no-auth` | off | Escape hatch: start an unauthenticated server on a non-loopback host (loudly warned). |
 | `--max-concurrent <n>` | `16` (`0` = default) | Cap on simultaneous tool executions; saturated calls get a clean at-capacity error. |
 
@@ -272,6 +285,10 @@ The server translates JSON properties into CLI flags.
 - **Arrays:** `{"items": ["a", "b"]}` ➡️ `--items a --items b`
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
 - **Deterministic ordering:** Keys are sorted alphabetically before translation, so the CLI flag order is stable and never reflects the LLM's JSON object key order.
+
+### Untrusted Tool Output
+
+Treat tool output as **untrusted model input**. The `<stdout>`/`<stderr>` tags are advisory formatting, not a sandbox: a script can emit a literal `</stdout>` line and thereby inject content that looks like server framing, and anything it prints is handed to the LLM verbatim (up to the 1 MiB cap). The trust boundary is the scripts directory: **write access to `--scripts` is code execution as the server user**, so keep that directory under your control. Do not rely on the tags to keep a misbehaving or hostile script from influencing the model.
 
 ### Diagnostics
 
@@ -345,8 +362,10 @@ required-parameter validation before the script starts.
   | Missing required param, non-zero script exit, or timeout | 1 | tool's result on stdout |
   | Unknown tool, invalid `--params`, unstartable script, other operational failure | 1 | reason on stderr, script never started |
 
-- Server-mode flags (`--host`, `--port`, `--api-key`, and the CORS flags
-  `--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`)
+- Server-mode flags (`--host`, `--port`, `--api-key`, `--api-key-file`,
+  `--tls-cert`/`--tls-key`, `--insecure-no-auth`, `--max-concurrent`,
+  and the CORS flags `--allowed-origins`, `--allow-all-origins`,
+  `--disable-localhost-protection`)
   are ignored in both diagnostic modes, and `--watch` is ignored with
   `--call-tool` as well; if you pass any of them explicitly, a single notice
   is printed to stderr. `--watch` is *honored* with `--list-tools` — it is

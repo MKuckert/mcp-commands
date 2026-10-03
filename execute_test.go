@@ -128,6 +128,12 @@ func TestArgumentsToCLIArgsBooleanAndNilHandling(t *testing.T) {
 			expected: []string{"--items", "a", "--items", "b", "--items", "c"},
 			desc:     "slice types unaffected",
 		},
+		{
+			name:     "byte_slice_not_expanded",
+			args:     map[string]any{"raw": []byte("ab")},
+			expected: []string{"--raw", "[97 98]"},
+			desc:     "the Uint8 exemption: []byte is a single value (fmt.Sprint), never expanded byte-by-byte",
+		},
 	}
 
 	for _, tt := range tests {

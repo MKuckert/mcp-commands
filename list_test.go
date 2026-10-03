@@ -171,6 +171,32 @@ func TestWordWrap(t *testing.T) {
 			t.Fatal("wordWrap returned no lines for non-empty input")
 		}
 	})
+
+	t.Run("zero_and_negative_width_floor_budget_at_one", func(t *testing.T) {
+		// budget = width - len(indent); for width ≤ 0 it is ≤ 0 and floors
+		// at 1 rune, so every token lands on its own line — never a panic.
+		got := wordWrap("a b c", "", 0)
+		want := []string{"a", "b", "c"}
+		if len(got) != len(want) {
+			t.Fatalf("wordWrap width 0 = %#v, want %#v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("line %d = %q, want %q", i, got[i], want[i])
+			}
+		}
+
+		gotNeg := wordWrap("ab cd", "     ", -5)
+		wantNeg := []string{"     ab", "     cd"}
+		if len(gotNeg) != len(wantNeg) {
+			t.Fatalf("wordWrap width -5 = %#v, want %#v", gotNeg, wantNeg)
+		}
+		for i := range wantNeg {
+			if gotNeg[i] != wantNeg[i] {
+				t.Errorf("line %d = %q, want %q", i, gotNeg[i], wantNeg[i])
+			}
+		}
+	})
 }
 
 func TestRenderToolList(t *testing.T) {

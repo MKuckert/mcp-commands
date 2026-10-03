@@ -180,6 +180,28 @@ func TestBuildInputSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate_required_uses_first_occurrence_position", func(t *testing.T) {
+		params := []paramSpec{
+			{Name: "a", Type: "string", Required: false, Description: "a1"},
+			{Name: "b", Type: "string", Required: true, Description: "b"},
+			{Name: "a", Type: "string", Required: true, Description: "a2"},
+		}
+		schema := buildInputSchema(params)
+
+		var decoded map[string]any
+		if err := json.Unmarshal(schema, &decoded); err != nil {
+			t.Fatalf("failed to unmarshal schema: %v", err)
+		}
+
+		// Last declaration wins for the required *status*, but the array
+		// position is the FIRST occurrence: a(1) is optional, a(2) required
+		// → a appears in required at its first position, before b.
+		required, ok := decoded["required"].([]any)
+		if !ok || len(required) != 2 || required[0] != "a" || required[1] != "b" {
+			t.Errorf("required = %v, want [a b] (first-occurrence position)", decoded["required"])
+		}
+	})
+
 	t.Run("all_three_types", func(t *testing.T) {
 		params := []paramSpec{
 			{

@@ -17,6 +17,14 @@ func TestParseCLI(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	tlsCertFile := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(tlsCertFile, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tlsKeyFile := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(tlsKeyFile, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name     string
@@ -149,6 +157,16 @@ func TestParseCLI(t *testing.T) {
 			wantErr: "mutually exclusive",
 		},
 		{
+			name:     "tls_pair_resolved",
+			args:     []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile, "--tls-key", tlsKeyFile},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != tlsCertFile || c.server.tlsKey != tlsKeyFile {
+					t.Errorf("tlsCert/tlsKey = %q/%q", c.server.tlsCert, c.server.tlsKey)
+				}
+			},
+		},
+		{
 			name:    "max_concurrent_negative",
 			args:    []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "-1"},
 			wantErr: "--max-concurrent must be >= 0",
@@ -160,12 +178,17 @@ func TestParseCLI(t *testing.T) {
 		},
 		{
 			name:     "list_tools_mode_reports_ignored_server_flags",
-			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk"},
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--port=0", "--api-key", "tk", "--tls-cert", tlsCertFile, "--tls-key", tlsKeyFile},
 			wantMode: modeListTools,
 			check: func(t *testing.T, c cliConfig) {
 				got := strings.Join(c.diagnostic.ignoredFlags, ",")
-				if !strings.Contains(got, "--port") || !strings.Contains(got, "--api-key") {
-					t.Errorf("ignoredFlags = %v", c.diagnostic.ignoredFlags)
+				for _, want := range []string{"--port", "--api-key", "--tls-cert", "--tls-key"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("ignoredFlags = %v, want to include %s", c.diagnostic.ignoredFlags, want)
+					}
+				}
+				if c.server.tlsCert != "" || c.server.tlsKey != "" {
+					t.Errorf("tlsCert/tlsKey = %q/%q, want zero values in diagnostic mode", c.server.tlsCert, c.server.tlsKey)
 				}
 			},
 		},
@@ -180,6 +203,35 @@ func TestParseCLI(t *testing.T) {
 				}
 				if !c.diagnostic.callToolSet {
 					t.Error("callToolSet must be true")
+				}
+			},
+		},
+		{
+			name:    "tls_cert_only",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile},
+			wantErr: "--tls-cert and --tls-key must be given together",
+		},
+		{
+			name:    "tls_missing_file_fails",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", tlsCertFile, "--tls-key", filepath.Join(t.TempDir(), "nope")},
+			wantErr: "invalid TLS configuration",
+		},
+		{
+			// A directory opens fine, so a bare os.Stat check would accept it;
+			// the regular-file check is what makes this fail fast.
+			name:    "tls_cert_is_directory",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8443", "--tls-cert", t.TempDir(), "--tls-key", tlsKeyFile},
+			wantErr: "not a regular file",
+		},
+		{
+			// Stdio ignores the TLS options: unreadable files must not block
+			// startup (same contract as the key sources).
+			name:     "stdio_ignores_unreadable_tls_files",
+			args:     []string{"--dir", "d", "--scripts", "s", "--tls-cert", filepath.Join(t.TempDir(), "nope"), "--tls-key", filepath.Join(t.TempDir(), "nope")},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != "" || c.server.tlsKey != "" {
+					t.Errorf("tlsCert/tlsKey = %q/%q, want zero values in stdio mode", c.server.tlsCert, c.server.tlsKey)
 				}
 			},
 		},
@@ -253,5 +305,22 @@ func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
 	// The same inputs in server mode must still fail-fast.
 	if _, err := parseCLI([]string{"--dir", "d", "--scripts", "s"}); err == nil {
 		t.Errorf("server mode with invalid CORS env must fail, got nil")
+	}
+}
+
+// TestUsageLineListsRegisteredFlags: the one-line synopsis printed with
+// errMissingRequiredFlags must stay in sync with the flags parseCLI
+// registers — a new flag without a synopsis entry fails here.
+func TestUsageLineListsRegisteredFlags(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"dir", "scripts", "watch", "host", "port", "api-key", "api-key-file",
+		"tls-cert", "tls-key", "insecure-no-auth", "max-concurrent",
+		"allowed-origins", "allow-all-origins", "disable-localhost-protection",
+		"timeout", "no-timeout", "list-tools", "call-tool", "params",
+	} {
+		if !strings.Contains(usageLine, "--"+name) {
+			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)
+		}
 	}
 }
