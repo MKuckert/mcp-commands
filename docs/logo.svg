@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 118" fill="none">
+  <!-- speech bubble with tail at bottom-right -->
+  <path d="M32 16 H68 A18 18 0 0 1 86 34 V58 L102 92 L72 88 H34 A18 18 0 0 1 16 70 V34 A18 18 0 0 1 34 16 Z"
+        stroke="#0FA37E" stroke-width="8" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- chevron prompt -->
+  <path d="M33 45 L49 58.5 L33 72" stroke="#0FA37E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- gear -->
+  <g fill="#0FA37E" transform="translate(67 58)">
+    <path fill-rule="evenodd" d="M-10 0 a10 10 0 1 0 20 0 a10 10 0 1 0 -20 0 M-4 0 a4 4 0 1 1 8 0 a4 4 0 1 1 -8 0"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(45)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(90)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(135)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(180)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(225)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(270)"/>
+    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(315)"/>
+  </g>
+  <!-- key on the tail -->
+  <path d="M99 89 L109 99" stroke="#0FA37E" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="112" cy="104" r="6.5" stroke="#0FA37E" stroke-width="6"/>
+</svg>
