@@ -4,6 +4,12 @@
 
 Instead of writing custom MCP servers for every utility or integration, `mcp-commands` allows you to simply place any executable script (Bash, Python, Node.js, compiled Go/Rust, etc.) into a directory. The server discovers them, extracts their descriptions, and exposes them as native MCP tools, automatically handling argument parsing and CLI invocation.
 
+## Use Cases
+
+- **Real tooling for sandboxed harnesses.** Your AI agent runs in a sandbox, a container, or on dedicated hardware, but you want access to the unrestricted, high-performance toolchain on the real machine — a full compiler install, faster builds, hardware-attached utilities. Run `mcp-commands` on that host over HTTP and bridge it into the sandbox: the agent gains the capability, while the sandbox remains your security boundary.
+- **Cross-platform tooling.** The agent harness lives on one machine, the work happens on another — a Linux build box, a Mac with Apple-silicon tooling, a Windows host. The streamable HTTP transport (`--host`, `--port`, auth, TLS, CORS) makes platform-specific commands reachable from wherever the harness runs.
+- **Your utility scripts, now tools.** You already maintain a pile of Bash, Python, Node.js, Go, or Rust scripts. Drop them into the `--scripts` directory and they become native MCP tools — no custom MCP server to write per script.
+
 ## Features
 
 - **Language Agnostic:** Expose scripts written in Bash, Python, Ruby, Go, Rust, or any executable binary.
@@ -11,7 +17,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 - **Hot Reloading (`--watch`):** Add, modify, or remove scripts on the fly. The server detects changes and updates available tools without needing a restart.
 - **Auto-Documentation:** Reads the first few lines of your script for a `Description:` comment and presents it to the LLM to provide context on what the tool does.
 - **Smart Argument Translation:** Safely maps JSON tool arguments from the LLM into POSIX-compliant CLI flags (e.g., `{"force": true, "file": "data.txt"}` becomes `--force --file data.txt`).
-- **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and HTTP streaming transport for remote connections.
+- **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and streamable HTTP transport for remote connections.
 - **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces a configurable execution timeout (default 5 minutes, per tool, per server, or disabled) and output limits.
 - **Tagged Output:** Returns the executed script's stdout and stderr wrapped in `<stdout>`/`<stderr>` tags (so the LLM can tell the streams apart). Combined output is capped at 1 MiB, with a trailing truncation notice when the cap is exceeded.
 

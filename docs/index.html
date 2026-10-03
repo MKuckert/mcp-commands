@@ -159,6 +159,7 @@
   .card .ico svg { width: 21px; height: 21px; stroke: var(--teal-bright); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .card h3 { font-size: 1.02rem; margin-bottom: 8px; letter-spacing: -0.01em; }
   .card p { color: var(--muted); font-size: 0.92rem; }
+  .card b { color: var(--text); font-weight: 600; }
   .card code { font-family: var(--mono); font-size: 0.85em; color: var(--teal-bright); }
 
   /* how it works */
@@ -209,6 +210,7 @@
   <div class="wrap nav-inner">
     <a class="brand" href="#"><img src="logo.svg" alt="mcp-commands logo">mcp-commands</a>
     <div class="nav-links">
+      <a href="#usecases">Use cases</a>
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
       <a href="#install">Install</a>
@@ -246,6 +248,31 @@
     </div>
   </div>
 </header>
+
+<section id="usecases" class="wrap">
+  <div class="sec-head">
+    <div class="kicker">Use cases</div>
+    <h2>Where it earns its keep</h2>
+    <p>Three situations where bridging scripts to your agent beats writing a custom server.</p>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 2l8 3.5V11c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5.5L12 2z"/><path d="M9 12l2 2 4-4.5"/></svg></div>
+      <h3>Real tooling for sandboxed harnesses</h3>
+      <p>Your agent runs in a <b>container, sandbox, or on dedicated hardware</b>, but you want the real, unrestricted toolchain — a full compiler install, faster builds, hardware-attached utilities. Run the server on that host over HTTP and bridge it into the sandbox: the agent gains capability, the sandbox stays the security boundary.</p>
+    </div>
+    <div class="card">
+      <div class="ico"><svg viewBox="0 0 24 24"><path d="M2 5h13v9H2z"/><path d="M8 18h3M9.5 14v4"/><path d="M17 12l4 4-4 4"/><path d="M21 8l-4 4"/></svg></div>
+      <h3>One agent, many machines</h3>
+      <p>The harness lives on your laptop, the work happens on a <b>Linux build box, a Mac, a Windows host</b>. Platform-specific commands become reachable wherever the agent runs — over the streamable HTTP transport, with auth, TLS, and CORS.</p>
+    </div>
+    <div class="card">
+      <div class="ico"><svg viewBox="0 0 24 24"><path d="M8 6l-5 6 5 6"/><path d="M16 6l5 6-5 6"/></svg></div>
+      <h3>Your scripts, now tools</h3>
+      <p>You already maintain a pile of <b>Bash, Python, Node, Go, Rust</b> scripts. Drop them into a directory and they become native MCP tools — no custom server to write per script.</p>
+    </div>
+  </div>
+</section>
 
 <section id="features" class="wrap">
   <div class="sec-head">
