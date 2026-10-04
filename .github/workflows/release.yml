@@ -50,6 +50,6 @@ jobs:
             echo "BUMP_TAP_TOKEN not set, skipping tap dispatch"
             exit 0
           fi
-          gh api -X POST repos/MKuckert/homebrew-tap/dispatches -f event=release-bumped -f client_payload[tag]=$GITHUB_REF_NAME
+          gh api -X POST repos/MKuckert/homebrew-tap/dispatches -f event_type=release-bumped -f client_payload[tag]=$GITHUB_REF_NAME
         env:
           GH_TOKEN: ${{ secrets.BUMP_TAP_TOKEN }}
