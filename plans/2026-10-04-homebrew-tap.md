@@ -7,11 +7,11 @@ Status: Approved
 
 ## Scope
 
-- [/] U1: versioned release archive names (breaking URL change) + version bump to 0.9.0
-- [/] U2: `release.yml` — dispatch `release-bumped` to the tap repo after a successful release
-- [/] U3: create `MKuckert/homebrew-tap` — formula `mcp-commands.rb` @ v0.9.0, tap README, `bump-formula.yml` workflow
-- [/] U4: main README — brew install section + updated download instructions
-- [ ] U5: cut v0.9.0 release, end-to-end verification (dispatch → formula bump → audit)
+- [x] U1: versioned release archive names (breaking URL change) + version bump to 0.9.0 — merged (PR #13)
+- [x] U2: `release.yml` — dispatch `release-bumped` to the tap repo after a successful release — merged (PR #13; `event_type` fix in PR #15)
+- [x] U3: create `MKuckert/homebrew-tap` — formula `mcp-commands.rb`, tap README, `bump-formula.yml` workflow — pushed
+- [x] U4: main README — brew install section + updated download instructions — merged (PR #13)
+- [/] U5: cut v0.9.0 release, end-to-end verification (dispatch → formula bump → audit) — automation verified; manual macOS install gate pending
 
 ## Design decisions
 
@@ -180,3 +180,15 @@ N-2 (minor): **Decision 4's dispatch gating is self-contradictory.** It says `if
 - **N-2 verified:** Decision 4 now reads `if: success()` on the goreleaser job + `continue-on-error: true` on the dispatch. No `always()` remains anywhere in the plan. U2 ("post-goreleaser `Trigger tap bump` step") restates Decision 4 without contradiction. ✔
 - **Final pass** (order, feasibility, completeness): Decision 5 / U3 / U5 sequence remains uniformly (a); tap exists before the tag, so the release dispatch hits a live workflow with a valid seeded formula. Repo spot-checks: `.goreleaser.yaml`'s current `name_template` (no version) confirms the old-name v0.8.3 seed URLs and the rationale for the explicit version line; `checksum: name_template: "checksums.txt"` matches the bump script's sum source; `release.yml`'s single `goreleaser` job is the correct insertion point; `main.go` prints the bare `serverVersion` and `flags.go:159` skips validation, so the formula `test` regex holds. Scope, verification gates, and out-of-scope list are complete and consistent.
 - Non-blocking clarification (not a finding): "new step after the goreleaser job" — if the Builder adds it as a step *inside* the existing `goreleaser` job, `if: success()` means "all prior steps in this job succeeded", which is exactly the intended gate. A separate job with `if: success()` (job-level) works identically. Either implementation satisfies Decision 4; no plan change required.
+
+## U5 execution log (2026-10-04)
+
+End-to-end run: `v0.9.0` tagged on main → `release` workflow green (6 assets + `checksums.txt` under the new naming) → dispatch → `bump-formula` commits `mcp-commands 0.9.0` to tap main → re-dispatch is a verified no-op ("formula unchanged, nothing to commit").
+
+**Deviations forced by current Homebrew/GitHub, not plan drift:**
+
+1. **Dispatch key:** `POST /repos/{owner}/{repo}/dispatches` requires `event_type`, not `event` — the first release's dispatch 422'd (caught: tap formula stayed 0.8.3). Fixed in `release.yml` (PR #15) and proven by manual re-dispatch.
+2. **Formula shape:** current brew forbids `url`/`sha256` inside `on_*` blocks (audit: "cannot include `url`"). The formula now uses a top-level URL (macOS arm64) plus `resource "darwin_amd64"` / `resource "linux_amd64"` blocks, staged in `install` via `OS`/`Hardware` conditionals; the awk rewrite was extended to match resources. The version-inference design is unchanged.
+3. **Audit invocation:** `brew audit --formula <path>` is rejected (name form only). CI clones the tap into `${HOMEBREW_LIBRARY}/Library/Taps` (overwriting the working formula) and runs `brew trust --tap mkuckert/tap` (Homebrew 4.x trust model) + `brew audit --formula mcp-commands`.
+4. **SPDX:** current audit rejects the `:mit` symbol → `license "MIT"`.
+5. **Runner PATH:** the `run:` shell does not inherit the linuxbrew PATH → explicit PATH fallback + fail-loud guard in the workflow.
