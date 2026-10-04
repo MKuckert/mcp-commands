@@ -164,17 +164,6 @@ func combineToolOutput(stdout, stderr []byte) string {
 	return string(combined[:cut]) + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
-func validateRequiredParams(args map[string]any, params []paramSpec) error {
-	for _, p := range params {
-		if p.Required {
-			if _, ok := args[p.Name]; !ok {
-				return fmt.Errorf("missing required parameter: %s", p.Name)
-			}
-		}
-	}
-	return nil
-}
-
 // executeTool runs the script at scriptPath as a subprocess in the specified
 // working directory. It accepts pre-parsed arguments as a map, converts them to
 // CLI flags, and binds the context to a timeout to prevent hanging tools.

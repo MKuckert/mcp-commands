@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -143,20 +143,8 @@ func TestArgumentsToCLIArgsBooleanAndNilHandling(t *testing.T) {
 				t.Fatalf("argumentsToCLIArgs failed: %v", err)
 			}
 
-			// Compare as sorted slices because the order may vary due to map iteration
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d args, got %d: %v (test: %s)", len(tt.expected), len(got), got, tt.desc)
-			}
-
-			if len(got) > 0 {
-				sort.Strings(got)
-				expected := tt.expected
-				sort.Strings(expected)
-				for i := range expected {
-					if got[i] != expected[i] {
-						t.Errorf("arg %d: expected %q, got %q (test: %s)", i, expected[i], got[i], tt.desc)
-					}
-				}
+			if len(got) != len(tt.expected) || (len(got) > 0 && !reflect.DeepEqual(got, tt.expected)) {
+				t.Errorf("arguments = %v, want ordered pairs %v (test: %s)", got, tt.expected, tt.desc)
 			}
 		})
 	}
@@ -307,7 +295,7 @@ func TestValidateRequiredParams(t *testing.T) {
 				{Name: "path", Type: "string", Required: true},
 			},
 			wantErr:   true,
-			errSubstr: "missing required parameter: path",
+			errSubstr: "path",
 		},
 		{
 			name: "no_required_params",
@@ -336,7 +324,11 @@ func TestValidateRequiredParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateRequiredParams(tt.args, tt.params)
+			validator, err := resolveInputSchema(buildInputSchema(tt.params))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateToolArguments(tt.args, validator)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

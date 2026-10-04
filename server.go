@@ -140,7 +140,11 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 		return 1, fmt.Errorf("invalid --params %q: %w", paramsRaw, err)
 	}
 
-	if err := validateRequiredParams(args, tool.Params); err != nil {
+	validator, err := resolveInputSchema(buildInputSchema(tool.Params))
+	if err != nil {
+		return 1, fmt.Errorf("invalid input schema for tool %q: %w", name, err)
+	}
+	if err := validateToolArguments(args, validator); err != nil {
 		fmt.Fprintln(env.stdout, err.Error())
 		return 1, nil
 	}

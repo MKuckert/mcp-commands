@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-var serverVersion = "0.9.1"
+var serverVersion = "0.9.2"
 
 // resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
 // both are accessible. Shared by the server-mode run() and the diagnostic
