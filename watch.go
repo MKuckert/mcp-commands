@@ -30,12 +30,15 @@ func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 // targets match events named with their own path. passive marks the parent
 // observer entries: they exist only so the kernel keeps reporting events on
 // the primary path after its inode is replaced — sibling activity in a
-// parent directory must never arm the debounce.
+// parent directory must never arm the debounce. parentWatched is true when
+// the parent's watch is (or was) live, so removal only un-watches parents
+// that were actually registered.
 type watchPath struct {
-	path     string
-	parent   string
-	dirScope bool
-	passive  bool
+	path          string
+	parent        string
+	dirScope      bool
+	passive       bool
+	parentWatched bool
 }
 
 func watchPathFor(path string) watchPath {
@@ -89,6 +92,7 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 		if err := watcher.Add(scriptsWP.parent); err != nil {
 			return fmt.Errorf("failed to watch %s: %w", scriptsWP.parent, err)
 		}
+		scriptsWP.parentWatched = true
 		p := watchPathFor(scriptsWP.parent)
 		p.passive = true
 		paths = append(paths, p)
@@ -202,11 +206,13 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 		}
 		if wp.parent != "" {
 			if err := watcher.Add(wp.parent); err != nil {
-				// The warning is the disclosure; no passive entry is recorded,
-				// since no live watch exists to represent (and a later
-				// removal would log a spurious unwatch warning).
+				// The warning is the disclosure. No passive entry is recorded
+				// and parentWatched stays false: no live watch exists to
+				// represent, and a later removal must not attempt to
+				// un-watch a path that was never watched.
 				fmt.Fprintf(env.stderr, "Warning: failed to watch %s: %v\n", wp.parent, err)
 			} else {
+				wp.parentWatched = true
 				pp := watchPathFor(wp.parent)
 				pp.passive = true
 				*paths = append(*paths, pp)
@@ -236,7 +242,7 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 		if !protected[wp.path] {
 			removePath[wp.path] = true
 		}
-		if wp.parent != "" {
+		if wp.parent != "" && wp.parentWatched {
 			removeParent[wp.parent] = true
 		}
 	}
