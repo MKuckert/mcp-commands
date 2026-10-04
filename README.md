@@ -1,5 +1,7 @@
 # mcp-commands
 
+[![mcp-commands](https://mkuckert.github.io/mcp-commands/)](https://mkuckert.github.io/mcp-commands/)
+
 `mcp-commands` is a lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server written in Go that dynamically turns local executable scripts into tools accessible by LLMs and MCP clients.
 
 Instead of writing custom MCP servers for every utility or integration, `mcp-commands` allows you to simply place any executable script (Bash, Python, Node.js, compiled Go/Rust, etc.) into a directory. The server discovers them, extracts their descriptions, and exposes them as native MCP tools, automatically handling argument parsing and CLI invocation.
