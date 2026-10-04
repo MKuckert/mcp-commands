@@ -45,6 +45,11 @@ jobs:
       - name: Trigger tap bump
         if: success()
         continue-on-error: true
-        run: gh api -X POST repos/MKuckert/homebrew-tap/dispatches -f event=release-bumped -f client_payload[tag]=$GITHUB_REF_NAME
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "BUMP_TAP_TOKEN not set, skipping tap dispatch"
+            exit 0
+          fi
+          gh api -X POST repos/MKuckert/homebrew-tap/dispatches -f event=release-bumped -f client_payload[tag]=$GITHUB_REF_NAME
         env:
           GH_TOKEN: ${{ secrets.BUMP_TAP_TOKEN }}
