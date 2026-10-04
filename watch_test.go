@@ -352,21 +352,31 @@ func TestWatchChanges(t *testing.T) {
 		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
-	// Re-write until the change is observed: the first write can race the
-	// watcher registration (a lost event is legal for fsnotify), and only
-	// writes landing after Add is guaranteed to produce a debounced fire.
+	// Baseline: the guaranteed post-readiness rescan fires the callback once,
+	// so the first call proves nothing — wait for it, then require the
+	// rewrite to produce a *further* call. (The first write can also race
+	// the watcher registration: a lost event is legal for fsnotify, so the
+	// write is retried.)
+	deadline := time.Now().Add(3 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("the post-readiness rescan never ran")
+	}
+	baseline := calls.Load()
 	for i := 0; i < 40; i++ {
 		writeScript(t, scriptPath, "#!/bin/bash\necho beta\n")
 		deadline := time.Now().Add(2 * time.Second)
-		for calls.Load() == 0 && time.Now().Before(deadline) {
+		for calls.Load() <= baseline && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}
-		if calls.Load() > 0 {
+		if calls.Load() > baseline {
 			break
 		}
 	}
-	if calls.Load() == 0 {
-		t.Fatal("onChange did not fire on file change")
+	if calls.Load() <= baseline {
+		t.Fatal("onChange did not fire on the file change after readiness")
 	}
 
 	cancel()
@@ -501,24 +511,34 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 		_ = watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
-	// The first rename can race watcher registration (a lost event is legal
-	// for fsnotify); retry with a fresh rename until the fire is observed.
+	// Baseline first: the guaranteed post-readiness rescan fires the
+	// callback once, so the rename must push the count *above* the baseline
+	// (the first rename can race watcher registration — a lost event is
+	// legal for fsnotify — and is retried).
+	deadline := time.Now().Add(3 * time.Second)
+	for calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("the post-readiness rescan never ran")
+	}
+	baseline := calls.Load()
 	for i := 0; i < 10; i++ {
 		if err := os.Rename(scriptPath, filepath.Join(tmpDir, "beta.sh")); err != nil {
 			t.Fatalf("failed to rename script: %v", err)
 		}
 		deadline := time.Now().Add(2 * time.Second)
-		for calls.Load() == 0 && time.Now().Before(deadline) {
+		for calls.Load() <= baseline && time.Now().Before(deadline) {
 			time.Sleep(20 * time.Millisecond)
 		}
-		if calls.Load() > 0 {
+		if calls.Load() > baseline {
 			break
 		}
 		// Prepare for the next attempt: rename back.
 		_ = os.Rename(filepath.Join(tmpDir, "beta.sh"), scriptPath)
 	}
-	if calls.Load() == 0 {
-		t.Fatal("onChange did not fire on rename")
+	if calls.Load() <= baseline {
+		t.Fatal("onChange did not fire on the rename after readiness")
 	}
 }
 
@@ -562,12 +582,15 @@ func TestWatchChangesPermissionError(t *testing.T) {
 		t.Fatalf("warning must name the error, stderr = %q", buf.String())
 	}
 
-	// The loop must survive the error and still process real events.
+	// The loop must survive the error and still process real events. The
+	// guaranteed post-readiness rescan may already have counted, so the
+	// trigger write must push the count *above* the current baseline.
+	baseline := calls.Load()
 	if err := os.WriteFile(filepath.Join(tmpDir, "trigger.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("trigger write failed: %v", err)
 	}
 	deadline = time.Now().Add(5 * time.Second)
-	for calls.Load() == 0 {
+	for calls.Load() <= baseline {
 		if time.Now().After(deadline) {
 			t.Fatal("onChange never fired after the synthetic watcher error — the loop is not alive")
 		}
@@ -758,6 +781,25 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 	}()
 	defer cancel()
 
+	// Deterministic readiness: a canary script that only appears in the
+	// registry after the watcher has been registered and a debounced rescan
+	// has run. This rules out the setup racing past the deletion (in which
+	// case the initial Add would simply watch the new inode and the test
+	// would not prove replacement recovery).
+	gamma := filepath.Join(tmpDir, "gamma.sh")
+	writeScript(t, gamma, "#!/bin/bash\necho gamma\n")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listNames(t, ctx, clientSession), "gamma") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if names := listNames(t, ctx, clientSession); !strings.Contains(names, "gamma") {
+		t.Fatalf("watcher never became ready (canary not observed); tools = %s", names)
+	}
+	_ = os.Remove(gamma)
+
 	// Delete and recreate the scripts directory, then add a new script.
 	os.Remove(alpha)
 	os.Remove(tmpDir)
@@ -766,7 +808,7 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 	}
 	writeScript(t, filepath.Join(tmpDir, "beta.sh"), "#!/bin/bash\necho beta\n")
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(listNames(t, ctx, clientSession), "beta") {
 			break
@@ -808,9 +850,12 @@ func TestWatchToolsExternalSymlinkTargetChange(t *testing.T) {
 	}()
 	defer cancel()
 
-	// Edit the external target directly.
+	// Edit the external target directly. The first write can land inside the
+	// setup window and be picked up by the guaranteed readiness rescan, so
+	// require a *second* edit (v3) to be observed: the readiness rescan runs
+	// exactly once, so any later observation must come from the target
+	// watch.
 	writeScript(t, target, "#!/bin/bash\nDescription: alpha v2\necho alpha\n")
-
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v2") {
@@ -819,7 +864,18 @@ func TestWatchToolsExternalSymlinkTargetChange(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "v2") {
-		t.Fatalf("external target edit not observed; description = %q", got)
+		t.Fatalf("first target edit not observed; description = %q", got)
+	}
+	writeScript(t, target, "#!/bin/bash\nDescription: alpha v3\necho alpha\n")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v3") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "v3") {
+		t.Fatalf("second target edit not observed via the target watch; description = %q", got)
 	}
 }
 
@@ -898,22 +954,24 @@ func TestWatchChangesChannelClosed(t *testing.T) {
 	defer cancel()
 	env := liveEnvFor(t, io.Discard, io.Discard)
 	tmpDir := t.TempDir()
-	// Pre-close the watcher: watchChanges' setup Add fails, surfacing the
-	// broken watcher as a setup error.
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
-	w.Close()
-	env.newWatcher = func() (*fsnotify.Watcher, error) { return w, nil }
+	// A live watcher whose error channel is already closed: setup (NewWatcher
+	// + Add) succeeds, so watchChanges reaches the event loop, where the
+	// closed channel is observed and returned as a fatal error. (Closing the
+	// watcher itself would fail the setup Add first — a different branch.)
+	closed := make(chan error)
+	close(closed)
+	env.watcherErrors = func(*fsnotify.Watcher) <-chan error { return closed }
 	done := make(chan error, 1)
 	go func() { done <- watchChanges(ctx, env, tmpDir, func() []string { return nil }) }()
 	select {
 	case err := <-done:
 		if err == nil || err == context.Canceled {
-			t.Fatalf("broken watcher not surfaced as fatal; err = %v", err)
+			t.Fatalf("closed error channel not surfaced as fatal; err = %v", err)
+		}
+		if !strings.Contains(err.Error(), "channel closed") {
+			t.Fatalf("err = %v, want the closed-channel error", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("watchChanges did not return for a closed watcher")
+		t.Fatal("watchChanges did not return for a closed error channel")
 	}
 }

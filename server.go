@@ -186,6 +186,8 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	}
 
 	fmt.Fprintf(env.stderr, "Starting stdio server\n")
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Run(sigCtx, &mcp.StdioTransport{}) }()
 	select {
 	case <-sigCtx.Done():
 	case err := <-watchDone:
@@ -194,6 +196,19 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			cancel()
 			return fmt.Errorf("failed to watch scripts directory: %w", err)
 		}
+	case serveErr := <-serveDone:
+		// The client side ended the session (e.g. stdin closed): stop the
+		// watcher and surface the serve result.
+		cancel()
+		if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+			return fmt.Errorf("stdio server stopped: %w", serveErr)
+		}
+		return nil
 	}
-	return server.Run(sigCtx, &mcp.StdioTransport{})
+	// The session (and the watcher) is now done: serve.Run returns once the
+	// cancelled session closes.
+	if serveErr := <-serveDone; serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+		return fmt.Errorf("stdio server stopped: %w", serveErr)
+	}
+	return nil
 }

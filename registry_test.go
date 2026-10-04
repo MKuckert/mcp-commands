@@ -557,12 +557,14 @@ func TestRegistryReplaceConcurrentListNoGap(t *testing.T) {
 
 	// Churn: flip one tool's description on each round; the other 19 are
 	// unchanged by the diff and must never disappear from a concurrent list.
-	missing := 0
+	missingDone := make(chan int32, 1)
 	stop := make(chan struct{})
 	go func() {
+		var missing int32
 		for {
 			select {
 			case <-stop:
+				missingDone <- missing
 				return
 			default:
 			}
@@ -588,6 +590,14 @@ func TestRegistryReplaceConcurrentListNoGap(t *testing.T) {
 		registry.replace(next)
 	}
 	close(stop)
+	// Join the worker: the count is local to it and delivered over the
+	// completion channel (no unsynchronized cross-goroutine read).
+	var missing int32
+	select {
+	case missing = <-missingDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listing worker did not exit after stop")
+	}
 	if missing > 0 {
 		t.Fatalf("%d concurrent lists lost tools that the diff left unchanged", missing)
 	}

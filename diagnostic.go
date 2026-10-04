@@ -162,10 +162,12 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 	sigCtx, cancel := env.notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Re-prints only when the discovered set differs from the last printed
-	// one: the guaranteed post-readiness rescan (and any other no-op rescan)
-	// therefore stays silent. Symlink targets outside the directory are
-	// watched directly so external-target edits re-print.
+	// Re-prints only when the discovered tool set differs from the last
+	// printed one: the guaranteed post-readiness rescan (and any other
+	// no-op rescan) therefore stays silent — including quiet startups with
+	// external symlink targets, whose paths are derived from the tools and
+	// already covered by the tool comparison. Symlink targets outside the
+	// directory are watched directly so external-target edits re-print.
 	lastPrinted := tools
 	var lastTargets []string
 	rescan := func() []string {
@@ -174,15 +176,12 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
 			return lastTargets
 		}
-		newTargets := externalTargets(newTools, scriptsAbs)
-		// Re-render only when the visible state changed: identical sets leave
-		// the screen exactly as it is (live mode stays completely silent).
-		if !toolsEqual(lastPrinted, newTools) || !stringSlicesEqual(lastTargets, newTargets) {
+		if !toolsEqual(lastPrinted, newTools) {
 			env.clearScreen(env.stdout)
 			printList(newTools)
 		}
 		lastPrinted = newTools
-		lastTargets = newTargets
+		lastTargets = externalTargets(newTools, scriptsAbs)
 		return lastTargets
 	}
 

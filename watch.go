@@ -30,15 +30,12 @@ func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 // targets match events named with their own path. passive marks the parent
 // observer entries: they exist only so the kernel keeps reporting events on
 // the primary path after its inode is replaced — sibling activity in a
-// parent directory must never arm the debounce. parentWatched is true when
-// the parent's watch is (or was) live, so removal only un-watches parents
-// that were actually registered.
+// parent directory must never arm the debounce.
 type watchPath struct {
-	path          string
-	parent        string
-	dirScope      bool
-	passive       bool
-	parentWatched bool
+	path     string
+	parent   string
+	dirScope bool
+	passive  bool
 }
 
 func watchPathFor(path string) watchPath {
@@ -92,7 +89,6 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 		if err := watcher.Add(scriptsWP.parent); err != nil {
 			return fmt.Errorf("failed to watch %s: %w", scriptsWP.parent, err)
 		}
-		scriptsWP.parentWatched = true
 		p := watchPathFor(scriptsWP.parent)
 		p.passive = true
 		paths = append(paths, p)
@@ -183,94 +179,66 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 	}
 }
 
-// addTargets syncs the watched external-target set to want: new targets (and
-// their parents) get watches, vanished ones lose theirs. Best effort — a
-// target that disappears between the rescan and the Add/Remove logs a
-// warning and never aborts the loop. A nil/empty want is valid (no targets).
-// Protected paths (the scripts directory and its parent) are never unwatched:
-// a vanished target whose parent is shared with the scripts directory must
-// not drop the scripts-directory replacement-recovery watch.
+// addTargets syncs the watched external-target set toward want. Best effort
+// — a failed Add logs a warning and never aborts the loop, and a nil/empty
+// want is valid (no targets). Watch entries are never removed within the
+// session (cleanup happens at watcher.Close): a vanished target keeps its
+// watch as a recovery watch, so a recreated target fires a parent event the
+// rescan can observe and re-attach. Two rules keep the set recoverable:
+//
+//   - the target watch and its parent watch are installed independently, so
+//     a failed target Add still leaves a parent watch that observes the
+//     target's replacement;
+//   - a target whose parent Add failed at creation has it retried (silently;
+//     the creation warning was the disclosure) until the parent watch is
+//     live.
+//
+// Protected paths (the scripts directory and its parent) are treated as
+// present and never re-added.
 func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, protected map[string]bool, want []string) {
 	current := make(map[string]bool, len(*paths))
 	for _, wp := range *paths {
 		current[wp.path] = true
 	}
 	for _, p := range want {
-		if current[p] {
+		if protected[p] || current[p] {
 			continue
 		}
 		wp := watchPathFor(p)
 		if err := watcher.Add(wp.path); err != nil {
+			// Recorded even so: the parent watch (independent below) keeps
+			// the target's recreation observable, which re-attaches it.
 			fmt.Fprintf(env.stderr, "Warning: failed to watch %s: %v\n", p, err)
-			continue
-		}
-		if wp.parent != "" {
-			if err := watcher.Add(wp.parent); err != nil {
-				// The warning is the disclosure. No passive entry is recorded
-				// and parentWatched stays false: no live watch exists to
-				// represent, and a later removal must not attempt to
-				// un-watch a path that was never watched.
-				fmt.Fprintf(env.stderr, "Warning: failed to watch %s: %v\n", wp.parent, err)
-			} else {
-				wp.parentWatched = true
-				pp := watchPathFor(wp.parent)
-				pp.passive = true
-				*paths = append(*paths, pp)
-			}
 		}
 		*paths = append(*paths, wp)
 		current[p] = true
-	}
-	keep := make(map[string]bool, len(want))
-	for _, p := range want {
-		keep[p] = true
-	}
-	kept := make([]watchPath, 0, len(*paths))
-	removePath := make(map[string]bool)
-	removeParent := make(map[string]bool)
-	for _, wp := range *paths {
-		if protected[wp.path] || keep[wp.path] {
-			kept = append(kept, wp)
-			continue
-		}
-		if wp.passive {
-			if !protected[wp.path] {
-				removeParent[wp.path] = true
+		if wp.parent != "" && !current[wp.parent] {
+			if err := watcher.Add(wp.parent); err != nil {
+				// No passive entry: no live watch to represent. Retried on a
+				// later cycle; this warning is the disclosure.
+				fmt.Fprintf(env.stderr, "Warning: failed to watch %s: %v\n", wp.parent, err)
+			} else {
+				pp := watchPathFor(wp.parent)
+				pp.passive = true
+				*paths = append(*paths, pp)
+				current[wp.parent] = true
 			}
+		}
+	}
+	// Missing-parent retry: a target without a live parent watch is
+	// unrecoverable once its file is replaced, so try again each cycle.
+	for i := range *paths {
+		wp := &(*paths)[i]
+		if wp.passive || protected[wp.path] || wp.parent == "" || current[wp.parent] {
 			continue
 		}
-		if !protected[wp.path] {
-			removePath[wp.path] = true
-		}
-		if wp.parent != "" && wp.parentWatched {
-			removeParent[wp.parent] = true
-		}
-	}
-	for p := range removePath {
-		if err := watcher.Remove(p); err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
+		if err := watcher.Add(wp.parent); err == nil {
+			pp := watchPathFor(wp.parent)
+			pp.passive = true
+			*paths = append(*paths, pp)
+			current[wp.parent] = true
 		}
 	}
-	// Unwatch a parent only when no surviving entry (as a path or as a
-	// parent) still references it: several targets in one external directory
-	// share the parent watch, and dropping it would silently disable
-	// delete/recreate recovery for the ones that stay.
-	survivors := make(map[string]bool)
-	for _, wp := range kept {
-		survivors[wp.path] = true
-		if wp.parent != "" {
-			survivors[wp.parent] = true
-		}
-	}
-	for p := range removeParent {
-		if protected[p] || survivors[p] {
-			continue
-		}
-		if err := watcher.Remove(p); err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
-		}
-	}
-	*paths = kept
 }
 
 // externalTargets returns the deduped, discovery-ordered resolved tool paths

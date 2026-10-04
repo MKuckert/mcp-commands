@@ -1,6 +1,6 @@
 # mcp-commands
 
-[![mcp-commands](https://mkuckert.github.io/mcp-commands/)](https://mkuckert.github.io/mcp-commands/)
+[Project site](https://mkuckert.github.io/mcp-commands/)
 
 `mcp-commands` is a lightweight [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server written in Go that dynamically turns local executable scripts into tools accessible by LLMs and MCP clients.
 
@@ -85,6 +85,9 @@ How the watch behaves:
 - Deleting and recreating the scripts directory is recovered automatically
   (the watch re-attaches to the new directory); a permanent deletion degrades
   to the last known tool set with rescan warnings on stderr.
+- External symlink targets: a deleted target keeps its watch (a recovery
+  watch), so a recreated target re-registers without any other activity;
+  watch entries are only released when the server stops.
 - One inherent inotify limit: if a watched path's *parent directory* is
   deleted, the parent watch dies and the parent's recreation is not
   observable — the scripts directory (and any external targets) then degrade

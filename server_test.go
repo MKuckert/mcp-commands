@@ -404,7 +404,19 @@ func TestRunHTTPBindFailure(t *testing.T) {
 // return immediately, and run() must return the wrapped watch error within a
 // bounded time (not serve a permanently stale snapshot, not hang).
 func TestRunWatchFatalMidRun(t *testing.T) {
-	t.Parallel()
+	// Not parallel: pins the process stdin to a pipe that never closes, so
+	// the stdio serve side cannot EOF out before the fatal watch branch.
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = inR
+	defer func() {
+		os.Stdin = oldStdin
+		inR.Close()
+		inW.Close()
+	}()
 	tmpDir := t.TempDir()
 	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
 
@@ -442,5 +454,70 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 				t.Fatal("run did not return for a fatal watch termination")
 			}
 		})
+	}
+}
+
+// TestRunStdioWatchServes: with --watch, the stdio server must serve
+// concurrently with the watcher — before the run() restructure the server
+// only started after the select, so a watched stdio session never answered.
+// Not parallel: swaps the process stdin/stdout globals for pipes.
+func TestRunStdioWatchServes(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	// Two pipes: client requests -> server stdin; server stdout -> client.
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+
+	var stderr strings.Builder
+	env := liveEnvFor(t, io.Discard, &stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "stdio-e2e"}, &mcp.ClientOptions{
+		Capabilities: &mcp.ClientCapabilities{},
+	})
+	session, err := client.Connect(ctx, &mcp.IOTransport{Reader: outR, Writer: inW}, nil)
+	if err != nil {
+		t.Fatalf("client connect over stdio pipe: %v", err)
+	}
+	defer session.Close()
+
+	res, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools while watch is live: %v (the server must serve concurrently)", err)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Name != "alpha" {
+		t.Fatalf("tools = %+v, want alpha", res.Tools)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v after cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after cancel")
 	}
 }
