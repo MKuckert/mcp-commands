@@ -9,7 +9,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"github.com/fsnotify/fsnotify"
 	"io"
 	"math/big"
 	"net"
@@ -322,5 +324,77 @@ func TestResolveToolPaths(t *testing.T) {
 	}
 	if _, _, err := resolveToolPaths(filepath.Join(tmpDir, "no-such-dir"), tmpDir); err == nil || !strings.Contains(err.Error(), "dir path inaccessible") {
 		t.Errorf("expected 'dir path inaccessible' error, got %v", err)
+	}
+}
+
+// TestRunWatchSetupFailure (M4) verifies that a watcher creation failure in
+// stdio mode surfaces as a process error (run returns it) within a bounded
+// time, before the stdio loop would start.
+func TestRunWatchSetupFailure(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	var stderr strings.Builder
+	env := liveEnvFor(t, io.Discard, &stderr)
+	env.newWatcher = func() (*fsnotify.Watcher, error) {
+		return nil, errors.New("inotify unavailable")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true}) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run returned nil for a watch setup failure")
+		}
+		if !strings.Contains(err.Error(), "inotify unavailable") {
+			t.Fatalf("run error = %v, want the watcher setup failure", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not return for a watch setup failure")
+	}
+	if !strings.Contains(stderr.String(), "inotify unavailable") {
+		t.Errorf("stderr = %q, want the visible failure", stderr.String())
+	}
+}
+
+// TestRunHTTPBindFailure (M4) verifies that a port bind failure in HTTP mode
+// returns a bounded error instead of idling forever behind the "Starting"
+// banner: the serve outcome must be part of the run() select.
+func TestRunHTTPBindFailure(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	// Occupy the port so ListenAndServe fails.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("blocker listen: %v", err)
+	}
+	defer blocker.Close()
+	port := blocker.Addr().(*net.TCPAddr).Port
+
+	var stderr strings.Builder
+	env := liveEnvFor(t, io.Discard, &stderr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, host: "127.0.0.1", port: port})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run returned nil for a bind failure")
+		}
+		if !strings.Contains(err.Error(), "failed to start HTTP server") {
+			t.Fatalf("run error = %v, want the bind failure", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not return for a bind failure (process would hang)")
 	}
 }

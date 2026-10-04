@@ -83,11 +83,6 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 	if err := watcher.Add(scriptsWP.path); err != nil {
 		return fmt.Errorf("failed to watch %s: %w", scriptsDir, err)
 	}
-	if scriptsWP.parent != "" {
-		if err := watcher.Add(scriptsWP.parent); err != nil {
-			return fmt.Errorf("failed to watch %s: %w", scriptsWP.parent, err)
-		}
-	}
 	paths := []watchPath{scriptsWP}
 	protected := map[string]bool{scriptsWP.path: true, scriptsWP.parent: true}
 	if scriptsWP.parent != "" {
@@ -221,25 +216,48 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 		keep[p] = true
 	}
 	kept := make([]watchPath, 0, len(*paths))
+	removePath := make(map[string]bool)
+	removeParent := make(map[string]bool)
 	for _, wp := range *paths {
 		if protected[wp.path] || keep[wp.path] {
 			kept = append(kept, wp)
 			continue
 		}
 		if wp.passive {
-			// A parent observer: only its own watch was ever added.
-			if err := watcher.Remove(wp.path); err != nil {
-				fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", wp.path, err)
+			if !protected[wp.path] {
+				removeParent[wp.path] = true
 			}
 			continue
 		}
-		if err := watcher.Remove(wp.path); err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", wp.path, err)
+		if !protected[wp.path] {
+			removePath[wp.path] = true
 		}
-		if wp.parent != "" && !protected[wp.parent] {
-			if err := watcher.Remove(wp.parent); err != nil {
-				fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", wp.parent, err)
-			}
+		if wp.parent != "" {
+			removeParent[wp.parent] = true
+		}
+	}
+	for p := range removePath {
+		if err := watcher.Remove(p); err != nil {
+			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
+		}
+	}
+	// Unwatch a parent only when no surviving entry (as a path or as a
+	// parent) still references it: several targets in one external directory
+	// share the parent watch, and dropping it would silently disable
+	// delete/recreate recovery for the ones that stay.
+	survivors := make(map[string]bool)
+	for _, wp := range kept {
+		survivors[wp.path] = true
+		if wp.parent != "" {
+			survivors[wp.parent] = true
+		}
+	}
+	for p := range removeParent {
+		if protected[p] || survivors[p] {
+			continue
+		}
+		if err := watcher.Remove(p); err != nil {
+			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
 		}
 	}
 	*paths = kept

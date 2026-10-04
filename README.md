@@ -75,7 +75,7 @@ _Monitors the scripts directory for changes._
 
 How the watch behaves:
 
-- Change events are debounced (500 ms) and then the scripts directory is
+- Change events are debounced (100 ms) and then the scripts directory is
   rescanned. The registry applies a per-tool diff: tools that did not change
   are left alone, removed tools are unregistered, and added/changed tools are
   registered in place — so a `tools/list` from a client never sees a gap, and
@@ -85,6 +85,11 @@ How the watch behaves:
 - Deleting and recreating the scripts directory is recovered automatically
   (the watch re-attaches to the new directory); a permanent deletion degrades
   to the last known tool set with rescan warnings on stderr.
+- One inherent inotify limit: if an external symlink target's *parent
+  directory* is deleted, the target's watch is silently dropped (inotify
+  cannot observe the parent's recreation) and the registered tool goes stale
+  until the server restarts. The scripts directory itself is not affected —
+  its parent is watched for the recreation.
 - If the file watcher cannot be set up (e.g. `inotify` exhausted), the server
   fails to start with a visible error on stderr. `--watch` is an explicit
   request, so a fatal watcher failure at any later point also exits the

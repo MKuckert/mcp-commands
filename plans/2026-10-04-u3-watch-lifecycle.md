@@ -2,7 +2,7 @@
 
 **Branch:** `fix/u3-watch-lifecycle` from `main` (v0.9.2). **Target:** v0.9.2 (no version bump — U2 already landed it).
 **Source:** `REVIEW_REPORT.md` §U3 (H3, H4, M4, M8, M11, L4).
-**Status:** In progress.
+**Status:** Implemented; code review requested.
 
 ## Tasks
 

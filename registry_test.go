@@ -443,8 +443,8 @@ func TestRegistryReplaceConcurrency(t *testing.T) {
 	wg.Wait()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if len(registry.names) != 50 {
-		t.Fatalf("registry has %d names after concurrent replaces, want 50", len(registry.names))
+	if len(registry.current) != 50 {
+		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
 	}
 	if len(registry.current) != 50 {
 		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
@@ -492,10 +492,12 @@ func TestRegistryReplaceDiffOnlyRemovedNames(t *testing.T) {
 	})
 
 	registry.mu.Lock()
-	names := make([]string, len(registry.names))
-	copy(names, registry.names)
+	names := make([]string, len(registry.current))
+	for i, tool := range registry.current {
+		names[i] = tool.Name
+	}
 	registry.mu.Unlock()
-	// Deterministic order: diff adds follow the incoming order.
+	// Deterministic order: the diff walks the incoming slice in order.
 	want := []string{"alpha", "delta", "gamma"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("registered names = %v, want %v", names, want)

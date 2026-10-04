@@ -155,8 +155,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
 		fmt.Fprintf(env.stderr, "%s\n", line)
+		var serveErr error
 		select {
 		case <-sigCtx.Done():
+			// Signal: drain the serve outcome; a non-closed error (e.g. a
+			// bind failure racing the shutdown) is reported below.
 		case err := <-watchDone:
 			if err != nil && !errors.Is(err, context.Canceled) {
 				fmt.Fprintf(env.stderr, "Error: %v\n", err)
@@ -164,10 +167,20 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
 			}
+			// A clean watch stop (signal) falls through: the serve outcome
+			// must still be reported.
+		case err := <-serveDone:
+			// A bind/startup failure (e.g. the port is taken) must surface
+			// immediately: without this case the process would idle forever
+			// behind a "Starting" banner with no listener.
+			serveErr = err
 		}
 		cancel()
-		if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("failed to start HTTP server: %w", err)
+		if serveErr == nil {
+			serveErr = <-serveDone
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return fmt.Errorf("failed to start HTTP server: %w", serveErr)
 		}
 		return nil
 	}

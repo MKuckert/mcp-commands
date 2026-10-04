@@ -22,7 +22,6 @@ type toolRegistry struct {
 	globalTimeout time.Duration // applied to tools without a per-tool Timeout:
 	slot          *execSlot     // bounds concurrent tool executions
 	mu            sync.Mutex
-	names         []string
 	current       []discoveredTool // last registered set (for the change-diff in replaceIfChanged)
 }
 
@@ -101,15 +100,15 @@ func (r *toolRegistry) replaceLocked(tools []discoveredTool) {
 		r.server.RemoveTools(removed...)
 	}
 
-	r.names = make([]string, 0, len(tools))
 	for _, tool := range tools {
 		if prev, existed := previous[tool.Name]; existed && toolEqual(prev, tool) {
-			r.names = append(r.names, tool.Name)
 			continue
 		}
 		r.addToolLocked(tool)
 	}
-	r.current = tools
+	// Copy: the registry keeps this as its diff baseline and must not alias
+	// the caller's slice.
+	r.current = append([]discoveredTool(nil), tools...)
 }
 
 // addToolLocked registers one tool (add is a replace-in-place in the SDK,
@@ -151,7 +150,6 @@ func (r *toolRegistry) addToolLocked(tool discoveredTool) {
 		Description: description,
 		InputSchema: inputSchema,
 	}, handlerFunc)
-	r.names = append(r.names, tool.Name)
 }
 
 // replaceIfChanged re-registers only when the discovered set differs from
