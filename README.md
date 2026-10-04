@@ -23,7 +23,16 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 
 ## Installation
 
-Ensure you have [Go](https://go.dev/dl/) installed, then run:
+**Homebrew** (macOS/Linux):
+
+```bash
+brew trust --formula MKuckert/homebrew-tap/mcp-commands
+brew install MKuckert/homebrew-tap/mcp-commands
+```
+
+(`brew trust` is required once for non-core taps.)
+
+**Go** — ensure you have [Go](https://go.dev/dl/) installed, then run:
 
 ```bash
 go install github.com/mkuckert/mcp-commands@latest
