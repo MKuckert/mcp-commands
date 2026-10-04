@@ -202,7 +202,11 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 		}
 		if wp.parent != "" {
 			if err := watcher.Add(wp.parent); err != nil {
+				// The warning is the disclosure; no passive entry is recorded,
+				// since no live watch exists to represent (and a later
+				// removal would log a spurious unwatch warning).
 				fmt.Fprintf(env.stderr, "Warning: failed to watch %s: %v\n", wp.parent, err)
+			} else {
 				pp := watchPathFor(wp.parent)
 				pp.passive = true
 				*paths = append(*paths, pp)
@@ -268,10 +272,17 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 // watch cannot see. A normal file, or a symlink resolving inside the
 // directory, is not external.
 func externalTargets(tools []discoveredTool, scriptsDir string) []string {
+	// Tool paths are symlink-resolved during discovery, so the comparison
+	// must be against the resolved scripts directory too — otherwise a
+	// symlinked --scripts path marks every tool as external.
+	resolved := scriptsDir
+	if r, err := filepath.EvalSymlinks(scriptsDir); err == nil {
+		resolved = r
+	}
 	seen := make(map[string]bool, len(tools))
 	var out []string
 	for _, tool := range tools {
-		if filepath.Dir(tool.Path) == scriptsDir || seen[tool.Path] {
+		if filepath.Dir(tool.Path) == resolved || seen[tool.Path] {
 			continue
 		}
 		seen[tool.Path] = true

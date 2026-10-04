@@ -522,12 +522,9 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 	}
 }
 
-// TestWatchChangesPermissionError: a watcher permission error
-// (chmod the watched dir unreadable → inotify can no longer track it) must
-// be logged and swallowed, not fatal. Skipped when running as root —
-// uid 0 bypasses file permissions, so the error is not reproducible (the
-// sandbox and CI run as root; real user installs are covered).
-// A real fsnotify permission error is not deterministically reproducible
+// TestWatchChangesPermissionError: a transient watcher error (e.g. a
+// permission error) must be logged and swallowed, not fatal. A real
+// fsnotify permission error is not deterministically reproducible
 // (chmod on an already-watched inode does not produce one, and root cannot
 // trip it at all), so the error path is exercised through the watcherErrors
 // injection seam: a synthetic error must be logged and must not stop the

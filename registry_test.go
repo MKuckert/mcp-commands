@@ -446,8 +446,14 @@ func TestRegistryReplaceConcurrency(t *testing.T) {
 	if len(registry.current) != 50 {
 		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
 	}
-	if len(registry.current) != 50 {
-		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
+	seen := make(map[string]bool, len(registry.current))
+	for _, tool := range registry.current {
+		seen[tool.Name] = true
+	}
+	for k := 0; k < 50; k++ {
+		if !seen[fmt.Sprintf("tool%d", k)] {
+			t.Fatalf("registry.current missing tool%d after concurrent replaces", k)
+		}
 	}
 }
 
@@ -460,10 +466,19 @@ func TestRegistryReplaceIfChangedSkipsIdentical(t *testing.T) {
 	registry := newToolRegistry(server, "", 30*time.Second, 16)
 	set := []discoveredTool{{Name: "alpha", Path: "/a.sh", Description: "d1"}, {Name: "beta", Path: "/b.sh", Description: "d2"}}
 	registry.replace(set)
-
 	if registry.replaceIfChanged(set) {
 		t.Fatal("replaceIfChanged reported a change for an identical set")
 	}
+
+	// The diff baseline must not alias the caller's slice: mutating it after
+	// the call must not corrupt the registry's view — a fresh slice identical
+	// to the original must still be reported unchanged.
+	set[0] = discoveredTool{Name: "alpha", Path: "/a.sh", Description: "caller-mutated"}
+	fresh := []discoveredTool{{Name: "alpha", Path: "/a.sh", Description: "d1"}, {Name: "beta", Path: "/b.sh", Description: "d2"}}
+	if registry.replaceIfChanged(fresh) {
+		t.Fatal("caller mutation of the passed slice corrupted the diff baseline")
+	}
+
 	changed := append([]discoveredTool{}, set...)
 	changed[0] = discoveredTool{Name: "alpha", Path: "/a.sh", Description: "d1-updated"}
 	if !registry.replaceIfChanged(changed) {

@@ -398,3 +398,49 @@ func TestRunHTTPBindFailure(t *testing.T) {
 		t.Fatal("run did not return for a bind failure (process would hang)")
 	}
 }
+
+// TestRunWatchFatalMidRun (M4) verifies the run()-level fatal branch in both
+// modes: a watcher whose error channel is already closed makes watchChanges
+// return immediately, and run() must return the wrapped watch error within a
+// bounded time (not serve a permanently stale snapshot, not hang).
+func TestRunWatchFatalMidRun(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	// A free port: the bind must succeed so the watch failure is what run()
+	// reports (a busy port would race a bind failure into the same return).
+	port := freePort(t)
+
+	for name, port := range map[string]int{"stdio": 0, "http": port} {
+		name, port := name, port
+		t.Run(name, func(t *testing.T) {
+			var stderr strings.Builder
+			env := liveEnvFor(t, io.Discard, &stderr)
+			closed := make(chan error)
+			close(closed)
+			env.watcherErrors = func(*fsnotify.Watcher) <-chan error { return closed }
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cfg := serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true}
+			if port > 0 {
+				cfg.host = "127.0.0.1"
+				cfg.port = port
+			}
+			done := make(chan error, 1)
+			go func() { done <- run(ctx, env, cfg) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("run returned nil for a fatal watch termination")
+				}
+				if !strings.Contains(err.Error(), "failed to watch scripts directory") {
+					t.Fatalf("run error = %v, want the wrapped watch failure", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("run did not return for a fatal watch termination")
+			}
+		})
+	}
+}
