@@ -180,7 +180,7 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 		}
 	}
 
-	// A frontmatter line exceeding the scanner buffer (64 KiB) aborts the
+	// A frontmatter line at or over the scanner buffer (64 KiB) aborts the
 	// scan early. Surface it: the tool registers with the metadata collected
 	// so far, and the warning makes the incompleteness visible.
 	if err := scanner.Err(); err != nil {

@@ -9,12 +9,12 @@ Status: **Implemented, pending Code Reviewer**
 
 Files: `discover.go`, `discover_test.go`, `main.go` + `Makefile` (version bump only).
 
-- [/] H1: regular-file predicate — require `fileInfo.Mode().IsRegular()` before the exec-bit check and before `os.Open`; an executable FIFO (or symlink-to-FIFO) must be skipped, never opened.
-- [/] H5 predicate: OS-aware executable detection — Unix permission bits; on Windows, executable extensions (`.exe`, `.com`, `.bat`, `.cmd`) since normal file modes never set `0111`.
-- [/] M3a: scanner `Err()` handling in `extractFrontmatter` — an oversized (>64 KiB) frontmatter line must log a stderr warning naming the file; the tool registers with the metadata collected so far (disclosed, never silent).
-- [/] M3b: 30-line boundary — read exactly `scanHeaderLines` lines; the current `for scanner.Scan() && lineCount < n` calls `Scan()` first and consumes line 31.
-- [/] Version bump `serverVersion`/`VERSION` → `0.9.1`.
-- [/] Tests: FIFO (skipped), symlink-to-FIFO (skipped, bounded by a test deadline), >64 KiB frontmatter line (warning + partial metadata), line-30-included/line-31-excluded boundary, predicate table (regular/non-regular, exec-bit, Windows extensions).
+- [x] H1: regular-file predicate — require `fileInfo.Mode().IsRegular()` before the exec-bit check and before `os.Open`; an executable FIFO (or symlink-to-FIFO) must be skipped, never opened.
+- [x] H5 predicate: OS-aware executable detection — Unix permission bits; on Windows, executable extensions (`.exe`, `.com`, `.bat`, `.cmd`) since normal file modes never set `0111`.
+- [x] M3a: scanner `Err()` handling in `extractFrontmatter` — an oversized (>64 KiB) frontmatter line must log a stderr warning naming the file; the tool registers with the metadata collected so far (disclosed, never silent).
+- [x] M3b: 30-line boundary — read exactly `scanHeaderLines` lines; the current `for scanner.Scan() && lineCount < n` calls `Scan()` first and consumes line 31.
+- [x] Version bump `serverVersion`/`VERSION` → `0.9.1`.
+- [x] Tests: FIFO (skipped), symlink-to-FIFO (skipped, bounded by a test deadline), >64 KiB frontmatter line (warning + partial metadata), line-30-included/line-31-excluded boundary, predicate table (regular/non-regular, exec-bit, Windows extensions).
 
 ## Design decisions
 
@@ -35,4 +35,9 @@ U2 (input contract), U3 (watch lifecycle), U4 (config/HTTP hardening), U5 (CI/do
 
 ## Review Log
 
-(empty — Code Reviewer appends)
+**Code Reviewer — 2026-10-04: Approved, no blocking findings.** All plan tasks verified implemented and closed (H1, M3a/b, H5 predicate, version 0.9.1); `go test -count=1` / `go vet` / `gofmt` green, `GOOS=windows go vet` clean, new tests stable over 3 runs; end-to-end FIFO proof re-executed (12 ms, exit 0, pre-fix 124 gone); regression check: Unix predicate extensionally identical for regular executable files.
+
+- N-1 (nit, fixed): `discover.go` comment "exceeding" → "at or over" the 64 KiB scanner buffer (`bufio.Scanner` rejects `>=` max token size).
+- N-2 (forward pointer, U5): `README.md:46` install example pins the `0.9.0` archive name — move to `0.9.1` in the release PR.
+
+Status: **Done** — all tasks landed; plan boxes ticked by reviewer approval.
