@@ -110,6 +110,22 @@
   }
   .copy:hover { color: var(--teal-bright); border-color: rgba(46,230,176,0.5); }
   .copy.ok { color: var(--teal-bright); border-color: rgba(46,230,176,0.5); }
+
+  /* install tabs */
+  .tabs { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 22px; }
+  .tab {
+    font-family: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    color: var(--muted); background: rgba(255,255,255,0.03);
+    border: 1px solid var(--card-border); border-radius: 9px; padding: 8px 20px; transition: all .15s;
+  }
+  .tab:hover { color: var(--teal-bright); border-color: rgba(46,230,176,0.4); }
+  .tab:focus-visible { outline: 2px solid var(--teal-bright); outline-offset: 2px; }
+  .tab[aria-selected="true"] { color: var(--text); background: var(--teal-dim); border-color: rgba(46,230,176,0.5); }
+  .tabpanel { max-width: 620px; margin: 0 auto; }
+  .tabpanel[hidden] { display: none; }
+  .tabpanel .note { color: var(--muted); font-size: 0.88rem; margin-top: 14px; text-align: center; }
+  .tabpanel .note a { color: var(--teal-bright); }
+  .tabpanel .note code { font-family: var(--mono); font-size: 0.85em; color: var(--teal-bright); background: var(--teal-dim); padding: 1px 5px; border-radius: 4px; }
   .hero-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
   .btn {
     display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
@@ -178,7 +194,8 @@
   .demo-duo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 34px; }
   @media (max-width: 800px) { .demo-duo { grid-template-columns: 1fr; } }
   .codebox { background: #0a0f13; border: 1px solid var(--card-border); border-radius: 13px; overflow: hidden; }
-  .codebox .cb-label { padding: 9px 16px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--card-border); }
+  .codebox .cb-label { display: flex; align-items: center; gap: 8px; padding: 9px 16px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--card-border); }
+  .codebox .cb-label .copy { margin-left: auto; text-transform: none; letter-spacing: 0; }
   .codebox pre { padding: 16px 18px; font-family: var(--mono); font-size: 0.8rem; line-height: 1.7; overflow-x: auto; }
   .c-s { color: #c792ea; } .c-f { color: #82d9ff; } .c-a { color: var(--teal-bright); } .c-t { color: #ffcf87; } .c-m { color: #8fa5a0; } .c-p { color: #c9d6d2; }
 
@@ -214,6 +231,7 @@
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
       <a href="#install">Install</a>
+      <a href="#run">Run it</a>
     </div>
     <a class="btn-gh" href="https://github.com/mkuckert/mcp-commands" target="_blank" rel="noopener">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.74 1.23 1.03.72 1.53 1.87 1.09 2.33.83.07-.65.28-1.09.51-1.34-1.8-.25-3.69-.9-3.69-3.98 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.09-1.89 3.72-3.7 3.97.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -231,8 +249,8 @@
     no boilerplate servers, no SDKs, <code>Bash</code>, <code>Python</code>, <code>Node</code>, <code>Ruby</code>… anything with a shebang is a candidate.
   </p>
   <div class="install">
-    <span class="p">$</span><span class="cmd" id="install-cmd">go install github.com/mkuckert/mcp-commands@latest</span>
-    <button class="copy" id="copy-btn" aria-live="polite" data-copy="go install github.com/mkuckert/mcp-commands@latest">Copy</button>
+    <span class="p">$</span><span class="cmd">go install github.com/mkuckert/mcp-commands@latest</span>
+    <button class="copy" aria-live="polite" data-copy="go install github.com/mkuckert/mcp-commands@latest">Copy</button>
   </div>
   <div class="hero-cta">
     <a class="btn btn-primary" href="https://github.com/mkuckert/mcp-commands" target="_blank" rel="noopener">Get it on GitHub
@@ -353,6 +371,50 @@
 <section id="install" class="wrap">
   <div class="sec-head">
     <div class="kicker">Install</div>
+    <h2>One command, three ways.</h2>
+    <p>Homebrew, Go, or a prebuilt release — pick whichever fits your platform.</p>
+  </div>
+  <div class="tabs" role="tablist" aria-label="Installation method">
+    <button class="tab" id="tab-homebrew" role="tab" aria-selected="true" aria-controls="panel-homebrew">Homebrew</button>
+    <button class="tab" id="tab-go" role="tab" aria-selected="false" aria-controls="panel-go">Go</button>
+    <button class="tab" id="tab-release" role="tab" aria-selected="false" aria-controls="panel-release">Release download</button>
+  </div>
+
+  <div class="tabpanel" id="panel-homebrew" role="tabpanel" aria-labelledby="tab-homebrew" tabindex="0">
+    <div class="codebox">
+      <div class="cb-label">Your machine
+        <button class="copy" aria-live="polite" data-copy="brew trust --formula MKuckert/homebrew-tap/mcp-commands&#10;brew install MKuckert/homebrew-tap/mcp-commands">Copy</button>
+      </div>
+      <pre><span class="c-p">$</span> <span class="c-f">brew trust</span> --formula MKuckert/homebrew-tap/mcp-commands
+<span class="c-p">$</span> <span class="c-f">brew install</span> MKuckert/homebrew-tap/mcp-commands</pre>
+    </div>
+    <p class="note">macOS / Linux. The <code>brew trust</code> line is a one-time step required for non-core taps.</p>
+  </div>
+
+  <div class="tabpanel" id="panel-go" role="tabpanel" aria-labelledby="tab-go" tabindex="0" hidden>
+    <div class="codebox">
+      <div class="cb-label">Your machine
+        <button class="copy" aria-live="polite" data-copy="go install github.com/mkuckert/mcp-commands@latest">Copy</button>
+      </div>
+      <pre><span class="c-p">$</span> <span class="c-f">go install</span> github.com/mkuckert/mcp-commands@latest</pre>
+    </div>
+    <p class="note">Requires <a href="https://go.dev/dl/" target="_blank" rel="noopener">Go</a>. The binary lands in <code>$HOME/go/bin</code> (or <code>$GOBIN</code>) — make sure that's on your <code>PATH</code>.</p>
+  </div>
+
+  <div class="tabpanel" id="panel-release" role="tabpanel" aria-labelledby="tab-release" tabindex="0" hidden>
+    <div class="codebox">
+      <div class="cb-label">Your machine
+        <button class="copy" aria-live="polite" data-copy="tar -xzf mcp-commands_0.9.0_linux_amd64.tar.gz">Copy</button>
+      </div>
+      <pre><span class="c-p">$</span> <span class="c-f">tar</span> -xzf mcp-commands_0.9.0_linux_amd64.tar.gz   <span class="c-m"># unzip on Windows</span></pre>
+    </div>
+    <p class="note">Each release ships <code>mcp-commands_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;</code> archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a <code>checksums.txt</code>. Grab the asset for your platform from <a href="https://github.com/mkuckert/mcp-commands/releases" target="_blank" rel="noopener">the releases page</a>, extract it, and put the <code>mcp-commands</code> binary on your <code>PATH</code>.</p>
+  </div>
+</section>
+
+<section id="run" class="wrap" style="background: linear-gradient(180deg, transparent, rgba(15,163,126,0.04), transparent);">
+  <div class="sec-head">
+    <div class="kicker">Run it</div>
     <h2>Two flags. One minute.</h2>
     <p>That's the whole server config: where to run scripts, and where to find them.</p>
   </div>
@@ -378,11 +440,6 @@
 <span class="c-f">}</span></pre>
     </div>
   </div>
-  <div style="text-align:center; margin-top:44px;">
-    <a class="btn btn-primary" href="https://github.com/mkuckert/mcp-commands/releases" target="_blank" rel="noopener">Download a release
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 13h10"/></svg>
-    </a>
-  </div>
 </section>
 
 <footer>
@@ -399,8 +456,9 @@
 </footer>
 
 <script>
-  // copy button
-  const btn = document.getElementById('copy-btn');
+  // copy buttons (all .copy[data-copy] elements)
+  const copyBtns = document.querySelectorAll('.copy[data-copy]');
+  copyBtns.forEach(btn => {
   btn.addEventListener('click', async () => {
     const text = btn.dataset.copy;
     let ok = false;
@@ -417,6 +475,28 @@
     btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
     btn.classList.toggle('ok', ok);
     setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1600);
+  });
+  });
+
+  // install tabs
+  const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+  function selectTab(tab) {
+    tabs.forEach(t => {
+      const sel = t === tab;
+      t.setAttribute('aria-selected', String(sel));
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !sel;
+    });
+  }
+  tabs.forEach((tab, i) => {
+    tab.addEventListener('click', () => selectTab(tab));
+    tab.addEventListener('keydown', e => {
+      let n = null;
+      if (e.key === 'ArrowRight') n = (i + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') n = (i + tabs.length - 1) % tabs.length;
+      else if (e.key === 'Home') n = 0;
+      else if (e.key === 'End') n = tabs.length - 1;
+      if (n !== null) { e.preventDefault(); tabs[n].focus(); selectTab(tabs[n]); }
+    });
   });
 
   // typewriter terminal
