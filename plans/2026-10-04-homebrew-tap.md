@@ -8,7 +8,7 @@ Status: Approved
 ## Scope
 
 - [/] U1: versioned release archive names (breaking URL change) + version bump to 0.9.0
-- [ ] U2: `release.yml` — dispatch `release-bumped` to the tap repo after a successful release
+- [/] U2: `release.yml` — dispatch `release-bumped` to the tap repo after a successful release
 - [ ] U3: create `MKuckert/homebrew-tap` — formula `mcp-commands.rb` @ v0.9.0, tap README, `bump-formula.yml` workflow
 - [ ] U4: main README — brew install section + updated download instructions
 - [ ] U5: cut v0.9.0 release, end-to-end verification (dispatch → formula bump → audit)
