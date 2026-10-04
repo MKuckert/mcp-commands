@@ -16,7 +16,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 - **Dynamic Discovery:** Automatically scans a configured directory for executable files and exposes them as MCP tools.
 - **Hot Reloading (`--watch`):** Add, modify, or remove scripts on the fly. The server detects changes and updates available tools without needing a restart.
 - **Auto-Documentation:** Reads the first few lines of your script for a `Description:` comment and presents it to the LLM to provide context on what the tool does.
-- **Smart Argument Translation:** Safely maps JSON tool arguments from the LLM into POSIX-compliant CLI flags (e.g., `{"force": true, "file": "data.txt"}` becomes `--force --file data.txt`).
+- **Smart Argument Translation:** Validates declared tool parameters, then maps JSON arguments into CLI flags (e.g., with `force` and `file` declared, `{"force": true, "file": "data.txt"}` becomes `--file data.txt --force`; flags are sorted alphabetically).
 - **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and streamable HTTP transport for remote connections.
 - **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces a configurable execution timeout (default 5 minutes, per tool, per server, or disabled) and output limits.
 - **Tagged Output:** Returns the executed script's stdout and stderr wrapped in `<stdout>`/`<stderr>` tags (so the LLM can tell the streams apart). Combined output is capped at 1 MiB, with a trailing truncation notice when the cap is exceeded.

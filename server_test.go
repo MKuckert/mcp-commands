@@ -656,6 +656,7 @@ func TestDiagnosticInputContract(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "ran")
+	writeScript(t, filepath.Join(dir, "empty.sh"), "#!/bin/bash\necho ran >> "+marker+"\n")
 	writeScript(t, filepath.Join(dir, "optional.sh"), "#!/bin/bash\n# Param: flag string required \"old\"\n# Param: flag boolean optional \"new\"\necho ran >> "+marker+"\n")
 	writeScript(t, filepath.Join(dir, "required.sh"), "#!/bin/bash\n# Param: flag boolean optional \"old\"\n# Param: flag string required \"new\"\necho ran >> "+marker+"\n")
 	writeScript(t, filepath.Join(dir, "typed.sh"), "#!/bin/bash\n# Param: path string required \"path\"\n# Param: num number optional \"number\"\n# Param: enabled boolean required \"enabled\"\necho ran >> "+marker+"\nprintf '%s\\n' \"$@\"\n")
@@ -663,6 +664,7 @@ func TestDiagnosticInputContract(t *testing.T) {
 		name, tool, raw, message string
 		valid                    bool
 	}{
+		{"zero_param_undeclared", "empty", `{"admin":true}`, "admin", false},
 		{"undeclared", "typed", `{"path":"ok","enabled":false,"admin":true}`, "admin", false},
 		{"wrong_scalar", "typed", `{"path":42,"enabled":false}`, "path", false},
 		{"wrong_array", "typed", `{"path":[],"enabled":false}`, "path", false},
@@ -670,6 +672,7 @@ func TestDiagnosticInputContract(t *testing.T) {
 		{"required_null", "typed", `{"path":null,"enabled":false}`, "path", false},
 		{"missing_boolean", "typed", `{"path":"ok"}`, "enabled", false},
 		{"last_required", "required", `{}`, "flag", false},
+		{"zero_param_empty", "empty", `{}`, "", true},
 		{"optional_last_wins", "optional", `{}`, "", true},
 		{"required_false_and_precise_number", "typed", `{"path":"ok","enabled":false,"num":9007199254740993}`, "9007199254740993", true},
 		{"exponent", "typed", `{"path":"ok","enabled":false,"num":1.25e+20}`, "1.25e+20", true},

@@ -230,6 +230,7 @@ func TestInputContractViaRegistry(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, dir, defaultToolTimeout, 1)
 	registry.replace([]discoveredTool{
+		{Name: "empty", Path: path},
 		{Name: "optional", Path: path, Params: []paramSpec{{Name: "flag", Type: "string", Required: true}, {Name: "flag", Type: "boolean"}}},
 		{Name: "required", Path: path, Params: []paramSpec{{Name: "flag", Type: "boolean"}, {Name: "flag", Type: "string", Required: true}}},
 		{Name: "typed", Path: path, Params: []paramSpec{{Name: "path", Type: "string", Required: true}, {Name: "num", Type: "number"}, {Name: "enabled", Type: "boolean", Required: true}}},
@@ -253,6 +254,7 @@ func TestInputContractViaRegistry(t *testing.T) {
 		t.Fatal("slot unavailable")
 	}
 	cases := []struct{ name, tool, raw, message string }{
+		{"zero_param_undeclared", "empty", `{"admin":true}`, "admin"},
 		{"undeclared", "typed", `{"path":"ok","enabled":false,"admin":true}`, "admin"},
 		{"wrong_scalar", "typed", `{"path":42,"enabled":false}`, "path"},
 		{"wrong_array", "typed", `{"path":["x"],"enabled":false}`, "path"},
@@ -282,6 +284,7 @@ func TestInputContractViaRegistry(t *testing.T) {
 	}
 	registry.slot.release()
 	for _, tc := range []struct{ tool, raw, output string }{
+		{"empty", `{}`, ""},
 		{"optional", `{}`, ""},
 		{"typed", `{"path":"ok","enabled":false,"num":9007199254740993}`, "9007199254740993"},
 		{"typed", `{"path":"ok","enabled":false,"num":1.25e+20}`, "1.25e+20"},
