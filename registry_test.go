@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -214,8 +216,91 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 		t.Fatalf("expected IsError result, got %#v", result)
 	}
 	text := result.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "missing required parameter: path") {
-		t.Fatalf("expected error message containing 'missing required parameter: path', got %q", text)
+	if !strings.Contains(text, "path") {
+		t.Fatalf("expected error message naming required path, got %q", text)
+	}
+}
+
+func TestInputContractViaRegistry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	path := filepath.Join(dir, "tool.sh")
+	writeScript(t, path, "#!/bin/bash\necho ran >> "+marker+"\nprintf '%s\\n' \"$@\"\n")
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, dir, defaultToolTimeout, 1)
+	registry.replace([]discoveredTool{
+		{Name: "empty", Path: path},
+		{Name: "optional", Path: path, Params: []paramSpec{{Name: "flag", Type: "string", Required: true}, {Name: "flag", Type: "boolean"}}},
+		{Name: "required", Path: path, Params: []paramSpec{{Name: "flag", Type: "boolean"}, {Name: "flag", Type: "string", Required: true}}},
+		{Name: "typed", Path: path, Params: []paramSpec{{Name: "path", Type: "string", Required: true}, {Name: "num", Type: "number"}, {Name: "enabled", Type: "boolean", Required: true}}},
+	})
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	// Occupy the only slot: invalid calls must be rejected before capacity checking.
+	if !registry.slot.tryAcquire() {
+		t.Fatal("slot unavailable")
+	}
+	cases := []struct{ name, tool, raw, message string }{
+		{"zero_param_undeclared", "empty", `{"admin":true}`, "admin"},
+		{"undeclared", "typed", `{"path":"ok","enabled":false,"admin":true}`, "admin"},
+		{"wrong_scalar", "typed", `{"path":42,"enabled":false}`, "path"},
+		{"wrong_array", "typed", `{"path":["x"],"enabled":false}`, "path"},
+		{"wrong_object", "typed", `{"path":{},"enabled":false}`, "path"},
+		{"required_null", "typed", `{"path":null,"enabled":false}`, "path"},
+		{"missing_boolean", "typed", `{"path":"ok"}`, "enabled"},
+		{"last_required", "required", `{}`, "flag"},
+		{"last_optional_wrong_type", "optional", `{"flag":"x"}`, "flag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: json.RawMessage(tc.raw)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result == nil || !result.IsError {
+				t.Fatalf("want validation error, got %#v", result)
+			}
+			text := result.Content[0].(*mcp.TextContent).Text
+			if !strings.Contains(text, tc.message) || strings.Contains(text, "at capacity") {
+				t.Fatalf("validation = %q", text)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("script ran on rejected input: %v", err)
+			}
+		})
+	}
+	registry.slot.release()
+	for _, tc := range []struct{ tool, raw, output string }{
+		{"empty", `{}`, ""},
+		{"optional", `{}`, ""},
+		{"typed", `{"path":"ok","enabled":false,"num":9007199254740993}`, "9007199254740993"},
+		{"typed", `{"path":"ok","enabled":false,"num":1.25e+20}`, "1.25e+20"},
+		{"required", `{"flag":"yes"}`, "yes"},
+	} {
+		result, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: json.RawMessage(tc.raw)})
+		if err != nil || result == nil || result.IsError {
+			t.Fatalf("%s %s: result=%#v err=%v", tc.tool, tc.raw, result, err)
+		}
+		text := result.Content[0].(*mcp.TextContent).Text
+		if !strings.Contains(text, tc.output) {
+			t.Errorf("output %q missing %q", text, tc.output)
+		}
+		if tc.tool == "typed" && strings.Contains(text, "--enabled") {
+			t.Errorf("false boolean emitted a flag: %q", text)
+		}
 	}
 }
 

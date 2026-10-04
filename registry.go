@@ -80,12 +80,18 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 
 		description := registeredDescription(tool.Description, toolTimeout)
 
+		inputSchema := buildInputSchema(tool.Params)
+		validator, err := resolveInputSchema(inputSchema)
+		if err != nil {
+			panic(fmt.Errorf("invalid input schema for tool %q: %w", tool.Name, err))
+		}
+
 		handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			parsedArgs, err := parseToolArguments(req.Params.Arguments)
 			if err != nil {
 				return nil, err
 			}
-			if err := validateRequiredParams(parsedArgs, tool.Params); err != nil {
+			if err := validateToolArguments(parsedArgs, validator); err != nil {
 				return textResult(err.Error(), true), nil
 			}
 			// Capacity check after validation: malformed calls must not
@@ -102,7 +108,7 @@ func (r *toolRegistry) replace(tools []discoveredTool) {
 		r.server.AddTool(&mcp.Tool{
 			Name:        tool.Name,
 			Description: description,
-			InputSchema: buildInputSchema(tool.Params),
+			InputSchema: inputSchema,
 		}, handlerFunc)
 
 		r.names = append(r.names, tool.Name)

@@ -16,7 +16,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 - **Dynamic Discovery:** Automatically scans a configured directory for executable files and exposes them as MCP tools.
 - **Hot Reloading (`--watch`):** Add, modify, or remove scripts on the fly. The server detects changes and updates available tools without needing a restart.
 - **Auto-Documentation:** Reads the first few lines of your script for a `Description:` comment and presents it to the LLM to provide context on what the tool does.
-- **Smart Argument Translation:** Safely maps JSON tool arguments from the LLM into POSIX-compliant CLI flags (e.g., `{"force": true, "file": "data.txt"}` becomes `--force --file data.txt`).
+- **Smart Argument Translation:** Validates declared tool parameters, then maps JSON arguments into CLI flags (e.g., with `force` and `file` declared, `{"force": true, "file": "data.txt"}` becomes `--file data.txt --force`; flags are sorted alphabetically).
 - **Flexible Transport:** Supports standard stdio transport (for standard local MCP clients) and streamable HTTP transport for remote connections.
 - **Safety First:** Prevents shell injection by passing arguments directly to the subprocess via `exec`, avoiding fragile shell evaluation. Enforces a configurable execution timeout (default 5 minutes, per tool, per server, or disabled) and output limits.
 - **Tagged Output:** Returns the executed script's stdout and stderr wrapped in `<stdout>`/`<stderr>` tags (so the LLM can tell the streams apart). Combined output is capped at 1 MiB, with a trailing truncation notice when the cap is exceeded.
@@ -273,7 +273,7 @@ echo "Hello, $NAME!"
 The first 30 lines of a script are scanned once for `Description:`, `Param:`, and `Timeout:` annotations (for `Description:` and `Timeout:` the first occurrence wins and extras are ignored — invalid ones warn; every valid `Param:` line is collected):
 
 - `Description: <text>` — presented to the LLM as the tool description.
-- `Param: <name> <type> <required|optional> "<description>"` — declares a typed tool parameter (`string`, `number`, or `boolean`; the description must be quoted). One line per parameter; invalid lines log a warning to stderr and are skipped. The name must match `^[a-zA-Z][a-zA-Z0-9_-]*$`.
+- `Param: <name> <type> <required|optional> "<description>"` — declares a typed tool parameter (`string`, `number`, or `boolean`; the description must be quoted). One line per parameter; invalid lines log a warning to stderr and are skipped. The name must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Duplicate names use the last declaration's type, description, and required status, at the first declaration's position.
 - `Timeout: <duration>` — overrides the global/default timeout for this tool only. Accepts the same duration format as `--timeout` (e.g. `30s`, `1h 30m 5s`) or `NONE`/`0s` for no deadline.
 
 A fully annotated example:
@@ -291,13 +291,13 @@ This script is registered as a tool with the description `Runs the long-running 
 
 ### Argument Translation Rules
 
-The server translates JSON properties into CLI flags.
+The server validates arguments against the tool's published JSON Schema **before execution** in both MCP and `--call-tool` mode. Only declared parameters are accepted (tools without `Param:` lines accept only `{}`). Values must match their declared `string`, `number`, or `boolean` type; a required parameter cannot be missing or `null`. JSON numbers retain their original decimal spelling, including large integers and exponent notation. A required boolean `false` is valid but emits no flag. The server then translates valid JSON properties into CLI flags.
 
 - **Strings/Numbers:** `{"key": "value"}` ➡️ `--key value`
 - **Booleans:**
   - `{"flag": true}` ➡️ `--flag` (no value, just the flag)
   - `{"flag": false}` ➡️ _(omitted entirely)_
-- **Arrays:** `{"items": ["a", "b"]}` ➡️ `--items a --items b`
+- **Arrays:** Not accepted by declared tool parameters (`string`, `number`, and `boolean` only).
 - **Security:** Keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. Invalid keys are rejected to prevent injection.
 - **Deterministic ordering:** Keys are sorted alphabetically before translation, so the CLI flag order is stable and never reflects the LLM's JSON object key order.
 
@@ -349,7 +349,7 @@ building with release
 </stdout>
 
 $ mcp-commands --dir . --scripts ./scripts --call-tool build
-missing required parameter: profile
+invalid tool arguments: validating root: missing properties: 'profile'
 ```
 
 The first example's `build.sh` parses the translated `--profile release` flag
@@ -386,9 +386,7 @@ required-parameter validation before the script starts.
   is printed to stderr. `--watch` is *honored* with `--list-tools` — it is
   the live-list mode described above and never listed as ignored there.
 
-Inherited quirk, same as server mode: a parameter name declared more than
-once is last-wins in the schema, but validation enforces *any* `required`
-declaration of that name.
+Duplicate parameter names use the last declaration consistently for the schema, list, and validation.
 
 ## Troubleshooting
 

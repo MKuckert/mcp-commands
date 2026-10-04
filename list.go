@@ -61,17 +61,10 @@ func listParamDecl(p paramSpec) string {
 // required array keeps first-occurrence order) — so the signature always
 // matches the registered schema. A tool with no parameters renders as name().
 func toolListSignature(name string, params []paramSpec) string {
-	decls := make(map[string]string, len(params))
-	order := make([]string, 0, len(params))
-	for _, p := range params {
-		if _, seen := decls[p.Name]; !seen {
-			order = append(order, p.Name)
-		}
-		decls[p.Name] = listParamDecl(p) // last occurrence wins
-	}
-	parts := make([]string, len(order))
-	for i, n := range order {
-		parts[i] = decls[n]
+	normalized := normalizeParams(params)
+	parts := make([]string, len(normalized))
+	for i, p := range normalized {
+		parts[i] = listParamDecl(p)
 	}
 	return name + "(" + strings.Join(parts, ", ") + ")"
 }

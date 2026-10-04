@@ -546,7 +546,7 @@ func TestRunCallTool(t *testing.T) {
 	})
 
 	t.Run("success_code_0_stdout_carries_output", func(t *testing.T) {
-		code, err, stdout := run("ok", `{"x":"y"}`, 5*time.Minute)
+		code, err, stdout := run("ok", `{}`, 5*time.Minute)
 		if err != nil {
 			t.Fatalf("runCallTool returned error: %v", err)
 		}
@@ -582,7 +582,7 @@ func TestRunCallTool(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("code = %d, want 1", code)
 		}
-		if !strings.Contains(stdout, "missing required parameter: path") {
+		if !strings.Contains(stdout, "path") {
 			t.Errorf("stdout = %q, want the validation message", stdout)
 		}
 		if markerExists() {
@@ -652,6 +652,58 @@ func TestRunCallTool(t *testing.T) {
 	})
 }
 
+func TestDiagnosticInputContract(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	writeScript(t, filepath.Join(dir, "empty.sh"), "#!/bin/bash\necho ran >> "+marker+"\n")
+	writeScript(t, filepath.Join(dir, "optional.sh"), "#!/bin/bash\n# Param: flag string required \"old\"\n# Param: flag boolean optional \"new\"\necho ran >> "+marker+"\n")
+	writeScript(t, filepath.Join(dir, "required.sh"), "#!/bin/bash\n# Param: flag boolean optional \"old\"\n# Param: flag string required \"new\"\necho ran >> "+marker+"\n")
+	writeScript(t, filepath.Join(dir, "typed.sh"), "#!/bin/bash\n# Param: path string required \"path\"\n# Param: num number optional \"number\"\n# Param: enabled boolean required \"enabled\"\necho ran >> "+marker+"\nprintf '%s\\n' \"$@\"\n")
+	for _, tc := range []struct {
+		name, tool, raw, message string
+		valid                    bool
+	}{
+		{"zero_param_undeclared", "empty", `{"admin":true}`, "admin", false},
+		{"undeclared", "typed", `{"path":"ok","enabled":false,"admin":true}`, "admin", false},
+		{"wrong_scalar", "typed", `{"path":42,"enabled":false}`, "path", false},
+		{"wrong_array", "typed", `{"path":[],"enabled":false}`, "path", false},
+		{"wrong_object", "typed", `{"path":{},"enabled":false}`, "path", false},
+		{"required_null", "typed", `{"path":null,"enabled":false}`, "path", false},
+		{"missing_boolean", "typed", `{"path":"ok"}`, "enabled", false},
+		{"last_required", "required", `{}`, "flag", false},
+		{"zero_param_empty", "empty", `{}`, "", true},
+		{"optional_last_wins", "optional", `{}`, "", true},
+		{"required_false_and_precise_number", "typed", `{"path":"ok","enabled":false,"num":9007199254740993}`, "9007199254740993", true},
+		{"exponent", "typed", `{"path":"ok","enabled":false,"num":1.25e+20}`, "1.25e+20", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(marker)
+			var stdout, stderr bytes.Buffer
+			code, err := runCallTool(liveEnvFor(t, &stdout, &stderr), dir, dir, defaultToolTimeout, tc.tool, tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.valid != (code == 0) {
+				t.Fatalf("code=%d output=%q warnings=%q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.message) {
+				t.Errorf("output %q missing %q", stdout.String(), tc.message)
+			}
+			_, statErr := os.Stat(marker)
+			if tc.valid && statErr != nil {
+				t.Errorf("valid call never ran: %v", statErr)
+			}
+			if !tc.valid && !os.IsNotExist(statErr) {
+				t.Errorf("invalid call ran: %v", statErr)
+			}
+			if tc.tool == "typed" && tc.valid && strings.Contains(stdout.String(), "--enabled") {
+				t.Errorf("false emitted flag: %q", stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunDiagnosticCallTool(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -678,7 +730,7 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 
 	t.Run("runs_tool_and_prints_ignored_flags_notice", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{"x":"y"}`, timeout: defaultToolTimeout, ignoredFlags: []string{"--host", "--watch"}})
+		code := runDiagnostic(liveEnvFor(t, &stdout, &stderr), diagnostic{dir: tmpDir, scriptsDir: scriptsDir, watch: true, callTool: "ok", callToolSet: true, params: `{}`, timeout: defaultToolTimeout, ignoredFlags: []string{"--host", "--watch"}})
 		if code != 0 {
 			t.Fatalf("code = %d, want 0 (stderr: %s)", code, stderr.String())
 		}

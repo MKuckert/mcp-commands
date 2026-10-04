@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,32 @@ func TestParseToolArgumentsRejectsDoubleEncodedJSON(t *testing.T) {
 	}
 }
 
+func TestParseToolArgumentsPreservesNumbers(t *testing.T) {
+	t.Parallel()
+	args, err := parseToolArguments([]byte(`{"big":9007199254740993,"exponent":1.25e+20}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"big": "9007199254740993", "exponent": "1.25e+20"} {
+		if got, ok := args[key].(json.Number); !ok || got.String() != want {
+			t.Errorf("%s = %v (%T), want json.Number(%q)", key, args[key], args[key], want)
+		}
+	}
+}
+
+func TestNormalizeParams(t *testing.T) {
+	t.Parallel()
+	params := []paramSpec{
+		{Name: "a", Type: "string", Required: true},
+		{Name: "b", Type: "number", Required: true},
+		{Name: "a", Type: "boolean"},
+	}
+	want := []paramSpec{params[2], params[1]}
+	if got := normalizeParams(params); !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalizeParams = %v, want %v", got, want)
+	}
+}
+
 func TestBuildInputSchema(t *testing.T) {
 	t.Parallel()
 	t.Run("zero_params", func(t *testing.T) {
@@ -64,6 +91,9 @@ func TestBuildInputSchema(t *testing.T) {
 
 		if _, hasRequired := decoded["required"]; hasRequired {
 			t.Error("expected 'required' key to be absent, but it was present")
+		}
+		if decoded["additionalProperties"] != false {
+			t.Errorf("zero-param schema must reject undeclared keys: %s", schema)
 		}
 	})
 
