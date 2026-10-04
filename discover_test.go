@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -552,6 +554,42 @@ echo "Hello"
 	})
 }
 
+// createFIFO stages an executable FIFO at path, skipping when the
+// platform has no mkfifo.
+func createFIFO(t *testing.T, path string) {
+	t.Helper()
+	if out, err := exec.Command("mkfifo", path).CombinedOutput(); err != nil {
+		t.Skipf("mkfifo unavailable: %v: %s", err, out)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("failed to chmod fifo %s: %v", path, err)
+	}
+}
+
+type discoverResult struct {
+	tools []discoveredTool
+	err   error
+}
+
+// discoverToolsBounded runs discoverTools in a goroutine and fails the test
+// if it does not return within the bound — the in-process equivalent of the
+// process-deadline proof for the FIFO hang.
+func discoverToolsBounded(t *testing.T, dir string) discoverResult {
+	t.Helper()
+	resCh := make(chan discoverResult, 1)
+	go func() {
+		tools, err := discoverTools(dir, io.Discard)
+		resCh <- discoverResult{tools, err}
+	}()
+	select {
+	case res := <-resCh:
+		return res
+	case <-time.After(10 * time.Second):
+		t.Fatal("discoverTools did not return within 10 s — discovery is blocked on a non-regular file")
+		return discoverResult{}
+	}
+}
+
 // TestDiscoverSymlinkToDirectory: a symlink whose target is a directory
 // passes the entry-level IsDir check (it does not follow links) and
 // directories carry execute bits, so it must be rejected on its resolved
@@ -577,5 +615,177 @@ func TestDiscoverSymlinkToDirectory(t *testing.T) {
 	}
 	if len(tools) != 1 || tools[0].Name != "real" {
 		t.Fatalf("discovered %v, want [real] only — the symlink-to-directory must not register", names)
+	}
+}
+
+// TestDiscoverSkipsFIFO: an executable FIFO used to pass the exec-bit check
+// and os.Open blocked forever (REVIEW H1). The regular-file predicate must
+// reject it before any open; the deadline bounds the whole test so a
+// regression fails fast instead of hanging.
+func TestDiscoverSkipsFIFO(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "real.sh"), "#!/bin/bash\necho real\n")
+	createFIFO(t, filepath.Join(tmpDir, "fifo.sh"))
+
+	res := discoverToolsBounded(t, tmpDir)
+	if res.err != nil {
+		t.Fatalf("discoverTools failed: %v", res.err)
+	}
+	if len(res.tools) != 1 || res.tools[0].Name != "real" {
+		t.Fatalf("discovered %d tools, want [real] only — the executable FIFO must not register", len(res.tools))
+	}
+}
+
+// TestDiscoverSkipsSymlinkToFIFO: EvalSymlinks resolves the link to the
+// FIFO, so the same regular-file predicate applies to the target.
+func TestDiscoverSkipsSymlinkToFIFO(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "real.sh"), "#!/bin/bash\necho real\n")
+	fifoPath := filepath.Join(tmpDir, "outside_fifo")
+	createFIFO(t, fifoPath)
+	if err := os.Symlink(fifoPath, filepath.Join(tmpDir, "fifo_link.sh")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	res := discoverToolsBounded(t, tmpDir)
+	if res.err != nil {
+		t.Fatalf("discoverTools failed: %v", res.err)
+	}
+	if len(res.tools) != 1 || res.tools[0].Name != "real" {
+		t.Fatalf("discovered %d tools, want [real] only — the symlink-to-FIFO must not register", len(res.tools))
+	}
+}
+
+// TestIsToolFile: the discovery predicate itself.
+func TestIsToolFile(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("asserts Unix permission-bit semantics")
+	}
+	tmpDir := t.TempDir()
+	execPath := filepath.Join(tmpDir, "exec")
+	writeScript(t, execPath, "#!/bin/bash\necho hi\n")
+	execInfo, err := os.Stat(execPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !isToolFile(execInfo, "exec") {
+		t.Error("executable regular file must be a tool file")
+	}
+
+	nonExecPath := filepath.Join(tmpDir, "noexec")
+	if err := os.WriteFile(nonExecPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	nonExecInfo, err := os.Stat(nonExecPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if isToolFile(nonExecInfo, "noexec") {
+		t.Error("non-executable regular file must not be a tool file")
+	}
+
+	fifoPath := filepath.Join(tmpDir, "fifo")
+	createFIFO(t, fifoPath)
+	fifoInfo, err := os.Stat(fifoPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if isToolFile(fifoInfo, "fifo") {
+		t.Error("FIFO must not be a tool file")
+	}
+
+	subDir := filepath.Join(tmpDir, "adir")
+	if err := os.Mkdir(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dirInfo, err := os.Stat(subDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if isToolFile(dirInfo, "adir") {
+		t.Error("directory must not be a tool file")
+	}
+}
+
+// TestIsWindowsExecutable: the Windows half of the predicate, testable on
+// any host because it depends only on the name.
+func TestIsWindowsExecutable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"tool.exe", true},
+		{"tool.EXE", true},
+		{"tool.com", true},
+		{"tool.bat", true},
+		{"tool.cmd", true},
+		{"tool.ps1", false},
+		{"tool.js", false},
+		{"tool.py", false},
+		{"noext", false},
+	}
+	for _, tc := range cases {
+		if got := isWindowsExecutable(tc.name); got != tc.want {
+			t.Errorf("isWindowsExecutable(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestExtractFrontmatterOversizedLine: a frontmatter line beyond the
+// scanner's 64 KiB buffer aborts the scan; the incompleteness must be
+// disclosed (REVIEW M3), and the metadata read before the abort survives.
+func TestExtractFrontmatterOversizedLine(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	content := "#!/bin/bash\n# Description: captured\n" + strings.Repeat("x", 70000) + "\n# Param: after string required \"after the oversized line\"\n"
+	path := filepath.Join(tmpDir, "big.sh")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var buf bytes.Buffer
+	desc, params, _ := extractFrontmatter(path, &buf)
+
+	if desc != "captured" {
+		t.Errorf("description read before the oversized line lost, got %q", desc)
+	}
+	if len(params) != 0 {
+		t.Errorf("metadata after the aborted scan must not be read, got %d params", len(params))
+	}
+	if !strings.Contains(buf.String(), "incomplete") {
+		t.Errorf("warning %q does not disclose the incomplete frontmatter", buf.String())
+	}
+	if !strings.Contains(buf.String(), filepath.Base(path)) {
+		t.Errorf("warning %q does not name the file", buf.String())
+	}
+}
+
+// TestExtractFrontmatterScanWindowBoundary: line 30 is inside the advertised
+// window, line 31 is not, with no slack between the two.
+func TestExtractFrontmatterScanWindowBoundary(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	lines := []string{"#!/bin/bash"}
+	for i := 0; i < 28; i++ {
+		lines = append(lines, "# pad")
+	}
+	lines = append(lines, "# Param: inside string required \"on line 30\"")
+	lines = append(lines, "# Param: outside string required \"on line 31\"")
+	path := filepath.Join(tmpDir, "boundary.sh")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, params, _ := extractFrontmatter(path, io.Discard)
+
+	if len(params) != 1 {
+		t.Fatalf("expected 1 param, got %d: %#v", len(params), params)
+	}
+	if params[0].Name != "inside" {
+		t.Errorf("expected the line-30 param, got %q", params[0].Name)
 	}
 }
