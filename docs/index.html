@@ -96,14 +96,6 @@
   .sub { color: var(--muted); font-size: 1.15rem; max-width: 640px; margin: 0 auto 34px; }
   .sub code { font-family: var(--mono); font-size: 0.9em; color: var(--teal-bright); background: var(--teal-dim); padding: 1px 6px; border-radius: 5px; }
 
-  .install {
-    display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
-    font-family: var(--mono); font-size: 0.95rem;
-    background: var(--bg-soft); border: 1px solid var(--card-border);
-    border-radius: 12px; padding: 12px 16px; margin-bottom: 26px;
-  }
-  .install .p { color: var(--teal-bright); user-select: none; }
-  .install .cmd { color: var(--text); }
   .copy {
     cursor: pointer; border: 1px solid var(--card-border); background: rgba(255,255,255,0.05);
     color: var(--muted); border-radius: 8px; padding: 6px 12px; font-size: 0.78rem; font-weight: 600; transition: all .15s;
@@ -248,12 +240,11 @@
     A lightweight <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener" style="color:var(--teal-bright)">Model Context Protocol</a> server that turns any executable script into a native MCP tool —
     no boilerplate servers, no SDKs, <code>Bash</code>, <code>Python</code>, <code>Node</code>, <code>Ruby</code>… anything with a shebang is a candidate.
   </p>
-  <div class="install">
-    <span class="p">$</span><span class="cmd">go install github.com/mkuckert/mcp-commands@latest</span>
-    <button class="copy" aria-live="polite" data-copy="go install github.com/mkuckert/mcp-commands@latest">Copy</button>
-  </div>
   <div class="hero-cta">
-    <a class="btn btn-primary" href="https://github.com/mkuckert/mcp-commands" target="_blank" rel="noopener">Get it on GitHub
+    <a class="btn btn-primary" href="#install">Install
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v9M4.5 7.5L8 11l3.5-3.5M3 13h10"/></svg>
+    </a>
+    <a class="btn btn-ghost" href="https://github.com/mkuckert/mcp-commands" target="_blank" rel="noopener">GitHub
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
     </a>
     <a class="btn btn-ghost" href="#how">See how it works</a>
