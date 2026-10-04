@@ -45,6 +45,7 @@ type liveEnv struct {
 	resolveWrapWidth func(stdout io.Writer) int
 	clearScreen      func(stdout io.Writer)
 	notifySignals    func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc)
+	newWatcher       func() (*fsnotify.Watcher, error)
 	watcherErrors    func(w *fsnotify.Watcher) <-chan error
 }
 
@@ -55,6 +56,7 @@ func prodLiveEnv() liveEnv {
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals:    prodNotifySignals,
+		newWatcher:       prodNewWatcher,
 		watcherErrors:    prodWatcherErrors,
 	}
 }
@@ -85,12 +87,17 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent)
 	registry.replace(tools)
 
+	// --watch is an explicit request: a setup failure, or a fatal mid-run
+	// watch termination (channel closure), ends the process with an error
+	// rather than serving a permanently stale tool snapshot. Only signal
+	// cancellation exits cleanly.
+	var watchDone <-chan error
 	if cfg.watch {
+		watchCh := make(chan error, 1)
 		go func() {
-			if err := watchTools(sigCtx, env, scriptsAbs, registry, tools); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
-			}
+			watchCh <- watchTools(sigCtx, env, scriptsAbs, registry, tools)
 		}()
+		watchDone = watchCh
 	}
 
 	if cfg.port > 0 {
@@ -121,15 +128,23 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			_ = serverHTTP.Shutdown(shutdownCtx)
 		}()
 
+		serve := serverHTTP.ListenAndServe
+		if cfg.tlsCert != "" {
+			serve = func() error { return serverHTTP.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
+		}
+
+		serveDone := make(chan error, 1)
+		go func() {
+			serveDone <- serve()
+		}()
+
 		var notes []string
 		if cfg.apiKey.Token != "" {
 			notes = append(notes, "API key auth enabled")
 		} else if !isLoopbackHost(cfg.host) {
 			notes = append(notes, "UNAUTHENTICATED")
 		}
-		serve := serverHTTP.ListenAndServe
 		if cfg.tlsCert != "" {
-			serve = func() error { return serverHTTP.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
 			notes = append(notes, "TLS")
 		}
 		if cfg.cors.enabled() {
@@ -140,12 +155,32 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
 		fmt.Fprintf(env.stderr, "%s\n", line)
-		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		select {
+		case <-sigCtx.Done():
+		case err := <-watchDone:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(env.stderr, "Error: %v\n", err)
+				cancel()
+				<-serveDone
+				return fmt.Errorf("failed to watch scripts directory: %w", err)
+			}
+		}
+		cancel()
+		if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", err)
 		}
 		return nil
 	}
 
 	fmt.Fprintf(env.stderr, "Starting stdio server\n")
+	select {
+	case <-sigCtx.Done():
+	case err := <-watchDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(env.stderr, "Error: %v\n", err)
+			cancel()
+			return fmt.Errorf("failed to watch scripts directory: %w", err)
+		}
+	}
 	return server.Run(sigCtx, &mcp.StdioTransport{})
 }

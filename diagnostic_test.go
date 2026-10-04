@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func TestRunDiagnosticListTools(t *testing.T) {
@@ -174,6 +177,26 @@ func TestRunDiagnosticListTools(t *testing.T) {
 			}
 		case <-time.After(time.Second):
 			t.Fatal("live mode did not stop after cancel")
+		}
+	})
+
+	t.Run("watch_setup_failure_exit_1", func(t *testing.T) {
+		scriptsDir := t.TempDir()
+		scriptPath := filepath.Join(scriptsDir, "alpha.sh")
+		writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
+
+		var stdout, stderr bytes.Buffer
+		env := liveEnvFor(t, &stdout, &stderr)
+		env.newWatcher = func() (*fsnotify.Watcher, error) {
+			return nil, errors.New("inotify unavailable")
+		}
+
+		code := runDiagnostic(env, diagnostic{dir: scriptsDir, scriptsDir: scriptsDir, listTools: true, watch: true, timeout: defaultToolTimeout})
+		if code != 1 {
+			t.Fatalf("exit code = %d, want 1 for a watch setup failure", code)
+		}
+		if !strings.Contains(stderr.String(), "Error: watch loop stopped") {
+			t.Errorf("stderr = %q, want the visible watch failure", stderr.String())
 		}
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -345,7 +346,7 @@ func TestWatchChanges(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
 	// Re-write until the change is observed: the first write can race the
@@ -391,7 +392,7 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
 	time.Sleep(500 * time.Millisecond) // several debounce windows, no events
@@ -405,8 +406,8 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("watchChanges did not stop after cancel")
 	}
-	if n := calls.Load(); n != 0 {
-		t.Errorf("onChange fired %d times with zero events, want 0", n)
+	if n := calls.Load(); n != 1 {
+		t.Errorf("onChange fired %d times, want 1 (guaranteed post-readiness rescan)", n)
 	}
 }
 
@@ -494,7 +495,7 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 
 	var calls atomic.Int32
 	go func() {
-		_ = watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
+		_ = watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
 	// The first rename can race watcher registration (a lost event is legal
@@ -543,7 +544,7 @@ func TestWatchChangesPermissionError(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
+		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
 	}()
 
 	// Let the loop arm, then deliver the synthetic watcher error.
@@ -688,5 +689,231 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("watchTools did not stop after cancel")
+	}
+}
+
+// TestWatchToolsChangeBeforeWatcherReady (H3) verifies that a change landing
+// between the caller's initial discovery and the watcher's readiness is not
+// lost: the guaranteed post-readiness rescan picks it up even though no
+// watcher event was ever delivered for it.
+func TestWatchToolsChangeBeforeWatcherReady(t *testing.T) {
+	t.Parallel()
+	registry, clientSession := newTestRegistryClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+
+	tmpDir := t.TempDir()
+	script := filepath.Join(tmpDir, "alpha.sh")
+	writeScript(t, script, "#!/bin/bash\nDescription: alpha\necho alpha\n")
+
+	tools, err := discoverTools(tmpDir, env.stderr)
+	if err != nil {
+		t.Fatalf("discoverTools: %v", err)
+	}
+	registry.replace(tools)
+	// The change lands in the gap: after discovery, before the watcher below
+	// is ready. No file event will be delivered for it.
+	writeScript(t, script, "#!/bin/bash\nDescription: alpha v2\necho alpha\n")
+
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(ctx, env, tmpDir, registry, tools)
+	}()
+	defer cancel()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v2") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("change in the discovery-to-ready gap was lost; description = %q", listDescription(t, ctx, clientSession, "alpha"))
+}
+
+// TestWatchToolsDeletedDirRecreated (H4) verifies that deleting and
+// recreating the watched scripts directory is recovered: the parent watch
+// observes the recreation, re-attaches the directory watch, and a new script
+// inside the new inode is picked up.
+func TestWatchToolsDeletedDirRecreated(t *testing.T) {
+	t.Parallel()
+	registry, clientSession := newTestRegistryClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+
+	tmpDir := t.TempDir()
+	alpha := filepath.Join(tmpDir, "alpha.sh")
+	writeScript(t, alpha, "#!/bin/bash\necho alpha\n")
+
+	tools, err := discoverTools(tmpDir, env.stderr)
+	if err != nil {
+		t.Fatalf("discoverTools: %v", err)
+	}
+	registry.replace(tools)
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(ctx, env, tmpDir, registry, tools)
+	}()
+	defer cancel()
+
+	// Delete and recreate the scripts directory, then add a new script.
+	os.Remove(alpha)
+	os.Remove(tmpDir)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	writeScript(t, filepath.Join(tmpDir, "beta.sh"), "#!/bin/bash\necho beta\n")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listNames(t, ctx, clientSession), "beta") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if names := listNames(t, ctx, clientSession); !strings.Contains(names, "beta") {
+		t.Fatalf("registry did not recover after dir delete/recreate; tools = %s", names)
+	}
+}
+
+// TestWatchToolsExternalSymlinkTargetChange (M11) verifies that editing the
+// target of a symlinked tool whose target lives outside the scripts directory
+// refreshes the registered tool: the target is watched directly.
+func TestWatchToolsExternalSymlinkTargetChange(t *testing.T) {
+	t.Parallel()
+	registry, clientSession := newTestRegistryClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+
+	root := t.TempDir()
+	scriptsDir := filepath.Join(root, "scripts")
+	extDir := filepath.Join(root, "external")
+	os.MkdirAll(scriptsDir, 0o755)
+	os.MkdirAll(extDir, 0o755)
+	target := filepath.Join(extDir, "alpha.sh")
+	writeScript(t, target, "#!/bin/bash\nDescription: alpha\necho alpha\n")
+	os.Symlink(target, filepath.Join(scriptsDir, "alpha"))
+
+	tools, err := discoverTools(scriptsDir, env.stderr)
+	if err != nil {
+		t.Fatalf("discoverTools: %v", err)
+	}
+	registry.replace(tools)
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(ctx, env, scriptsDir, registry, tools)
+	}()
+	defer cancel()
+
+	// Edit the external target directly.
+	writeScript(t, target, "#!/bin/bash\nDescription: alpha v2\necho alpha\n")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v2") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "v2") {
+		t.Fatalf("external target edit not observed; description = %q", got)
+	}
+}
+
+// newTestRegistryClient builds a registry plus an in-memory MCP client
+// session bound to it (the pattern shared by the other watch tools tests).
+func newTestRegistryClient(t *testing.T) (*toolRegistry, *mcp.ClientSession) {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 2*time.Second, 16)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect failed: %v", err)
+	}
+	t.Cleanup(func() { serverSession.Close() })
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect failed: %v", err)
+	}
+	t.Cleanup(func() { clientSession.Close() })
+	return registry, clientSession
+}
+
+func listNames(t *testing.T, ctx context.Context, s *mcp.ClientSession) string {
+	t.Helper()
+	res, err := s.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	names := make([]string, len(res.Tools))
+	for i, tool := range res.Tools {
+		names[i] = tool.Name
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+func listDescription(t *testing.T, ctx context.Context, s *mcp.ClientSession, name string) string {
+	t.Helper()
+	res, err := s.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools failed: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			return tool.Description
+		}
+	}
+	return "<missing>"
+}
+
+// TestWatchChangesWatcherSetupFailure (M4) verifies that a watcher creation
+// failure is returned as an error (fatal) instead of being swallowed.
+func TestWatchChangesWatcherSetupFailure(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+	env.newWatcher = func() (*fsnotify.Watcher, error) {
+		return nil, errors.New("inotify unavailable")
+	}
+	tmpDir := t.TempDir()
+	err := watchChanges(ctx, env, tmpDir, func() []string { return nil })
+	if err == nil || !strings.Contains(err.Error(), "inotify unavailable") {
+		t.Fatalf("setup failure not surfaced; err = %v", err)
+	}
+}
+
+// TestWatchChangesChannelClosed (M4) verifies that a broken watcher channel
+// is returned as an error (fatal) instead of being swallowed.
+func TestWatchChangesChannelClosed(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+	tmpDir := t.TempDir()
+	// Pre-close the watcher: watchChanges' setup Add fails, surfacing the
+	// broken watcher as a setup error.
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	w.Close()
+	env.newWatcher = func() (*fsnotify.Watcher, error) { return w, nil }
+	done := make(chan error, 1)
+	go func() { done <- watchChanges(ctx, env, tmpDir, func() []string { return nil }) }()
+	select {
+	case err := <-done:
+		if err == nil || err == context.Canceled {
+			t.Fatalf("broken watcher not surfaced as fatal; err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchChanges did not return for a closed watcher")
 	}
 }

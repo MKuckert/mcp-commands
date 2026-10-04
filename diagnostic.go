@@ -128,9 +128,11 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 // runListTools is the --list-tools diagnostic: discover and print the tool
 // list (renderToolList, width re-queried at every print) to stdout, then
 // exit 0. With watch it becomes a live list: after the initial print, every
-// debounced change to the scripts directory clears the screen (TTY only) and
+// debounced change that alters the tool set clears the screen (TTY only) and
 // re-prints the full list with the existing per-scan stderr warnings, until
-// the process is signaled. Path resolution errors are a startup failure
+// the process is signaled. A watch setup failure or a fatal watch
+// termination (not signal cancellation) is an operational failure: stderr
+// "Error:" line, exit 1. Path resolution errors are a startup failure
 // (stderr, exit 1).
 func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
 	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
@@ -160,16 +162,38 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 	sigCtx, cancel := env.notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := watchChanges(sigCtx, env, scriptsAbs, func() {
-		env.clearScreen(env.stdout)
-		tools, err := discoverTools(scriptsAbs, env.stderr)
+	// Re-prints only when the discovered set differs from the last printed
+	// one: the guaranteed post-readiness rescan (and any other no-op rescan)
+	// therefore stays silent. Symlink targets outside the directory are
+	// watched directly so external-target edits re-print.
+	lastPrinted := tools
+	var lastTargets []string
+	rescan := func() []string {
+		newTools, err := discoverTools(scriptsAbs, env.stderr)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
-			return
+			return lastTargets
 		}
-		printList(tools)
-	}); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
+		newTargets := externalTargets(newTools, scriptsAbs)
+		// Re-render only when the visible state changed: identical sets leave
+		// the screen exactly as it is (live mode stays completely silent).
+		if !toolsEqual(lastPrinted, newTools) || !stringSlicesEqual(lastTargets, newTargets) {
+			env.clearScreen(env.stdout)
+			printList(newTools)
+		}
+		lastPrinted = newTools
+		lastTargets = newTargets
+		return lastTargets
+	}
+
+	// A watch failure is a real failure: the live list would silently freeze
+	// on a stale snapshot, so the process exits 1 (signal cancellation
+	// exits 0).
+	if err := watchChanges(sigCtx, env, scriptsAbs, rescan); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(env.stderr, "Error: watch loop stopped: %v\n", err)
+			return 1
+		}
 	}
 	return 0
 }
