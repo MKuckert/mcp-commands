@@ -63,7 +63,7 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 			continue
 		}
 
-		if !isToolFile(fileInfo, entry.Name()) {
+		if !isToolFile(fileInfo) {
 			continue
 		}
 
@@ -96,24 +96,28 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 // are skipped — os.Open on an executable FIFO would block discovery
 // forever) and executable. Executability is OS-aware: Unix permission
 // bits, Windows executable extensions (normal file modes never set 0111).
-func isToolFile(fileInfo os.FileInfo, name string) bool {
+// On Windows the extension is taken from the resolved target (fileInfo
+// names it), not the link: alias.exe -> notes.txt must be skipped, alias
+// -> tool.exe must register, because the target is what gets executed.
+func isToolFile(fileInfo os.FileInfo) bool {
 	if !fileInfo.Mode().IsRegular() {
 		return false
 	}
 	if runtime.GOOS == "windows" {
-		return isWindowsExecutable(name)
+		return isWindowsExecutable(fileInfo.Name())
 	}
 	return fileInfo.Mode()&0111 != 0
 }
 
-// windowsExecutableExtensions are the file types os/exec can run on
-// Windows: PE binaries directly, batch files via cmd.exe. Script languages
-// (.ps1, .js) do not self-execute there and are deliberately excluded.
+// windowsExecutableExtensions are the file types the execution path can
+// start directly on Windows (PE binaries via CreateProcess). Batch files
+// (.bat/.cmd) are excluded: CreateProcess only runs them through cmd.exe
+// with a re-parsed command line, and the exec path does not add such a
+// wrapper, so a registered tool would fail or mangle its arguments. Script
+// languages (.ps1, .js) do not self-execute there either.
 var windowsExecutableExtensions = map[string]bool{
 	".exe": true,
 	".com": true,
-	".bat": true,
-	".cmd": true,
 }
 
 func isWindowsExecutable(name string) bool {

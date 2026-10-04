@@ -671,7 +671,7 @@ func TestIsToolFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if !isToolFile(execInfo, "exec") {
+	if !isToolFile(execInfo) {
 		t.Error("executable regular file must be a tool file")
 	}
 
@@ -683,7 +683,7 @@ func TestIsToolFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if isToolFile(nonExecInfo, "noexec") {
+	if isToolFile(nonExecInfo) {
 		t.Error("non-executable regular file must not be a tool file")
 	}
 
@@ -693,7 +693,7 @@ func TestIsToolFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if isToolFile(fifoInfo, "fifo") {
+	if isToolFile(fifoInfo) {
 		t.Error("FIFO must not be a tool file")
 	}
 
@@ -705,13 +705,14 @@ func TestIsToolFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if isToolFile(dirInfo, "adir") {
+	if isToolFile(dirInfo) {
 		t.Error("directory must not be a tool file")
 	}
 }
 
 // TestIsWindowsExecutable: the Windows half of the predicate, testable on
-// any host because it depends only on the name.
+// any host because it depends only on the name. Batch files must be excluded
+// (no cmd.exe wrapper in the exec path); everything else negative.
 func TestIsWindowsExecutable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -721,8 +722,8 @@ func TestIsWindowsExecutable(t *testing.T) {
 		{"tool.exe", true},
 		{"tool.EXE", true},
 		{"tool.com", true},
-		{"tool.bat", true},
-		{"tool.cmd", true},
+		{"tool.bat", false},
+		{"tool.cmd", false},
 		{"tool.ps1", false},
 		{"tool.js", false},
 		{"tool.py", false},
