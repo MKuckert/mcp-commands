@@ -23,7 +23,16 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 
 ## Installation
 
-Ensure you have [Go](https://go.dev/dl/) installed, then run:
+**Homebrew** (macOS/Linux):
+
+```bash
+brew trust --formula MKuckert/homebrew-tap/mcp-commands
+brew install MKuckert/homebrew-tap/mcp-commands
+```
+
+(`brew trust` is required once for non-core taps.)
+
+**Go** — ensure you have [Go](https://go.dev/dl/) installed, then run:
 
 ```bash
 go install github.com/mkuckert/mcp-commands@latest
@@ -31,10 +40,10 @@ go install github.com/mkuckert/mcp-commands@latest
 
 _(Adjust package path based on your repository structure)_
 
-**Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
+**Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<version>_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
 
 ```bash
-tar -xzf mcp-commands_linux_amd64.tar.gz   # unzip on Windows
+tar -xzf mcp-commands_0.9.0_linux_amd64.tar.gz   # unzip on Windows
 ```
 
 ## Usage

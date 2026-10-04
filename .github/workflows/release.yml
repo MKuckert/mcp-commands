@@ -36,3 +36,15 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Notifies the homebrew-tap repo to bump the mcp-commands formula.
+      # Runs with its own token (a PAT with contents read+write on the tap
+      # repo only; stored as the BUMP_TAP_TOKEN secret in this repo).
+      # Must not fail the release if the dispatch itself errors — artifacts
+      # are already published; the tap can be bumped manually.
+      - name: Trigger tap bump
+        if: success()
+        continue-on-error: true
+        run: gh api -X POST repos/MKuckert/homebrew-tap/dispatches -f event=release-bumped -f client_payload[tag]=$GITHUB_REF_NAME
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TAP_TOKEN }}
