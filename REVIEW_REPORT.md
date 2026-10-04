@@ -1,0 +1,100 @@
+# Workspace review — mcp-commands 0.8.3
+
+**Scope:** Go server, tests, CLI, README, website, release configuration. Four independent specialist reviews (documentation; security; Go structure/performance; tests/lifecycle) using `github-copilot/gpt-6-sol`, plus direct source verification. **Review only:** no product-code changes. Findings refer to this workspace snapshot, not the archived 0.7.0 review in `plans/`.
+
+## Verdict (intentionally strict)
+
+| Dimension | Grade | Assessment |
+| --- | --- | --- |
+| Security / deployment | **C−** | Good default remote-auth refusal, bounded output and direct `exec`, but advertised input constraints are not enforced and some opt-in configurations expose substantial risk. |
+| Correctness / lifecycle | **C−** | FIFO discovery can hang; watch registration and directory replacement leave stale tools. |
+| Tests | **C** | Broad happy-path coverage, but missing adversarial inputs and lifecycle transitions. |
+| Maintainability / idiomatic Go | **B−** | Sensible existing source split and dependency injection; avoid another broad refactor. Several contracts are duplicated or misleading. |
+| Documentation | **C−** | Thorough README, but public examples fail as written and safety language overpromises. |
+| Performance / memory | **C** | Tool output/body size and subprocess concurrency bounded; slow HTTP uploads and unbounded startup inputs remain. |
+
+**Overall: C−.** Do not present `Param:` declarations as enforced restrictions until they actually are. The highest-impact problems are small enough to address before expanding the feature set. Exposure is conditional: H1 requires an executable special file, H3/H4 require `--watch`, and browser-origin/cleartext findings require explicit deployment choices. Control of the scripts directory already grants execution as the server user.
+
+**Ranking:** H/M/L = high/medium/low impact; S/M/Lg = small/medium/large implementation effort. Within each impact tier, smaller fixes appear first. Locations are source references; line numbers may move after edits. No default unauthenticated *remote* bind was found: `server.go:256–265` correctly refuses one without the explicit override.
+
+## Ranked findings and proposed changes
+
+| ID | Impact / effort | Evidence and consequence | Proposed change |
+| --- | --- | --- | --- |
+| **H1** | **H / S** | `discover.go:59–77,110–113`: only directories are excluded. An executable FIFO passes and `os.Open` blocks forever. Confirmed locally: `timeout 2s ./mcp-commands --dir <fifo-dir> --scripts <fifo-dir> --list-tools` exited **124**. Also applies to symlinks to FIFOs and watch rescans. | Require `fileInfo.Mode().IsRegular()` before opening; test FIFO and symlink-to-FIFO with process deadline. |
+| **H2** | **H / M** | `registry.go:83–105`, `schema.go:39–73`, `execute.go:167–175`: untyped SDK handler publishes a schema but enforces only presence of required keys. Undeclared flags reach scripts; `{"required":null}` passes then disappears in argument conversion. Scripts with privileged, undeclared flags can therefore be called through them. This is not a shell injection; it is a missing schema/validation contract: whether declarations should restrict extra flags is a policy decision, not existing authorization. | Use a standard JSON Schema validator on the published schema in **both** MCP and `--call-tool`; decide and document whether `additionalProperties` is forbidden (recommended for declared tools). Align missing/null/type/duplicate behavior; reject with a clear result before spawning. |
+| **H3** | **H / M** | `server.go:228–250`, `watch.go:24–33`: startup scans/registers tools *before* asynchronously installing the watch. Changes in that gap are never observed, so stale or absent tools can persist indefinitely. | Install the watcher before the authoritative scan or perform a guaranteed scan after watch readiness. Cover the registration-to-watch gap deterministically. |
+| **H4** | **H / M–Lg** | `watch.go:24–34,48–70,84–99`: deletion/replacement of the watched directory leaves the watch on the old inode. The loop stays alive and may continue serving stale registrations; recreation does not restore watching. `watch_test.go:415–479` tests survival, not recovery. | Watch the parent and reattach/rescan on replacement, or terminate the watch with an explicit unhealthy/fatal status and restart it. Test delete → recreate → add/revoke. |
+| **H5** | **H / M** | `.goreleaser.yaml:5–17` ships Windows binaries and `docs/index.html:267` advertises Windows, but `discover.go:72–77` discovers only files with Unix executable permission bits. Normal Windows file modes do not set `0111`, so ordinary `.exe` tools/scripts are skipped. This is inferred from cross-platform file-mode semantics, not exercised on Windows here. | Use OS-aware executable detection (Windows executable extensions/file types, Unix permission bits), and add Windows CI or native smoke tests for `.exe` discovery and invocation. |
+| **M1** | **M / S** | `execute.go:167–175`, `schema.go:43–70`: duplicate `Param:` names use last-wins for the schema, but **any** required declaration wins at runtime. An advertised optional parameter can therefore be rejected when omitted; README notes the quirk (`README.md:380–383`) rather than solving it. | Reject duplicates during discovery with a warning, or normalize once for schema/list/runtime; test both declaration orders. |
+| **M2** | **M / S** | `schema.go:19–23`, `execute.go:68`: default JSON decoding converts numbers to `float64`, losing integer precision (e.g. `9007199254740993`) before passing a CLI value. | `json.Decoder.UseNumber()` and preserve decimal spelling, with a large-integer/scientific-number test. |
+| **M3** | **M / S** | `discover.go:120–157`: `scanner.Err()` is ignored, so an oversized frontmatter line yields an incomplete tool definition without warning. `Scan()` also reads one line beyond the advertised 30-line scan. | Test line limit and oversized line; check scanner error and report it. Avoid registering silently incomplete metadata. |
+| **M4** | **M / S** | `server.go:207–218,247–251`: unexpected watch failure only prints a warning; server serves a stale snapshot, while `--list-tools --watch` returns exit **0** when watching fails. | Propagate failure to health/exit status (nonzero diagnostic exit), or visibly enter a supervised retry/degraded state; inject watcher setup/closure faults in tests. |
+| **M5** | **M / S** | `flags.go:233–238`, `registry.go:44–49`, `server.go:255`: negative ports silently select stdio (ports above 65535 instead fail at HTTP bind); excessive `--max-concurrent` can allocate a huge channel or panic. `http.go:63–75` reads a token file without a size bound; an empty file silently falls back to the environment/no auth. | Validate port `0..65535` and a documented practical concurrency ceiling; limit token-file bytes and reject empty explicit token files. Add CLI tests. |
+| **M6** | **M / S** | `http.go:260–281`, `server.go:256–265`: `--allow-all-origins` plus unauthenticated loopback intentionally echoes attacker origins and answers unauthenticated preflights. Because this combination has **no configured bearer token for the actual tool call**, an attacker-controlled browser page can submit calls if browser local-network policies permit; preflight bypass does not bypass configured auth. Also `server.go:289–293` permits authenticated non-loopback **cleartext** HTTP: a network observer can steal reusable bearer credentials absent a TLS proxy. README documents these risks, but startup does not distinguish them. | Warn loudly or require explicit opt-in for unauthenticated allow-all; warn for cleartext authenticated remote binds (permit documented TLS proxies). Test warnings/policy decisions. |
+| **M7** | **M / M** | `server.go:266–274`, `http.go:291–314`: `ReadHeaderTimeout` and 10 MiB `MaxBytesReader` do not bound **time** spent slowly uploading a body. Authenticated or explicitly unauthenticated clients can hold many active connections/handlers without consuming tool execution slots. | Bound body-read duration/rate or active request count independently of long tool response time; test stalled partial POST. |
+| **M8** | **M / M** | `registry.go:67–109`: each changed watch scan removes all tools then re-adds all, even unchanged ones. Concurrent calls/listings can see temporary absence or partial lists; registration/notification churn is O(all tools) per change. `replaceIfChanged` only handles identical **whole** sets. | Diff tool sets; only change removed/modified/added tools. Test concurrent `ListTools`/`CallTool` during a changed reload and benchmark large registries. Determine SDK atomic-update support before promising atomicity. |
+| **M9** | **M / S** | Public website examples are not runnable: `docs/index.html:333–336` uses an unset `${source}` instead of parsing `--source`; `:365–366` HTTP command omits required `--dir`/`--scripts` and labels plain HTTP “TLS”; `:374–375` gives literal `~/proj` in argv (no shell expansion). | Replace with executable end-to-end examples using absolute paths, real argument parsing, and cert/key or a clearly named TLS proxy. Smoke-test examples in CI where practical. |
+| **M10** | **M / S** | `.github/workflows/release.yml:27–36` ships on a tag with vulnerability scan but **no test job**; `main.go:12` hardcodes `0.8.3`, and `.goreleaser.yaml:5–17` does not inject a tag version. Other tagged releases can claim the wrong version. | Run `go test ./...` and `go vet ./...` before releasing; inject/verify version from tag (retain `--version` test). |
+| **M11** | **M / S–M** | `discover.go:53–59` allows symlinks to external tool files; `watch.go:30–33` watches only the scripts directory. Editing an external target without touching its link does not refresh its registered description, parameters, or timeout. | Watch external targets or explicitly document that symlink-target changes require touching the link/restart; test external-target edits. |
+| **L1** | **L / S** | `README.md:9`, `docs/index.html:262,280,307`: “sandbox stays the security boundary,” “reliably safe,” “injection-proof” obscure the new remote capability and script-level argument-handling risks. `README.md:170` uses the browser-client origin as the MCP endpoint; `README.md:152–156` claims flags always override env, but `http.go:185–189` falls back when `--allowed-origins=` is explicitly empty. | Define the actual trust boundary; separate browser origin and MCP URL, qualify safety language, document empty-flag precedence or fix it. Cut the obsolete install aside `README.md:32` and non-operational AI provenance `README.md:391–394` if the README aims to be a concise manual. |
+| **L2** | **L / S** | `README.md:216,304–305` says `--list-tools` prints “exactly what the LLM sees”; `list.go:49–69` prints a human-readable signature, not the registered JSON schema. `README.md:163` asserts missing POST Accept header always yields 400, contradicted by the documented curl invocation; specialist observed 200 with `Accept: */*`. `docs/posts/r-localllama.md` contains draft publishing notes under the Pages-deployed `docs/` tree. | Describe list output as a readable rendering, recommend an explicit Accept header without absolute claim, and keep internal drafts outside published docs. |
+| **L3** | **L / S** | `execute_test.go:152–154` sorts individual argv tokens, allowing reordered `--key value` pairs to pass. No precision-loss, FIFO, slow-body, or duplicate-parameter integration tests (each attaches to U1/U2/U4 per the fix units); no benchmarks for watch reload or streaming output. | Compare ordered argv slices; add adversarial and lifecycle tests from the checklist below, plus small benchmarks. |
+| **L4** | **L / S–M** | `server.go:73–220` mixes diagnostic call/list orchestration with server lifecycle; `registry.go:117–125` unlocks before `replace`, allowing duplicate concurrent replacements in theory. Most other files are already focused. | Extract only diagnostics to `diagnostic.go` (and mirrored tests if useful). Keep the equality check/replacement in one critical section if concurrent callers become possible. Avoid splitting small `http.go`/`schema.go` files merely for file count. |
+
+## Fix units — findings clustered by what can be fixed together
+
+Each unit groups findings that share the same files, the same user-facing contract, and the same test surface, so one PR (and one commit history) closes them together. The test matrix items below are attached to the unit that owns the code they verify.
+
+### U1 — Discovery file filter (smallest unit, do first)
+**Findings:** H1, M3. **Files:** `discover.go`, `discover_test.go` only.
+- One predicate change (`fileInfo.Mode().IsRegular()` before the exec-bit check and before `os.Open`), scanner `Err()` handling, and the 30-line boundary fix all land in the same loop.
+- Tests: FIFO, symlink-to-FIFO (bounded by a process deadline), >64 KiB frontmatter line, line-30/31 boundary.
+- Independent of every other unit; unblocks the FIFO tests in the matrix.
+
+### U2 — Enforce the input contract (the security core)
+**Findings:** H2, M1, M2. **Files:** `registry.go`, `schema.go`, `execute.go`, and the shared diagnostic call path (`runCallTool` in `server.go`), tests in `registry_test.go`, `schema_test.go`, `execute_test.go`.
+- One decision (JSON Schema validation, incl. the `additionalProperties` policy) feeds three changes: validate before slot acquisition, normalize duplicate `Param:` declarations once for schema + list + validation, and `UseNumber()` in `parseToolArguments`.
+- Must apply identically to MCP and `--call-tool` — which is exactly why the shared call path belongs in the unit.
+- Tests: undeclared keys, wrong types, required `null`, duplicate declarations in both orders, large-integer precision, required boolean `false` (valid schema value, flag intentionally omitted); fix the token-sorting assertion in `execute_test.go:152–154` (L3) here.
+
+### U3 — Registry churn and watch lifecycle
+**Findings:** H3, H4, M4, M8, M11, L4. **Files:** `watch.go`, `registry.go`, `server.go` (`run`/`runListTools` wiring), `watch_test.go`, `registry_test.go`, new `diagnostic.go`.
+- One reload pipeline: what the watcher observes (install-before-scan H3; delete/recreate reattach H4; symlink targets M11), what a failure means (H4/M4 exit and health status), and what a change costs (per-tool diff M8; `replaceIfChanged` critical section and diagnostics extraction L4). The watcher is the only trigger of the registry diff, so the two halves share every file and test surface.
+- Sequence inside: L4 extraction (behavior-neutral) → M4/H3 wiring → M8 diff → H4 reattach (the one M–Lg piece, last). M11 may end as a documented limitation if watching external targets is rejected — that decision belongs in this unit's PR discussion, not a doc PR.
+- Tests: registration-to-watch gap, delete → recreate → add/revoke, injected watcher faults, external-target edit, `ListTools`/`CallTool` during a changed reload.
+
+### U4 — Configuration and HTTP hardening
+**Findings:** M5, M6, M7. **Files:** `flags.go`, `http.go`, `server.go` (startup policy), `registry.go` (`newExecSlot`), `flags_test.go`, `http_test.go`.
+- All startup posture: fail-fast flag validation (port range, concurrency ceiling, token-file size/empty rules), runtime warnings (unauthenticated allow-all, cleartext remote binds), and the body-read deadline.
+- Tests: flag table, policy-decision table (origin mode × auth × bind × TLS), stalled partial POST.
+
+### U5 — Release pipeline and documentation
+**Findings:** M10, H5's CI leg, M9, L1, L2. **Files:** `.github/workflows/*`, `.goreleaser.yaml`, `Makefile`, `main.go:12`, `README.md`, `docs/`.
+- The non-Go surface: test+vet gate before publish, tag-injected version, Windows smoke test, runnable website examples, corrected README claims, draft move. Bundled because it is the only remaining work, has zero Go code, and must land after U2/U4 anyway (it documents their decisions). The Windows *predicate* from U1 ships with U1, not here — only its CI leg does.
+
+### U6 — Cross-cutting test hygiene (no standalone code unit)
+**Findings:** L3. **Files:** the test files of U1–U5.
+- The adversarial/lifecycle test list and small benchmarks attach to the owning unit above; nothing in L3 is fixable without also changing the code it tests, so it is listed for completeness, not as a work item.
+
+### Suggested merge order
+
+| Order | Unit | Why this position |
+| --- | --- | --- |
+| 1 | U1 | Smallest, independently provable, unblocks tests |
+| 2 | U2 | The security core; changes the contract U5 will document |
+| 3 | U3 | Lifecycle correctness; touches files U2 leaves, independent of U4 |
+| 4 | U4 | Posture hardening; lowest blast radius of the three |
+| 5 | U5 | Pure pipeline/docs; documents what 2 and 4 decided |
+
+## Priority test matrix
+
+1. **Before shipping H1–H4:** FIFO and symlink-to-FIFO discovery bounded by a deadline; MCP **and** diagnostic calls with undeclared name, wrong scalar/array/object type, required `null`, duplicate declarations; test required boolean `false` separately as a valid JSON-schema value whose CLI flag is intentionally omitted; deterministic startup-change window; delete/recreate watched directory and verify both registration and revocation.
+2. **Security/resource edges:** browser-origin/auth-policy combinations; authenticated and unauthenticated slow-body clients, cancellation and connection cleanup; oversized/empty key file; invalid ports and oversized concurrency limit; precision-preserving numeric argument translation.
+3. **Reliability:** scanner lines >64 KiB and line 30/31 boundaries; watcher setup/channel failure and diagnostic exit code; list/call under concurrent changed registry; distinguish intentional no-timeout scripts from leaked detached children.
+4. **Release/docs:** verify each website command and client config with a disposable installation; tag-derived `--version`; release job must fail on a failing test. Benchmark large script directories, reloads, and 16 concurrent capped-output calls. `go test -race` is unsupported in this sandbox (ThreadSanitizer VMA); concurrency assertions and inspection are not a substitute for running it on supported CI.
+
+## What is already sound / limits of this review
+
+- Default binding is loopback; non-loopback unauthenticated bind is explicitly refused. Bearer comparison is constant-time, CORS is opt-in, and subprocess invocation avoids a shell. Execution slots (default 16), 10 MiB HTTP body cap, bounded per-stream capture, and request-header/idle deadlines are already present. Prior 0.7.0 findings about missing caps, stdout limits, or monolithic source **should not be refiled**.
+- `go test ./...` and `go vet ./...` passed using the sandbox's executable Go temp directory (`GOCACHE=/workspace/.goenv/gocache GOPATH=/workspace/.goenv/gopath TMPDIR=/workspace/.goenv/tmp`); specialist also ran a fresh `go test ./... -count=1`. FIFO proof used the existing local binary and a disposable directory. No live public-network penetration test, dependency audit beyond the existing workflow, race detector, or memory/load benchmark was run. Findings that depend on browsers, networks, directory-writer privileges, or SDK concurrency semantics are marked as conditional, not asserted as proven exploits.

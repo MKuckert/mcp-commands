@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -33,7 +34,8 @@ type discoveredTool struct {
 }
 
 // discoverTools scans the given directory for executable files and symlinks
-// resolving to executables. It skips subdirectories and non-executable files.
+// resolving to executables. It skips subdirectories, non-regular files
+// (FIFOs, devices — including symlinks to them), and non-executable files.
 // For each valid executable, it extracts the description and parameters, then
 // constructs a discoveredTool record for later registration with the MCP server.
 func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error) {
@@ -61,16 +63,7 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 			continue
 		}
 
-		// Only regular files are tools. A symlink to a directory fails the
-		// entry.IsDir() check above (that check does not follow links), but
-		// directories carry execute bits, so without this it would be
-		// registered as a tool. The README promises regular files only.
-		if fileInfo.IsDir() {
-			continue
-		}
-
-		// Check executable flag
-		if fileInfo.Mode()&0111 == 0 {
+		if !isToolFile(fileInfo) {
 			continue
 		}
 
@@ -98,6 +91,39 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 	return tools, nil
 }
 
+// isToolFile reports whether a resolved path is a registrable tool file:
+// it must be a regular file (FIFOs, devices, and symlinks to any of them
+// are skipped — os.Open on an executable FIFO would block discovery
+// forever) and executable. Executability is OS-aware: Unix permission
+// bits, Windows executable extensions (normal file modes never set 0111).
+// On Windows the extension is taken from the resolved target (fileInfo
+// names it), not the link: alias.exe -> notes.txt must be skipped, alias
+// -> tool.exe must register, because the target is what gets executed.
+func isToolFile(fileInfo os.FileInfo) bool {
+	if !fileInfo.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return isWindowsExecutable(fileInfo.Name())
+	}
+	return fileInfo.Mode()&0111 != 0
+}
+
+// windowsExecutableExtensions are the file types the execution path can
+// start directly on Windows (PE binaries via CreateProcess). Batch files
+// (.bat/.cmd) are excluded: CreateProcess only runs them through cmd.exe
+// with a re-parsed command line, and the exec path does not add such a
+// wrapper, so a registered tool would fail or mangle its arguments. Script
+// languages (.ps1, .js) do not self-execute there either.
+var windowsExecutableExtensions = map[string]bool{
+	".exe": true,
+	".com": true,
+}
+
+func isWindowsExecutable(name string) bool {
+	return windowsExecutableExtensions[strings.ToLower(filepath.Ext(name))]
+}
+
 // extractFrontmatter reads the first scanHeaderLines lines of a file in a
 // single pass and collects the tool's frontmatter: the first Description:
 // line (first occurrence wins; populates the MCP tool description), all
@@ -106,7 +132,8 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 // on the first Timeout: line even when it is invalid (which logs a stderr
 // warning and yields nil, so the global applies), so later valid values are
 // ignored. nil when undeclared, &0 for NONE/0. An unreadable file yields
-// zero values.
+// zero values. A line exceeding the scanner buffer aborts the scan early and
+// logs a stderr warning; the metadata read so far is returned.
 func extractFrontmatter(filePath string, stderr io.Writer) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -120,7 +147,10 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 	scanner := bufio.NewScanner(file)
 	lineCount := 0
 
-	for scanner.Scan() && lineCount < scanHeaderLines {
+	for lineCount < scanHeaderLines {
+		if !scanner.Scan() {
+			break
+		}
 		lineCount++
 		line := scanner.Text()
 
@@ -152,6 +182,13 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 				params = append(params, param)
 			}
 		}
+	}
+
+	// A frontmatter line at or over the scanner buffer (64 KiB) aborts the
+	// scan early. Surface it: the tool registers with the metadata collected
+	// so far, and the warning makes the incompleteness visible.
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(stderr, "Warning: frontmatter of %s is incomplete (%v); using the metadata read so far\n", filePath, err)
 	}
 
 	return description, params, timeout
