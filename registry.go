@@ -169,19 +169,6 @@ func (r *toolRegistry) replaceIfChanged(tools []discoveredTool) bool {
 	return true
 }
 
-// stringSlicesEqual reports whether two string slices are elementwise equal.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // toolEqual reports whether two discovered tools would register identically:
 // name, path, description (the Timeout pointer compared by value, the Params
 // slice structurally). Name is implicit — the callers index by it.

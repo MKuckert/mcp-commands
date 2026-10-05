@@ -26,8 +26,8 @@ func prodWatcherErrors(w *fsnotify.Watcher) <-chan error { return w.Errors }
 // no distinct parent (it is the filesystem root) — the path watch alone then
 // receives every relevant event. dirScope is set for the scripts directory
 // itself: it is a directory whose *children's* events are relevant (a script
-// file write arrives named by the child, not by the directory), while file
-// targets match events named with their own path. passive marks the parent
+// file write arrives named by the child, not by the directory), while a plain
+// file path matches events named with itself. passive marks the parent
 // observer entries: they exist only so the kernel keeps reporting events on
 // the primary path after its inode is replaced — sibling activity in a
 // parent directory must never arm the debounce.
@@ -155,9 +155,9 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 					}
 				}
 				// Only events named with a watched path itself replace its
-				// inode; child events never do. A recreated directory and a
-				// recreated/replaced target must be re-Added to be visible
-				// again (inotify watches inodes, not paths).
+				// inode; child events never do. A recreated or replaced
+				// watched path must be re-Added to be visible again (inotify
+				// watches inodes, not paths).
 				if event.Name == paths[i].path && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
 					reattach(paths[i].path)
 				}
