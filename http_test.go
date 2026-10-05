@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,6 +22,7 @@ func TestResolveAPIKey(t *testing.T) {
 		file       string // content written to a temp file when fileSet
 		fileSet    bool
 		fileMiss   bool // path set but file missing → error
+		wantErr    bool // any explicit-file error (missing, empty, oversized)
 		env        string
 		want       string
 		wantSource apiKeySource
@@ -30,8 +32,9 @@ func TestResolveAPIKey(t *testing.T) {
 		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file", wantSource: apiKeySourceFile},
 		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantSource: apiKeySourceFlag},
 		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file", wantSource: apiKeySourceFile},
-		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
-		{name: "missing_file_errors", fileMiss: true},
+		{name: "empty_file_errors", file: "\n  \n", fileSet: true, env: "from-env", wantErr: true},
+		{name: "oversized_file_errors", file: strings.Repeat("a", maxAPIKeyFileBytes+1), fileSet: true, wantErr: true},
+		{name: "missing_file_errors", fileMiss: true, wantErr: true},
 		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
 	}
 
@@ -53,9 +56,9 @@ func TestResolveAPIKey(t *testing.T) {
 			}
 
 			got, err := resolveAPIKey(tt.flag, filePath)
-			if tt.fileMiss {
+			if tt.fileMiss || tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected an error for the missing key file, got %v", got)
+					t.Fatalf("expected an error for %s, got %v", tt.name, got)
 				}
 				return
 			}
@@ -668,33 +671,108 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 }
 
+// stallingBody serves one byte, then blocks until Close. It simulates a
+// client that starts a POST and then dribbles nothing.
+type stallingBody struct {
+	once     sync.Once
+	released chan struct{}
+	done     bool
+}
+
+func (s *stallingBody) Read(p []byte) (int, error) {
+	if !s.done {
+		s.done = true
+		if len(p) == 0 {
+			return 0, nil
+		}
+		p[0] = '{' // partial JSON; the rest never arrives
+		return 1, nil
+	}
+	<-s.released // the deadline must fire before the test releases
+	return 0, io.EOF
+}
+
+func (s *stallingBody) Close() error {
+	s.once.Do(func() { close(s.released) })
+	return nil
+}
+
+// TestHTTPBodyReadDeadline: a stalled partial POST must be cut off by the
+// total body-read deadline, not pin the handler. Deliberately not
+// t.Parallel: it mutates the httpBodyReadTimeout package var.
+func TestHTTPBodyReadDeadline(t *testing.T) {
+	old := httpBodyReadTimeout
+	httpBodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { httpBodyReadTimeout = old })
+
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	body := &stallingBody{released: make(chan struct{})}
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/mcp", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if elapsed > 10*time.Second {
+		t.Errorf("stalled body took %v, want bounded by ~%v (the deadline must release the handler)", elapsed, old)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("status = %d, want an error for the timed-out body", resp.StatusCode)
+	}
+}
+
 func TestHTTPSecurityPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		host        string
-		apiKey      string
-		acceptsRisk bool
-		wantErr     bool
-		wantWarning string // substring expected when a warning is returned
+		name         string
+		host         string
+		apiKey       string
+		acceptsRisk  bool
+		allowAll     bool
+		tls          bool
+		wantErr      bool
+		wantWarnings []string // substrings each expected in the joined warnings
 	}{
-		{host: "127.0.0.1", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "127.0.0.2", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
+		{name: "loopback no auth", host: "127.0.0.1"},
+		{name: "loopback 127 range", host: "127.0.0.2"},
+		{name: "loopback v6", host: "::1"},
+		{name: "loopback localhost", host: "localhost"},
+		{name: "remote with key cleartext", host: "0.0.0.0", apiKey: "s3cret", wantWarnings: []string{"cleartext"}},
 		// The remote-bind case: no key, no escape hatch → refuse.
-		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
-		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
-		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
+		{name: "remote no auth refuses", host: "0.0.0.0", wantErr: true},
+		{name: "lan ip no auth refuses", host: "192.168.1.10", wantErr: true},
+		{name: "private ip no auth refuses", host: "10.0.0.5", wantErr: true},
 		// Unparseable host → treated as non-loopback (conservative).
-		{host: "not-an-ip", apiKey: "", acceptsRisk: false, wantErr: true},
+		{name: "unparseable host refuses", host: "not-an-ip", wantErr: true},
 		// Escape hatch: starts, but loudly.
-		{host: "0.0.0.0", apiKey: "", acceptsRisk: true, wantWarning: "UNAUTHENTICATED"},
+		{name: "remote no auth escape hatch", host: "0.0.0.0", acceptsRisk: true, wantWarnings: []string{"UNAUTHENTICATED"}},
+		// M6: --allow-all-origins with no token — any web page can invoke
+		// tools and read their output.
+		{name: "loopback allow-all no auth", host: "127.0.0.1", allowAll: true, wantWarnings: []string{"--allow-all-origins"}},
+		{name: "remote allow-all escape no tls", host: "0.0.0.0", acceptsRisk: true, allowAll: true, wantWarnings: []string{"UNAUTHENTICATED", "--allow-all-origins"}},
+		// Allow-all WITH a token is defensible: the preflight bypass does not
+		// bypass the auth on the real call.
+		{name: "loopback allow-all with key", host: "127.0.0.1", apiKey: "s3cret", allowAll: true},
+		// M6: authenticated remote bind without TLS — cleartext credential.
+		{name: "remote key with tls", host: "0.0.0.0", apiKey: "s3cret", tls: true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.host, func(t *testing.T) {
-			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.acceptsRisk)
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, corsConfig{allowAll: tt.allowAll}, tt.tls, tt.acceptsRisk)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -705,9 +783,16 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.host) {
 					t.Errorf("error should name the host: %v", err)
 				}
+				return
 			}
-			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
-				t.Fatalf("warning = %q, want it to contain %q", warning, tt.wantWarning)
+			joined := strings.Join(warnings, "\n")
+			for _, want := range tt.wantWarnings {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("warnings = %q, want them to contain %q", joined, want)
+				}
+			}
+			if len(tt.wantWarnings) == 0 && len(warnings) != 0 {
+				t.Fatalf("warnings = %q, want none", joined)
 			}
 		})
 	}
