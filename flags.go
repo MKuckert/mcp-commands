@@ -168,6 +168,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
+	allowedOriginsSet := false
 	timeoutSet := false
 	callToolSet := false
 	visited := make(map[string]bool)
@@ -176,6 +177,8 @@ func parseCLI(args []string) (cliConfig, error) {
 		switch f.Name {
 		case "allow-all-origins":
 			allowAllSet = true
+		case "allowed-origins":
+			allowedOriginsSet = true
 		case "timeout":
 			timeoutSet = true
 		case "call-tool":
@@ -225,7 +228,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	// HTTP mode only.
 	var corsErr error
-	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, allowedOriginsSet, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
 	if corsErr != nil {
 		return cliConfig{}, corsErr
 	}

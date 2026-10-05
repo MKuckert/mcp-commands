@@ -263,6 +263,7 @@ func TestResolveCORS(t *testing.T) {
 	tests := []struct {
 		name           string
 		flag           string
+		originsSet     bool
 		originsEnv     string
 		allowAllEnv    string
 		allowAllFlag   bool
@@ -277,6 +278,10 @@ func TestResolveCORS(t *testing.T) {
 		{name: "flag_only", flag: "https://a.example", wantOrigins: []string{"https://a.example"}},
 		{name: "env_only", originsEnv: "https://a.example, https://b.example",
 			wantOrigins: []string{"https://a.example", "https://b.example"}},
+		// An explicitly empty --allowed-origins= is a deliberate "no origins"
+		// choice: it must not fall back to the env var (flag always wins).
+		{name: "explicit_empty_flag_ignores_env", flag: "", originsSet: true, originsEnv: "https://env.example",
+			wantOrigins: []string{}},
 		{name: "both_set_flag_wins", flag: "https://flag.example", originsEnv: "https://env.example",
 			wantOrigins: []string{"https://flag.example"}},
 		{name: "neither_set", wantOrigins: []string{}},
@@ -317,7 +322,7 @@ func TestResolveCORS(t *testing.T) {
 			t.Setenv(allowedOriginsEnvVar, tt.originsEnv)
 			t.Setenv(allowAllOriginsEnvVar, tt.allowAllEnv)
 
-			got, err := resolveCORS(tt.flag, tt.allowAllFlag, tt.allowAllSet, tt.disableLocalhp)
+			got, err := resolveCORS(tt.flag, tt.originsSet, tt.allowAllFlag, tt.allowAllSet, tt.disableLocalhp)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (%+v)", got)
