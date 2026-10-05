@@ -1,0 +1,38 @@
+# PLAN — U3: Registry churn and watch lifecycle
+
+**Branch:** `fix/u3-watch-lifecycle` from `main` (v0.9.2). **Target:** v0.9.2 (no version bump — U2 already landed it).
+**Source:** `REVIEW_REPORT.md` §U3 (H3, H4, M4, M8, M11, L4).
+**Status:** Approved — PR #18 open. Three local review passes completed plus Copilot PR review; all findings fixed (last round: stdio serves concurrently with the watcher, live-list re-print gated on the tool set, test determinism fixes; the external-target watch machinery was later descoped per the postscript (M11 documented limitation)).
+
+## Tasks
+
+- [x] **L4 — Extract diagnostics.** Move `runDiagnostic`, `runCallTool`, `runListTools`, and `serverModeFlagNames` from `server.go` into a new `diagnostic.go`; move their tests from `server_test.go` to `diagnostic_test.go`. Behavior-neutral file split only; `run()` stays in `server.go`.
+- [x] **M4 — Watch failure is a real failure.** Add a `newWatcher` injection seam to `liveEnv`. `watchChanges`/`watchTools` return an error on watcher setup failure. `runListTools --watch`: any watch termination other than signal cancellation → stderr `Error:` line and exit 1 (was: warning + exit 0). `run()`: watch setup failure or fatal mid-run watch termination (channel closed) → process error/exit 1; signal cancellation → clean exit. Transient fsnotify errors stay warnings (non-fatal).
+- [x] **H3 — Close the registration→watch gap.** `watchChanges` runs its rescan callback exactly once, synchronously, after the watcher is ready and before the event loop; the callback applies changes only when the set differs (registry `replaceIfChanged` / list-print on change), so a quiet start stays quiet.
+- [x] **M8 — Per-tool registry diff.** `replaceLocked` diffs old vs new by tool name: `RemoveTools` only for removed names; `AddTool` for changed and added tools (the SDK `featureSet.add` replaces in place for an existing name, so a changed tool never disappears from a concurrent `ListTools`); `current` updated to a copied new set (the `names` field was removed during review — it had no reader). `replaceIfChanged` does the equality check and the apply under one lock (L4 critical section). Public `replace()` delegates to `replaceLocked`.
+- [x] **H4 — Reattach on watched-path replacement.** `watchChanges` also watches the parent of each primary path; an event *on* a primary path with Remove/Rename (deleted/moved) or Create (recreated) triggers a best-effort `watcher.Add(path)` reattach plus a rescan. Deleting and recreating the scripts directory recovers watching; recreated contents register, deleted scripts revoke. Deleting the directory without recreation keeps the last known set with the existing rescan warning (degraded, visible).
+- [x] **M11 — Watch external symlink targets.** `externalTargets(tools, scriptsDir)` returns deduped resolved tool paths whose parent is not the scripts dir. The rescan callback returns the current target set; `watchChanges` adds watches (path + parent, with the same reattach rule) for new targets and removes vanished ones, best-effort. Editing an external target refreshes its tool; both server mode and `--list-tools --watch` watch targets. *(Reverted per postscript — now a documented limitation.)*
+- [x] **Tests.** Registry: diff correctness (changed/removed/added, unchanged untouched), concurrent `ListTools`/`CallTool` during a changed reload always sees unchanged tools, `replaceIfChanged` atomicity. Watch: pre-watch change picked up (H3, deterministic), delete → recreate → add/revocation (H4), injected `newWatcher` failure → `runListTools` exit 1 and `run()` error (M4), injected closed error channel → `run()` fatal (M4), the symlink-target staleness contract (M11, post-descope), existing tests (no-spurious-fire, permission error, dir-deleted-keeps-running, identical-rescan-skip) preserved and updated to the new signature.
+- [x] **Docs.** README: `--watch` bullets — the watched directory is re-attached after delete/recreate, a fatal watch failure exits non-zero (server mode) / non-zero exit code (live list mode), and the symlink-target documented limitation (final form; the "symlink targets are watched" bullet was superseded by the descope).
+- [x] **Validate.** `gofmt -l`, `go test ./... -count=1`, `go vet ./...`, `go run . --version` = 0.9.2. (`go test -race` unsupported in this sandbox; note in PR description.)
+
+## Design
+
+- `watchChanges(ctx, env, scriptsDir string, onRescan func() []string) error`: the single watch loop. `onRescan` performs the rescan (discover + apply) — final signature `func()`, no return (the external-target return was removed with the M11 descope). `watchChanges` runs it for the guaranteed post-readiness rescan (H3) and after each debounced burst. `runListTools` implements it as discover + print-on-change; `watchTools` as discover + `replaceIfChanged`.
+- Reattach rule (H4/M11 share it): events are matched against the watched primary paths by `event.Name`. On a primary-path event with Create/Write/Remove/Rename, arm the debounce rescan; on Remove/Rename/Create, also attempt `watcher.Add(path)` (warn on failure, never fatal at runtime). Each primary path's parent is watched; only events named with the primary path matter for the parent watch (inotify names the child, so the same rule applies to both watches).
+- Fatality: setup failure (create watcher, scripts-dir/parent `Add`) and loop-channel closure are fatal (target `Add`/`Remove` is best-effort with warnings); fsnotify error-channel entries stay warnings; a permanently deleted directory degrades to the last known registry with repeated rescan warnings. In `run()`, the serve/stdio run and the watch goroutine are raced in one select so a fatal watch termination ends the process.
+- SDK contract (verified in `go-sdk` v1.6.1 `features.go`): `featureSet.add` replaces an existing name in place, `remove` is a no-op for missing names, listing is name-sorted — so per-name diffing needs no ordering care and produces at most one `RemoveTools` call and one `AddTool` per changed/added tool.
+
+## Review log
+
+(empty — Plan Reviewer, then Code Reviewer)
+
+## Postscript — M11 descoped (documented-limitation option)
+
+After the Copilot review round added recovery-watch retention + inotify-quota eviction for the external target watches, the maintainer chose M11's second option: **document** that symlink-target changes require touching the link / restart, and **drop** the target-watch machinery. Final state:
+
+- Removed: `externalTargets`, `addTargets`, `evictOverflow`, `recoveryWatchCap`, passive-entry bookkeeping for targets, target reattach, the two external-target tests. (`watchPath` keeps `parent`/`passive`/`dirScope` for the scripts directory + its parent — the H4 reattach core.)
+- `watchChanges` signature: `onRescan func()` (no return).
+- Kept: H3 guaranteed rescan, H4 scripts-dir delete/recreate reattach, M4 fatality, M8 per-tool diff, L4 split, stdio concurrent serving.
+- Documented in README (watch behavior): external targets not watched; in-place target edit keeps execution fresh, metadata stale until the link is touched or the server restarts.
+- Pinned by `TestWatchToolsSymlinkTargetEditNotWatched`: in-place target edit does NOT refresh; re-linking does.

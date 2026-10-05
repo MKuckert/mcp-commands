@@ -45,6 +45,7 @@ type liveEnv struct {
 	resolveWrapWidth func(stdout io.Writer) int
 	clearScreen      func(stdout io.Writer)
 	notifySignals    func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc)
+	newWatcher       func() (*fsnotify.Watcher, error)
 	watcherErrors    func(w *fsnotify.Watcher) <-chan error
 }
 
@@ -55,171 +56,9 @@ func prodLiveEnv() liveEnv {
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals:    prodNotifySignals,
+		newWatcher:       prodNewWatcher,
 		watcherErrors:    prodWatcherErrors,
 	}
-}
-
-// serverModeFlagNames lists the flags that configure the MCP server, in a
-// stable order for the diagnostic-mode ignored-flags notice. (--watch is
-// honored in --list-tools mode; with --call-tool it is added to the notice
-// separately.)
-var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "tls-cert", "tls-key", "allowed-origins", "allow-all-origins", "disable-localhost-protection", "insecure-no-auth", "max-concurrent"}
-
-// runDiagnostic runs a diagnostic mode (--list-tools or --call-tool) and
-// returns the process exit code. Diagnostics never start the MCP server:
-// the process exits after the diagnostic completes, except the live
-// --list-tools --watch mode, which runs until SIGINT/SIGTERM. Result content
-// goes to stdout; warnings and operational errors go to stderr.
-func runDiagnostic(env liveEnv, diag diagnostic) int {
-	if len(diag.ignoredFlags) > 0 {
-		fmt.Fprintf(env.stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
-	}
-	if diag.listTools {
-		return runListTools(env, diag.dir, diag.scriptsDir, diag.watch, diag.timeout)
-	}
-	if diag.callTool == "" {
-		// Only reachable when --call-tool= was explicitly passed (an
-		// omitted flag is handled by main and never reaches here).
-		fmt.Fprintln(env.stderr, "Error: --call-tool requires a non-empty tool name")
-		return 1
-	}
-	dirAbs, scriptsAbs, err := resolveToolPaths(diag.dir, diag.scriptsDir)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
-		return 1
-	}
-	code, err := runCallTool(env, scriptsAbs, dirAbs, diag.timeout, diag.callTool, diag.params)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
-	}
-	return code
-}
-
-// runCallTool is the --call-tool diagnostic: run a single discovered tool
-// through the same execution path as the MCP handler (required-param
-// validation, JSON→CLI-arg translation, timeout resolution identical to the
-// registry — a per-tool Timeout: wins, Timeout: NONE ⇒ no deadline) and
-// print the result text to the given stdout writer (the dispatch passes
-// os.Stdout; tests pass a buffer). It returns the process exit code: 0 on
-// success; 1 on any failure. Execution failures (missing required param,
-// non-zero script exit, timeout) print the tool's result content to stdout
-// with a nil error; operational failures (discovery, unknown tool, --params
-// parse, unstartable script) yield a non-nil error for the stderr "Error:"
-// line and never start the script. A non-object --params is rejected by
-// parseToolArguments, which maps an explicitly empty value and JSON null to
-// {} (same leniency as the MCP handler).
-func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
-	tools, err := discoverTools(scriptsAbs, env.stderr)
-	if err != nil {
-		return 1, fmt.Errorf("failed to discover tools: %w", err)
-	}
-
-	var tool discoveredTool
-	found := false
-	for _, candidate := range tools {
-		if candidate.Name == name {
-			tool = candidate
-			found = true
-			break
-		}
-	}
-	if !found {
-		msg := fmt.Sprintf("unknown tool %q", name)
-		if len(tools) > 0 {
-			names := make([]string, len(tools))
-			for i, candidate := range tools {
-				names[i] = candidate.Name
-			}
-			msg += "; available tools: " + strings.Join(names, ", ")
-		}
-		return 1, errors.New(msg)
-	}
-
-	args, err := parseToolArguments([]byte(paramsRaw))
-	if err != nil {
-		return 1, fmt.Errorf("invalid --params %q: %w", paramsRaw, err)
-	}
-
-	validator, err := resolveInputSchema(buildInputSchema(tool.Params))
-	if err != nil {
-		return 1, fmt.Errorf("invalid input schema for tool %q: %w", name, err)
-	}
-	if err := validateToolArguments(args, validator); err != nil {
-		fmt.Fprintln(env.stdout, err.Error())
-		return 1, nil
-	}
-
-	result, err := executeTool(context.Background(), tool.Path, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
-	if err != nil {
-		return 1, fmt.Errorf("failed to run tool %q: %w", name, err)
-	}
-
-	var b strings.Builder
-	for _, content := range result.Content {
-		text, ok := content.(*mcp.TextContent)
-		if !ok {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(text.Text)
-	}
-	fmt.Fprintln(env.stdout, b.String())
-
-	if result.IsError {
-		return 1, nil
-	}
-	return 0, nil
-}
-
-// runListTools is the --list-tools diagnostic: discover and print the tool
-// list (renderToolList, width re-queried at every print) to stdout, then
-// exit 0. With watch it becomes a live list: after the initial print, every
-// debounced change to the scripts directory clears the screen (TTY only) and
-// re-prints the full list with the existing per-scan stderr warnings, until
-// the process is signaled. Path resolution errors are a startup failure
-// (stderr, exit 1).
-func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
-	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	printList := func(tools []discoveredTool) {
-		if len(tools) == 0 {
-			fmt.Fprintf(env.stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
-		}
-		fmt.Fprint(env.stdout, renderToolList(tools, timeout, env.resolveWrapWidth(env.stdout)))
-	}
-
-	tools, err := discoverTools(scriptsAbs, env.stderr)
-	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
-		return 1
-	}
-	printList(tools)
-
-	if !watch {
-		return 0
-	}
-
-	sigCtx, cancel := env.notifySignals(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if err := watchChanges(sigCtx, env, scriptsAbs, func() {
-		env.clearScreen(env.stdout)
-		tools, err := discoverTools(scriptsAbs, env.stderr)
-		if err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
-			return
-		}
-		printList(tools)
-	}); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
-	}
-	return 0
 }
 
 func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
@@ -248,12 +87,17 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent)
 	registry.replace(tools)
 
+	// --watch is an explicit request: a setup failure, or a fatal mid-run
+	// watch termination (channel closure), ends the process with an error
+	// rather than serving a permanently stale tool snapshot. Only signal
+	// cancellation exits cleanly.
+	var watchDone <-chan error
 	if cfg.watch {
+		watchCh := make(chan error, 1)
 		go func() {
-			if err := watchTools(sigCtx, env, scriptsAbs, registry, tools); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(env.stderr, "Warning: watch loop stopped: %v\n", err)
-			}
+			watchCh <- watchTools(sigCtx, env, scriptsAbs, registry, tools)
 		}()
+		watchDone = watchCh
 	}
 
 	if cfg.port > 0 {
@@ -284,15 +128,23 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			_ = serverHTTP.Shutdown(shutdownCtx)
 		}()
 
+		serve := serverHTTP.ListenAndServe
+		if cfg.tlsCert != "" {
+			serve = func() error { return serverHTTP.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
+		}
+
+		serveDone := make(chan error, 1)
+		go func() {
+			serveDone <- serve()
+		}()
+
 		var notes []string
 		if cfg.apiKey.Token != "" {
 			notes = append(notes, "API key auth enabled")
 		} else if !isLoopbackHost(cfg.host) {
 			notes = append(notes, "UNAUTHENTICATED")
 		}
-		serve := serverHTTP.ListenAndServe
 		if cfg.tlsCert != "" {
-			serve = func() error { return serverHTTP.ListenAndServeTLS(cfg.tlsCert, cfg.tlsKey) }
 			notes = append(notes, "TLS")
 		}
 		if cfg.cors.enabled() {
@@ -303,12 +155,60 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			line += " (" + strings.Join(notes, ", ") + ")"
 		}
 		fmt.Fprintf(env.stderr, "%s\n", line)
-		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("failed to start HTTP server: %w", err)
+		var serveErr error
+		select {
+		case <-sigCtx.Done():
+			// Signal: drain the serve outcome; a non-closed error (e.g. a
+			// bind failure racing the shutdown) is reported below.
+		case err := <-watchDone:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(env.stderr, "Error: %v\n", err)
+				cancel()
+				<-serveDone
+				return fmt.Errorf("failed to watch scripts directory: %w", err)
+			}
+			// A clean watch stop (signal) falls through: the serve outcome
+			// must still be reported.
+		case err := <-serveDone:
+			// A bind/startup failure (e.g. the port is taken) must surface
+			// immediately: without this case the process would idle forever
+			// behind a "Starting" banner with no listener.
+			serveErr = err
+		}
+		cancel()
+		if serveErr == nil {
+			serveErr = <-serveDone
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return fmt.Errorf("failed to start HTTP server: %w", serveErr)
 		}
 		return nil
 	}
 
 	fmt.Fprintf(env.stderr, "Starting stdio server\n")
-	return server.Run(sigCtx, &mcp.StdioTransport{})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Run(sigCtx, &mcp.StdioTransport{}) }()
+	select {
+	case <-sigCtx.Done():
+	case err := <-watchDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(env.stderr, "Error: %v\n", err)
+			cancel()
+			return fmt.Errorf("failed to watch scripts directory: %w", err)
+		}
+	case serveErr := <-serveDone:
+		// The client side ended the session (e.g. stdin closed): stop the
+		// watcher and surface the serve result.
+		cancel()
+		if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+			return fmt.Errorf("stdio server stopped: %w", serveErr)
+		}
+		return nil
+	}
+	// The session (and the watcher) is now done: serve.Run returns once the
+	// cancelled session closes.
+	if serveErr := <-serveDone; serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+		return fmt.Errorf("stdio server stopped: %w", serveErr)
+	}
+	return nil
 }

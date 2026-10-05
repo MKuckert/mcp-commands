@@ -443,10 +443,162 @@ func TestRegistryReplaceConcurrency(t *testing.T) {
 	wg.Wait()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if len(registry.names) != 50 {
-		t.Fatalf("registry has %d names after concurrent replaces, want 50", len(registry.names))
-	}
 	if len(registry.current) != 50 {
 		t.Fatalf("registry.current has %d tools after concurrent replaces, want 50", len(registry.current))
+	}
+	seen := make(map[string]bool, len(registry.current))
+	for _, tool := range registry.current {
+		seen[tool.Name] = true
+	}
+	for k := 0; k < 50; k++ {
+		if !seen[fmt.Sprintf("tool%d", k)] {
+			t.Fatalf("registry.current missing tool%d after concurrent replaces", k)
+		}
+	}
+}
+
+// TestRegistryReplaceIfChangedSkipsIdentical verifies the change-diff gate:
+// an identical set skips the replace entirely (returns false), a changed set
+// applies it (returns true).
+func TestRegistryReplaceIfChangedSkipsIdentical(t *testing.T) {
+	t.Parallel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	set := []discoveredTool{{Name: "alpha", Path: "/a.sh", Description: "d1"}, {Name: "beta", Path: "/b.sh", Description: "d2"}}
+	registry.replace(set)
+	if registry.replaceIfChanged(set) {
+		t.Fatal("replaceIfChanged reported a change for an identical set")
+	}
+
+	// The diff baseline must not alias the caller's slice: mutating it after
+	// the call must not corrupt the registry's view — a fresh slice identical
+	// to the original must still be reported unchanged.
+	set[0] = discoveredTool{Name: "alpha", Path: "/a.sh", Description: "caller-mutated"}
+	fresh := []discoveredTool{{Name: "alpha", Path: "/a.sh", Description: "d1"}, {Name: "beta", Path: "/b.sh", Description: "d2"}}
+	if registry.replaceIfChanged(fresh) {
+		t.Fatal("caller mutation of the passed slice corrupted the diff baseline")
+	}
+
+	changed := append([]discoveredTool{}, set...)
+	changed[0] = discoveredTool{Name: "alpha", Path: "/a.sh", Description: "d1-updated"}
+	if !registry.replaceIfChanged(changed) {
+		t.Fatal("replaceIfChanged reported no change for a changed set")
+	}
+}
+
+// TestRegistryReplaceDiffOnlyRemovedNames verifies the per-tool diff:
+// unregistered names are removed, added/changed names are (re-)added, and
+// unchanged names are left alone — the SDK add replaces in place, so an
+// unchanged tool must not go through a removal (which would open a
+// listability gap).
+func TestRegistryReplaceDiffOnlyRemovedNames(t *testing.T) {
+	t.Parallel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry.replace([]discoveredTool{
+		{Name: "alpha", Path: "/a.sh", Description: "keep"},
+		{Name: "beta", Path: "/b.sh", Description: "gone"},
+		{Name: "gamma", Path: "/g.sh", Description: "stale"},
+	})
+	registry.replace([]discoveredTool{
+		{Name: "alpha", Path: "/a.sh", Description: "keep"},
+		{Name: "delta", Path: "/d.sh", Description: "new"},
+		{Name: "gamma", Path: "/g.sh", Description: "fresh"},
+	})
+
+	registry.mu.Lock()
+	names := make([]string, len(registry.current))
+	for i, tool := range registry.current {
+		names[i] = tool.Name
+	}
+	registry.mu.Unlock()
+	// Deterministic order: the diff walks the incoming slice in order.
+	want := []string{"alpha", "delta", "gamma"}
+	if fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Fatalf("registered names = %v, want %v", names, want)
+	}
+	for _, n := range []string{"beta"} {
+		for _, registered := range names {
+			if registered == n {
+				t.Fatalf("removed name %q is still registered: %v", n, names)
+			}
+		}
+	}
+}
+
+// TestRegistryReplaceConcurrentListNoGap (M8) verifies the regression the
+// per-tool diff closes: while a replace is in flight, tools that are
+// unchanged by the diff stay continuously listable — the old
+// remove-all/add-all made every registered tool (including unchanged ones)
+// invisible to a concurrent tools/list for the duration of the rescan.
+func TestRegistryReplaceConcurrentListNoGap(t *testing.T) {
+	t.Parallel()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	base := make([]discoveredTool, 20)
+	for i := range base {
+		base[i] = discoveredTool{Name: fmt.Sprintf("tool%02d", i), Path: fmt.Sprintf("/t%02d.sh", i), Description: "v1"}
+	}
+	registry.replace(base)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	// Churn: flip one tool's description on each round; the other 19 are
+	// unchanged by the diff and must never disappear from a concurrent list.
+	missingDone := make(chan int32, 1)
+	stop := make(chan struct{})
+	go func() {
+		var missing int32
+		for {
+			select {
+			case <-stop:
+				missingDone <- missing
+				return
+			default:
+			}
+			res, err := clientSession.ListTools(ctx, nil)
+			if err != nil {
+				missing++
+				continue
+			}
+			seen := make(map[string]bool, len(res.Tools))
+			for _, tool := range res.Tools {
+				seen[tool.Name] = true
+			}
+			for _, tool := range base {
+				if !seen[tool.Name] {
+					missing++
+				}
+			}
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		next := append([]discoveredTool{}, base...)
+		next[i%len(next)] = discoveredTool{Name: base[i%len(next)].Name, Path: base[i%len(next)].Path, Description: fmt.Sprintf("v%d", i)}
+		registry.replace(next)
+	}
+	close(stop)
+	// Join the worker: the count is local to it and delivered over the
+	// completion channel (no unsynchronized cross-goroutine read).
+	var missing int32
+	select {
+	case missing = <-missingDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listing worker did not exit after stop")
+	}
+	if missing > 0 {
+		t.Fatalf("%d concurrent lists lost tools that the diff left unchanged", missing)
 	}
 }
