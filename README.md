@@ -186,7 +186,7 @@ The server runs at most `--max-concurrent` tool subprocesses at once (default **
 
 Every HTTP request body is bounded on **size** and on **time**.
 
-- **Size:** a body larger than **10 MiB** is rejected with `413` (the connection is drained and closed, so a client cannot use an oversized body to exhaust server memory).
+- **Size:** a body larger than **10 MiB** is rejected with `400`, and the connection is closed once the response is sent (Go's `MaxBytesReader` flags the request as too large, which forces the connection shut). The body is never buffered past the cap, so a client cannot use an oversized body to exhaust server memory.
 - **Time:** a body that takes more than **30 s** in total to arrive is rejected with `400`. This stops a client that opens a POST and then dribbles a few bytes at a time from pinning a connection and its handler slot indefinitely — the size cap alone would not catch that, since a slow drip never grows large.
 
 Both limits are fixed (not flags); they are generous for the real workload (small JSON tool calls) and exist to bound resource use, not to shape traffic.

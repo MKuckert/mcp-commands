@@ -340,7 +340,12 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 // resets the read deadline when the connection is released for keep-alive
 // or closed, so leaving it armed is harmless.) When the deadline cannot be
 // set — no real connection behind the ResponseWriter, e.g. a test fake —
-// the read is raced against a timer as a fallback.
+// the read falls back to a plain synchronous read. Racing it in a goroutine
+// against a timer is unsafe: the read is uncancellable, so after the timer
+// wins and Read returns it would keep writing into the caller's buffer (and
+// leak). In production SetReadDeadline never fails on a live connection, so
+// this path is test-only; a closed connection's read returns its error
+// promptly.
 type bodyReadDeadline struct {
 	w        http.ResponseWriter
 	in       io.ReadCloser
@@ -352,22 +357,12 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 		return 0, errBodyReadTimeout
 	}
 	if http.NewResponseController(b.w).SetReadDeadline(b.deadline) != nil {
-		// No real connection behind this ResponseWriter (hijacked or a test
-		// fake): the inner read cannot be bounded at the socket, so race it
-		// against a timer.
-		done := make(chan readOutcome, 1)
-		go func() {
-			n, err := b.in.Read(p)
-			done <- readOutcome{n: n, err: err}
-		}()
-		timer := time.NewTimer(time.Until(b.deadline))
-		defer timer.Stop()
-		select {
-		case r := <-done:
-			return r.n, r.err
-		case <-timer.C:
-			return 0, errBodyReadTimeout
-		}
+		// No real connection behind this ResponseWriter (hijacked, closed, or
+		// a test fake): the read cannot be bounded at the socket, so fall
+		// back to a plain read. Deliberately not raced in a goroutine against
+		// a timer — see the type comment: an uncancellable read must not be
+		// left writing into the caller's buffer after Read returns.
+		return b.in.Read(p)
 	}
 	// The socket enforces the deadline; the inner read returns i/o timeout
 	// once it elapses. Map that to the sentinel so callers can classify it.
@@ -379,11 +374,6 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 }
 
 func (b *bodyReadDeadline) Close() error { return b.in.Close() }
-
-type readOutcome struct {
-	n   int
-	err error
-}
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
