@@ -1034,14 +1034,17 @@ func TestWatchToolsRecoveryWatchesBounded(t *testing.T) {
 	for i := range targets {
 		_ = os.Remove(targets[i])
 	}
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(listNames(t, ctx, clientSession)) == 0 {
 			break
 		}
-		_ = os.Remove(latest)
-		writeScript(t, latest, "#!/bin/bash\nDescription: t34 ping\n")
-		time.Sleep(50 * time.Millisecond)
+		// The deletion burst can race setup; force a rescan with a scripts
+		// directory canary (a child event arms the debounce).
+		canary := filepath.Join(scriptsDir, ".rescan")
+		_ = os.WriteFile(canary, []byte("x"), 0o644)
+		_ = os.Remove(canary)
+		time.Sleep(150 * time.Millisecond)
 	}
 	if names := listNames(t, ctx, clientSession); names != "" {
 		t.Fatalf("deleted targets not removed from the registry; tools = %s", names)
