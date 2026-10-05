@@ -108,13 +108,13 @@ func parseCLI(args []string) (cliConfig, error) {
 	scriptsFlag := fs.String("scripts", "", "Directory containing executable scripts (required)")
 	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
-	portFlag := fs.Int("port", 0, "Port for HTTP server (don't set or 0 for stdio mode)")
+	portFlag := fs.Int("port", 0, "Port for HTTP server (0 for stdio mode; must be 1..65535)")
 	apiKeyFlag := fs.String("api-key", "", "API token for HTTP mode (alternatives: --api-key-file, MCP_COMMANDS_API_KEY)")
 	apiKeyFileFlag := fs.String("api-key-file", "", "Read the API token from a file (content is trimmed; trailing newline ok)")
 	tlsCertFlag := fs.String("tls-cert", "", "TLS certificate file for HTTP mode (PEM); requires --tls-key")
 	tlsKeyFlag := fs.String("tls-key", "", "TLS key file for HTTP mode (PEM); requires --tls-cert")
 	insecureNoAuthFlag := fs.Bool("insecure-no-auth", false, "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production)")
-	maxConcurrentFlag := fs.Int("max-concurrent", defaultMaxConcurrentTools, "Maximum concurrent tool executions (0 for default; calls beyond the cap get a clean at-capacity error)")
+	maxConcurrentFlag := fs.Int("max-concurrent", defaultMaxConcurrentTools, fmt.Sprintf("Maximum concurrent tool executions (0 for default; 1..%d; calls beyond the cap get a clean at-capacity error)", maxConcurrentCap))
 	allowedOriginsFlag := fs.String("allowed-origins", "", "Comma-separated exact origin allowlist for CORS (or set MCP_COMMANDS_ALLOWED_ORIGINS)")
 	allowAllOriginsFlag := fs.Bool("allow-all-origins", false, "Echo any Origin header for CORS, dev convenience (or set MCP_COMMANDS_ALLOW_ALL_ORIGINS)")
 	disableLocalhostProtectionFlag := fs.Bool("disable-localhost-protection", false, "Disable the SDK's DNS-rebinding protection for loopback servers")
@@ -229,8 +229,11 @@ func parseCLI(args []string) (cliConfig, error) {
 	if corsErr != nil {
 		return cliConfig{}, corsErr
 	}
-	if cfg.server.maxConcurrent < 0 {
-		return cliConfig{}, fmt.Errorf("--max-concurrent must be >= 0 (got %d)", cfg.server.maxConcurrent)
+	if cfg.server.port < 0 || cfg.server.port > 65535 {
+		return cliConfig{}, fmt.Errorf("--port must be 0 (stdio) or 1..65535 (got %d)", cfg.server.port)
+	}
+	if cfg.server.maxConcurrent < 0 || cfg.server.maxConcurrent > maxConcurrentCap {
+		return cliConfig{}, fmt.Errorf("--max-concurrent must be 0 (default) or 1..%d (got %d)", maxConcurrentCap, cfg.server.maxConcurrent)
 	}
 	// In stdio mode the auth and TLS options are documented as ignored, so
 	// an unreadable --api-key-file or --tls-cert/--tls-key must not block a

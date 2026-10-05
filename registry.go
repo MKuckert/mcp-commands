@@ -11,7 +11,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const defaultMaxConcurrentTools = 16
+const (
+	defaultMaxConcurrentTools = 16
+	// maxConcurrentCap is the documented practical ceiling for
+	// --max-concurrent: the slot channel is allocated eagerly, so an
+	// unbounded value would allow a huge (pointless) allocation.
+	maxConcurrentCap = 256
+)
 
 // toolRegistry manages the dynamic registration and deregistration of tools
 // within the MCP server. It ensures thread-safe updates via a mutex, allowing

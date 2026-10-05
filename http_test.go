@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -21,6 +22,7 @@ func TestResolveAPIKey(t *testing.T) {
 		file       string // content written to a temp file when fileSet
 		fileSet    bool
 		fileMiss   bool // path set but file missing → error
+		wantErr    bool // any explicit-file error (missing, empty, oversized)
 		env        string
 		want       string
 		wantSource apiKeySource
@@ -30,8 +32,9 @@ func TestResolveAPIKey(t *testing.T) {
 		{name: "file_only", file: "from-file\n", fileSet: true, want: "from-file", wantSource: apiKeySourceFile},
 		{name: "flag_beats_file_and_env", flag: "from-flag", file: "from-file", fileSet: true, env: "from-env", want: "from-flag", wantSource: apiKeySourceFlag},
 		{name: "file_beats_env", file: "from-file", fileSet: true, env: "from-env", want: "from-file", wantSource: apiKeySourceFile},
-		{name: "empty_file_falls_through_to_env", file: "\n  \n", fileSet: true, env: "from-env", want: "from-env", wantSource: apiKeySourceEnv},
-		{name: "missing_file_errors", fileMiss: true},
+		{name: "empty_file_errors", file: "\n  \n", fileSet: true, env: "from-env", wantErr: true},
+		{name: "oversized_file_errors", file: strings.Repeat("a", maxAPIKeyFileBytes+1), fileSet: true, wantErr: true},
+		{name: "missing_file_errors", fileMiss: true, wantErr: true},
 		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
 	}
 
@@ -53,9 +56,9 @@ func TestResolveAPIKey(t *testing.T) {
 			}
 
 			got, err := resolveAPIKey(tt.flag, filePath)
-			if tt.fileMiss {
+			if tt.fileMiss || tt.wantErr {
 				if err == nil {
-					t.Fatalf("expected an error for the missing key file, got %v", got)
+					t.Fatalf("expected an error for %s, got %v", tt.name, got)
 				}
 				return
 			}
@@ -665,6 +668,69 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	}
 	if got := headers.Get("Vary"); got != "" {
 		t.Errorf("Vary = %q, want absent (CORS disabled)", got)
+	}
+}
+
+// stallingBody serves one byte, then blocks until Close. It simulates a
+// client that starts a POST and then dribbles nothing.
+type stallingBody struct {
+	once     sync.Once
+	released chan struct{}
+	done     bool
+}
+
+func (s *stallingBody) Read(p []byte) (int, error) {
+	if !s.done {
+		s.done = true
+		if len(p) == 0 {
+			return 0, nil
+		}
+		p[0] = '{' // partial JSON; the rest never arrives
+		return 1, nil
+	}
+	<-s.released // the deadline must fire before the test releases
+	return 0, io.EOF
+}
+
+func (s *stallingBody) Close() error {
+	s.once.Do(func() { close(s.released) })
+	return nil
+}
+
+// TestHTTPBodyReadDeadline: a stalled partial POST must be cut off by the
+// total body-read deadline, not pin the handler. Deliberately not
+// t.Parallel: it mutates the httpBodyReadTimeout package var.
+func TestHTTPBodyReadDeadline(t *testing.T) {
+	old := httpBodyReadTimeout
+	httpBodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { httpBodyReadTimeout = old })
+
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	body := &stallingBody{released: make(chan struct{})}
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/mcp", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if elapsed > 10*time.Second {
+		t.Errorf("stalled body took %v, want bounded by ~%v (the deadline must release the handler)", elapsed, old)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Errorf("status = %d, want an error for the timed-out body", resp.StatusCode)
 	}
 }
 

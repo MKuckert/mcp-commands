@@ -2,7 +2,9 @@ package main
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,7 +21,20 @@ const (
 	httpIdleTimeout       = 2 * time.Minute
 )
 
+// httpBodyReadTimeout bounds the total time a request body may take to
+// arrive. It is a var (not const) so tests can shorten it. A *total*
+// deadline is the right bound: a per-read deadline would not stop a client
+// that dribbles a few bytes per read.
+var httpBodyReadTimeout = 30 * time.Second
+
+var errBodyReadTimeout = errors.New("request body read timed out")
+
 const apiKeyEnvVar = "MCP_COMMANDS_API_KEY"
+
+// maxAPIKeyFileBytes bounds --api-key-file reads: a token is a short
+// secret, so anything larger is a misconfiguration (wrong file) and must
+// fail loudly instead of being slurped into memory.
+const maxAPIKeyFileBytes = 8 << 10 // 8 KiB
 
 const (
 	allowedOriginsEnvVar  = "MCP_COMMANDS_ALLOWED_ORIGINS"
@@ -69,9 +84,14 @@ func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
 		if err != nil {
 			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
 		}
-		if token := strings.TrimSpace(string(data)); token != "" {
-			return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
+		if len(data) > maxAPIKeyFileBytes {
+			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s is %d bytes; maximum is %d (wrong file?)", fileValue, len(data), maxAPIKeyFileBytes)
 		}
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s is empty; a token file must contain a non-empty token (remove the flag to fall back to %s)", fileValue, apiKeyEnvVar)
+		}
+		return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
 	}
 	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
 		return resolvedAPIKey{Token: envToken, Source: apiKeySourceEnv}, nil
@@ -299,12 +319,71 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 	})
 }
 
+// bodyReadDeadline bounds how long the total body read may take (see
+// httpBodyReadTimeout). It complements MaxBytesReader, which caps size but
+// not time: a client that dribbles a partial body must not be able to pin
+// a connection and its handler indefinitely.
+//
+// The mechanism is the socket read deadline, armed once for the whole
+// remaining window via ResponseController.SetReadDeadline and *not* cleared
+// per read. (Clearing after each read is not safe: the runtime processes
+// deadline clears asynchronously, and a stale clear can land after the next
+// read re-arms the deadline, silently disarming it. The http server itself
+// resets the read deadline when the connection is released for keep-alive
+// or closed, so leaving it armed is harmless.) When the deadline cannot be
+// set — no real connection behind the ResponseWriter, e.g. a test fake —
+// the read is raced against a timer as a fallback.
+type bodyReadDeadline struct {
+	w        http.ResponseWriter
+	in       io.ReadCloser
+	deadline time.Time
+}
+
+func (b *bodyReadDeadline) Read(p []byte) (int, error) {
+	if !time.Now().Before(b.deadline) {
+		return 0, errBodyReadTimeout
+	}
+	if http.NewResponseController(b.w).SetReadDeadline(b.deadline) != nil {
+		// No real connection behind this ResponseWriter (hijacked or a test
+		// fake): the inner read cannot be bounded at the socket, so race it
+		// against a timer.
+		done := make(chan readOutcome, 1)
+		go func() {
+			n, err := b.in.Read(p)
+			done <- readOutcome{n: n, err: err}
+		}()
+		timer := time.NewTimer(time.Until(b.deadline))
+		defer timer.Stop()
+		select {
+		case r := <-done:
+			return r.n, r.err
+		case <-timer.C:
+			return 0, errBodyReadTimeout
+		}
+	}
+	// The socket enforces the deadline; the inner read returns i/o timeout
+	// once it elapses. Map that to the sentinel so callers can classify it.
+	n, err := b.in.Read(p)
+	if err != nil && !time.Now().Before(b.deadline) {
+		return 0, errBodyReadTimeout
+	}
+	return n, err
+}
+
+func (b *bodyReadDeadline) Close() error { return b.in.Close() }
+
+type readOutcome struct {
+	n   int
+	err error
+}
+
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
 // vestigial). It is wrapped (innermost) in a request-body size limit
-// (maxHTTPBodyBytes); when token is non-empty it is wrapped in bearer-token
-// auth middleware; when CORS is enabled it is wrapped (outermost) in the
-// CORS middleware, so preflights bypass auth and 401s carry CORS headers.
+// (maxHTTPBodyBytes) and a total body-read deadline (httpBodyReadTimeout);
+// when token is non-empty it is wrapped in bearer-token auth middleware;
+// when CORS is enabled it is wrapped (outermost) in the CORS middleware,
+// so preflights bypass auth and 401s carry CORS headers.
 func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
 	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
@@ -315,11 +394,12 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
 	})
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
-	// chunked body must not be read into memory.
+	// chunked body must not be read into memory, and a body that dribbles
+	// must not pin the handler past the total read deadline.
 	next := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, maxHTTPBodyBytes)
+			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)
 		}
 		next.ServeHTTP(w, r)
 	})

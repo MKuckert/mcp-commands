@@ -17,6 +17,10 @@ func TestParseCLI(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	emptyKeyFile := filepath.Join(t.TempDir(), "empty-key.txt")
+	if err := os.WriteFile(emptyKeyFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tlsCertFile := filepath.Join(t.TempDir(), "cert.pem")
 	if err := os.WriteFile(tlsCertFile, []byte("pem"), 0o600); err != nil {
 		t.Fatal(err)
@@ -169,7 +173,47 @@ func TestParseCLI(t *testing.T) {
 		{
 			name:    "max_concurrent_negative",
 			args:    []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "-1"},
-			wantErr: "--max-concurrent must be >= 0",
+			wantErr: "--max-concurrent must be 0 (default) or 1..256",
+		},
+		{
+			name:    "max_concurrent_above_cap",
+			args:    []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "257"},
+			wantErr: "--max-concurrent must be 0 (default) or 1..256",
+		},
+		{
+			name:     "max_concurrent_at_cap",
+			args:     []string{"--dir", "d", "--scripts", "s", "--max-concurrent", "256"},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.maxConcurrent != maxConcurrentCap {
+					t.Errorf("maxConcurrent = %d, want %d", c.server.maxConcurrent, maxConcurrentCap)
+				}
+			},
+		},
+		{
+			name:    "port_above_range",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "65536"},
+			wantErr: "--port must be 0 (stdio) or 1..65535",
+		},
+		{
+			name:    "port_negative",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "-1"},
+			wantErr: "--port must be 0 (stdio) or 1..65535",
+		},
+		{
+			name:     "port_at_range_edge",
+			args:     []string{"--dir", "d", "--scripts", "s", "--port", "65535"},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.port != 65535 {
+					t.Errorf("port = %d, want 65535", c.server.port)
+				}
+			},
+		},
+		{
+			name:    "api_key_file_empty_fails",
+			args:    []string{"--dir", "d", "--scripts", "s", "--port", "8080", "--api-key-file", emptyKeyFile},
+			wantErr: "is empty",
 		},
 		{
 			name:    "list_tools_and_call_tool_exclusive",
