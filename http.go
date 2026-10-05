@@ -80,12 +80,20 @@ func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
 		return resolvedAPIKey{Token: flagValue, Source: apiKeySourceFlag}, nil
 	}
 	if fileValue != "" {
-		data, err := os.ReadFile(fileValue)
+		f, err := os.Open(fileValue)
+		if err != nil {
+			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
+		}
+		defer f.Close()
+		// Bound the *read* itself (cap + 1 so an over-size file is detectable)
+		// so a misconfigured path — a multi-GB file, a symlink to /dev/zero —
+		// cannot be slurped into memory and OOM the process at startup.
+		data, err := io.ReadAll(io.LimitReader(f, maxAPIKeyFileBytes+1))
 		if err != nil {
 			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
 		}
 		if len(data) > maxAPIKeyFileBytes {
-			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s is %d bytes; maximum is %d (wrong file?)", fileValue, len(data), maxAPIKeyFileBytes)
+			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s exceeds the %d-byte maximum (wrong file?)", fileValue, maxAPIKeyFileBytes)
 		}
 		token := strings.TrimSpace(string(data))
 		if token == "" {
