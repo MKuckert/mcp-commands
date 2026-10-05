@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -973,5 +974,91 @@ func TestWatchChangesChannelClosed(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("watchChanges did not return for a closed error channel")
+	}
+}
+
+// TestWatchToolsRecoveryWatchesBounded verifies the inotify-quota bound:
+// more than recoveryWatchCap distinct external targets, all deleted, evict
+// the oldest recovery watches — and the newest (retained) still recovers
+// when recreated.
+func TestWatchToolsRecoveryWatchesBounded(t *testing.T) {
+	t.Parallel()
+	registry, clientSession := newTestRegistryClient(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env := liveEnvFor(t, io.Discard, io.Discard)
+
+	root := t.TempDir()
+	scriptsDir := filepath.Join(root, "scripts")
+	extDir := filepath.Join(root, "external")
+	os.MkdirAll(scriptsDir, 0o755)
+	os.MkdirAll(extDir, 0o755)
+
+	const n = recoveryWatchCap + 3
+	targets := make([]string, n)
+	for i := 0; i < n; i++ {
+		targets[i] = filepath.Join(extDir, fmt.Sprintf("t%02d.sh", i))
+		writeScript(t, targets[i], fmt.Sprintf("#!/bin/bash\nDescription: t%02d\n", i))
+		if err := os.Symlink(targets[i], filepath.Join(scriptsDir, fmt.Sprintf("t%02d", i))); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+	}
+
+	tools, err := discoverTools(scriptsDir, env.stderr)
+	if err != nil {
+		t.Fatalf("discoverTools: %v", err)
+	}
+	registry.replace(tools)
+	done := make(chan error, 1)
+	go func() {
+		done <- watchTools(ctx, env, scriptsDir, registry, tools)
+	}()
+	defer cancel()
+
+	// Deterministic readiness: one target edit observed.
+	latest := targets[n-1]
+	writeScript(t, latest, "#!/bin/bash\nDescription: t34 ready\n")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listDescription(t, ctx, clientSession, fmt.Sprintf("t%02d", n-1)), "ready") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := listDescription(t, ctx, clientSession, fmt.Sprintf("t%02d", n-1)); !strings.Contains(got, "ready") {
+		t.Fatalf("watcher never became ready; description = %q", got)
+	}
+
+	// Delete every target; retry with a recreate/re-delete of the newest
+	// until the rescan has run (first event can race setup).
+	for i := range targets {
+		_ = os.Remove(targets[i])
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(listNames(t, ctx, clientSession)) == 0 {
+			break
+		}
+		_ = os.Remove(latest)
+		writeScript(t, latest, "#!/bin/bash\nDescription: t34 ping\n")
+		time.Sleep(50 * time.Millisecond)
+	}
+	if names := listNames(t, ctx, clientSession); names != "" {
+		t.Fatalf("deleted targets not removed from the registry; tools = %s", names)
+	}
+
+	// Recreate the *newest* target: its recovery watch was retained (only
+	// the oldest overflow was evicted), so it must re-register.
+	_ = os.Remove(latest)
+	writeScript(t, latest, "#!/bin/bash\nDescription: t34 back\n")
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(listNames(t, ctx, clientSession), fmt.Sprintf("t%02d", n-1)) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if names := listNames(t, ctx, clientSession); !strings.Contains(names, fmt.Sprintf("t%02d", n-1)) {
+		t.Fatalf("newest recreated target not recovered; tools = %s", names)
 	}
 }

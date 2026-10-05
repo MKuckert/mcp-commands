@@ -86,8 +86,10 @@ How the watch behaves:
   (the watch re-attaches to the new directory); a permanent deletion degrades
   to the last known tool set with rescan warnings on stderr.
 - External symlink targets: a deleted target keeps its watch (a recovery
-  watch), so a recreated target re-registers without any other activity;
-  watch entries are only released when the server stops.
+  watch), so a recreated target re-registers without any other activity.
+  At most 32 *vanished* targets keep recovery watches — the oldest are
+  evicted to keep the inotify footprint bounded (a recreated target whose
+  watch was evicted re-registers on the next unrelated rescan).
 - One inherent inotify limit: if a watched path's *parent directory* is
   deleted, the parent watch dies and the parent's recreation is not
   observable — the scripts directory (and any external targets) then degrade

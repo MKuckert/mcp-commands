@@ -179,12 +179,19 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 	}
 }
 
+// recoveryWatchCap bounds how many vanished targets keep their recovery
+// watches: each is a distinct inotify registration, and an unbounded set
+// would exhaust the system inotify quota over a long session.
+const recoveryWatchCap = 32
+
 // addTargets syncs the watched external-target set toward want. Best effort
 // — a failed Add logs a warning and never aborts the loop, and a nil/empty
-// want is valid (no targets). Watch entries are never removed within the
-// session (cleanup happens at watcher.Close): a vanished target keeps its
-// watch as a recovery watch, so a recreated target fires a parent event the
-// rescan can observe and re-attach. Two rules keep the set recoverable:
+// want is valid (no targets). Vanished targets keep their watches as
+// recovery watches (so a recreated target fires a parent event the rescan
+// can observe and re-attach) up to recoveryWatchCap — the oldest vanished
+// entries are evicted to keep the inotify footprint bounded. Live targets
+// and protected paths (the scripts directory and its parent) are never
+// evicted. Two rules keep the set recoverable:
 //
 //   - the target watch and its parent watch are installed independently, so
 //     a failed target Add still leaves a parent watch that observes the
@@ -239,6 +246,68 @@ func addTargets(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, prot
 			current[wp.parent] = true
 		}
 	}
+	evictOverflow(watcher, paths, env, protected, want)
+}
+
+// evictOverflow releases the oldest vanished recovery watches when their
+// count exceeds recoveryWatchCap, so a session that touches many distinct
+// external targets cannot exhaust the inotify quota. Slice order is a
+// monotonic age proxy (entries are appended on first discovery and never
+// re-ordered). Evicted targets degrade to the pre-recovery behavior: a
+// later recreation is only picked up by the next unrelated rescan.
+//
+// Shared parents are only un-watched when no kept entry (as a path or as a
+// parent) still references them, and protected paths are never touched.
+func evictOverflow(watcher *fsnotify.Watcher, paths *[]watchPath, env liveEnv, protected map[string]bool, want []string) {
+	wantSet := make(map[string]bool, len(want))
+	for _, p := range want {
+		wantSet[p] = true
+	}
+	var vanished []watchPath
+	for _, wp := range *paths {
+		if wp.passive || protected[wp.path] || wantSet[wp.path] {
+			continue
+		}
+		vanished = append(vanished, wp)
+	}
+	if len(vanished) <= recoveryWatchCap {
+		return
+	}
+	victims := vanished[:len(vanished)-recoveryWatchCap]
+	drop := make(map[string]bool, len(victims))
+	removeParent := make(map[string]bool)
+	for _, v := range victims {
+		drop[v.path] = true
+		if v.parent != "" {
+			removeParent[v.parent] = true
+		}
+	}
+	kept := make([]watchPath, 0, len(*paths))
+	survivors := make(map[string]bool)
+	for _, wp := range *paths {
+		if drop[wp.path] {
+			continue
+		}
+		kept = append(kept, wp)
+		survivors[wp.path] = true
+		if wp.parent != "" {
+			survivors[wp.parent] = true
+		}
+	}
+	for p := range drop {
+		if err := watcher.Remove(p); err != nil {
+			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
+		}
+	}
+	for p := range removeParent {
+		if protected[p] || survivors[p] {
+			continue
+		}
+		if err := watcher.Remove(p); err != nil {
+			fmt.Fprintf(env.stderr, "Warning: failed to unwatch %s: %v\n", p, err)
+		}
+	}
+	*paths = kept
 }
 
 // externalTargets returns the deduped, discovery-ordered resolved tool paths
