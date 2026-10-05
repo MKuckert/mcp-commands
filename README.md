@@ -129,7 +129,7 @@ or via the `MCP_COMMANDS_API_KEY` environment variable:
 MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
-Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. **Prefer `--api-key-file` or `MCP_COMMANDS_API_KEY` over `--api-key <value>`**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; an unreadable file is a startup error.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), every MCP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized` (CORS preflight `OPTIONS` requests are answered by the CORS layer before authentication):
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. **Prefer `--api-key-file` or `MCP_COMMANDS_API_KEY` over `--api-key <value>`**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; a file over **8 KiB** is rejected as a likely misconfiguration — a token is a short secret — and an empty file is a startup error rather than a silent fall-through to no-auth.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), every MCP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized` (CORS preflight `OPTIONS` requests are answered by the CORS layer before authentication):
 
 ```bash
 curl -s http://localhost:8080 \
@@ -181,6 +181,15 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8443 --tls
 #### Concurrency Cap
 
 The server runs at most `--max-concurrent` tool subprocesses at once (default **16**, `0` selects the default). A call arriving when the cap is full gets a clean in-band MCP error — `mcp-commands is at capacity (16 concurrent tool executions); please retry shortly` — that the client can retry, instead of piling up unbounded subprocesses. Lower it on small hosts; raise it for bursty clients.
+
+#### Request Limits
+
+Every HTTP request body is bounded on **size** and on **time**.
+
+- **Size:** a body larger than **10 MiB** is rejected with `413` (the connection is drained and closed, so a client cannot use an oversized body to exhaust server memory).
+- **Time:** a body that takes more than **30 s** in total to arrive is rejected with `400`. This stops a client that opens a POST and then dribbles a few bytes at a time from pinning a connection and its handler slot indefinitely — the size cap alone would not catch that, since a slow drip never grows large.
+
+Both limits are fixed (not flags); they are generous for the real workload (small JSON tool calls) and exist to bound resource use, not to shape traffic.
 
 #### Browser Clients (Cross Origin Resource Sharing, CORS)
 
@@ -264,12 +273,12 @@ HTTP server:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--host <ip>` | `127.0.0.1` | Bind address for HTTP mode. |
-| `--port <port>` | `0` (stdio) | A non-zero value switches to HTTP mode. |
+| `--port <port>` | `0` (stdio) | A non-zero value (validated `1..65535`) switches to HTTP mode. |
 | `--api-key <token>` | _(none)_ | Bearer token. Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. |
-| `--api-key-file <path>` | _(none)_ | Read the token from a file (content trimmed); the token never appears in a process listing. |
+| `--api-key-file <path>` | _(none)_ | Read the token from a file (content trimmed, max **8 KiB**, must be non-empty); the token never appears in a process listing. |
 | `--tls-cert <path>` / `--tls-key <path>` | _(none)_ | Serve HTTPS directly (PEM files, required together; startup-checked). Ignored in stdio mode. |
 | `--insecure-no-auth` | off | Escape hatch: start an unauthenticated server on a non-loopback host (loudly warned). |
-| `--max-concurrent <n>` | `16` (`0` = default) | Cap on simultaneous tool executions; saturated calls get a clean at-capacity error. |
+| `--max-concurrent <n>` | `16` (`0` = default) | Cap on simultaneous tool executions (validated `1..256`); saturated calls get a clean at-capacity error. |
 
 CORS (`--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`) — see the [CORS section](#browser-clients-cross-origin-resource-sharing-cors) for the full reference, including env fallbacks. Timeouts (`--timeout`, `--no-timeout`) — see the [Timeouts section](#timeouts).
 
