@@ -249,7 +249,7 @@ The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` s
 
 #### Version
 
-`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation.
+`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation. Release binaries report their release tag (injected at build time); local source builds without injected ldflags report `commit-local`.
 
 #### Flags and Environment Variables
 
