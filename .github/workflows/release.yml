@@ -13,7 +13,38 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version: "stable"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      # The shipped version is tag-injected via .goreleaser.yaml ldflags
+      # ({{.Version}} strips the leading "v"); assert the built binary
+      # reports the tag so a stale hardcoded version cannot ship.
+      - name: Verify tag-derived version
+        run: |
+          go build -ldflags "-X main.serverVersion=${GITHUB_REF_NAME#v}" -o /tmp/mcp-commands .
+          got="$(/tmp/mcp-commands --version)"
+          if [ "$got" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "version mismatch: binary reports $got, tag is $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "version check: $got"
+
   goreleaser:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
