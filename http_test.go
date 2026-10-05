@@ -671,30 +671,42 @@ func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 func TestHTTPSecurityPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		host        string
-		apiKey      string
-		acceptsRisk bool
-		wantErr     bool
-		wantWarning string // substring expected when a warning is returned
+		name         string
+		host         string
+		apiKey       string
+		acceptsRisk  bool
+		allowAll     bool
+		tls          bool
+		wantErr      bool
+		wantWarnings []string // substrings each expected in the joined warnings
 	}{
-		{host: "127.0.0.1", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "127.0.0.2", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "::1", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "localhost", apiKey: "", acceptsRisk: false, wantErr: false},
-		{host: "0.0.0.0", apiKey: "s3cret", acceptsRisk: false, wantErr: false},
+		{name: "loopback no auth", host: "127.0.0.1"},
+		{name: "loopback 127 range", host: "127.0.0.2"},
+		{name: "loopback v6", host: "::1"},
+		{name: "loopback localhost", host: "localhost"},
+		{name: "remote with key cleartext", host: "0.0.0.0", apiKey: "s3cret", wantWarnings: []string{"cleartext"}},
 		// The remote-bind case: no key, no escape hatch → refuse.
-		{host: "0.0.0.0", apiKey: "", acceptsRisk: false, wantErr: true},
-		{host: "192.168.1.10", apiKey: "", acceptsRisk: false, wantErr: true},
-		{host: "10.0.0.5", apiKey: "", acceptsRisk: false, wantErr: true},
+		{name: "remote no auth refuses", host: "0.0.0.0", wantErr: true},
+		{name: "lan ip no auth refuses", host: "192.168.1.10", wantErr: true},
+		{name: "private ip no auth refuses", host: "10.0.0.5", wantErr: true},
 		// Unparseable host → treated as non-loopback (conservative).
-		{host: "not-an-ip", apiKey: "", acceptsRisk: false, wantErr: true},
+		{name: "unparseable host refuses", host: "not-an-ip", wantErr: true},
 		// Escape hatch: starts, but loudly.
-		{host: "0.0.0.0", apiKey: "", acceptsRisk: true, wantWarning: "UNAUTHENTICATED"},
+		{name: "remote no auth escape hatch", host: "0.0.0.0", acceptsRisk: true, wantWarnings: []string{"UNAUTHENTICATED"}},
+		// M6: --allow-all-origins with no token — any web page can invoke
+		// tools and read their output.
+		{name: "loopback allow-all no auth", host: "127.0.0.1", allowAll: true, wantWarnings: []string{"--allow-all-origins"}},
+		{name: "remote allow-all escape no tls", host: "0.0.0.0", acceptsRisk: true, allowAll: true, wantWarnings: []string{"UNAUTHENTICATED", "--allow-all-origins"}},
+		// Allow-all WITH a token is defensible: the preflight bypass does not
+		// bypass the auth on the real call.
+		{name: "loopback allow-all with key", host: "127.0.0.1", apiKey: "s3cret", allowAll: true},
+		// M6: authenticated remote bind without TLS — cleartext credential.
+		{name: "remote key with tls", host: "0.0.0.0", apiKey: "s3cret", tls: true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.host, func(t *testing.T) {
-			warning, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, tt.acceptsRisk)
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := checkHTTPSecurityPolicy(tt.host, tt.apiKey, corsConfig{allowAll: tt.allowAll}, tt.tls, tt.acceptsRisk)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -705,9 +717,16 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.host) {
 					t.Errorf("error should name the host: %v", err)
 				}
+				return
 			}
-			if tt.wantWarning != "" && !strings.Contains(warning, tt.wantWarning) {
-				t.Fatalf("warning = %q, want it to contain %q", warning, tt.wantWarning)
+			joined := strings.Join(warnings, "\n")
+			for _, want := range tt.wantWarnings {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("warnings = %q, want them to contain %q", joined, want)
+				}
+			}
+			if len(tt.wantWarnings) == 0 && len(warnings) != 0 {
+				t.Fatalf("warnings = %q, want none", joined)
 			}
 		})
 	}

@@ -98,19 +98,36 @@ func isLoopbackHost(host string) bool {
 	return ip.Equal(net.ParseIP("::1"))
 }
 
-// checkHTTPSecurityPolicy validates the auth posture of an HTTP bind. It
-// returns a warning to log when the server runs unauthenticated, and an
-// error when it would start unauthenticated on a non-loopback host without
-// the explicit --insecure-no-auth escape hatch (an unguarded remote
-// command-execution endpoint).
-func checkHTTPSecurityPolicy(host, apiKey string, acceptsRisk bool) (warning string, err error) {
-	if apiKey != "" || isLoopbackHost(host) {
-		return "", nil
+// checkHTTPSecurityPolicy validates the startup posture of an HTTP bind:
+// the bind host, the auth token, the CORS mode, and TLS. It returns an
+// error when the server would start unauthenticated on a non-loopback host
+// without the explicit --insecure-no-auth escape hatch (an unguarded remote
+// command-execution endpoint), plus a list of warnings for postures that
+// start but are dangerous:
+//
+//   - unauthenticated non-loopback bind (authorized via --insecure-no-auth)
+//   - --allow-all-origins with no bearer token: the preflight bypass plus
+//     the echoed origin let any web page invoke tools and read their output
+//   - authenticated non-loopback bind without TLS: a reusable bearer
+//     credential and every body transit in cleartext
+//
+// Warnings are advisory only by design: every posture it names is an
+// explicit operator choice, so the server starts and tells the operator
+// loudly what they chose. There is deliberately no additional flag.
+func checkHTTPSecurityPolicy(host, apiKey string, cors corsConfig, tlsEnabled, acceptsRisk bool) (warnings []string, err error) {
+	if apiKey == "" && !isLoopbackHost(host) {
+		if !acceptsRisk {
+			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+		}
+		warnings = append(warnings, fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host))
 	}
-	if !acceptsRisk {
-		return "", fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+	if cors.allowAll && apiKey == "" {
+		warnings = append(warnings, "WARNING: --allow-all-origins with no bearer token (set --api-key or "+apiKeyEnvVar+") — any web page opened in a browser can invoke tools against this server and read their output")
 	}
-	return fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host), nil
+	if apiKey != "" && !isLoopbackHost(host) && !tlsEnabled {
+		warnings = append(warnings, fmt.Sprintf("WARNING: authenticated HTTP server on non-loopback host %q without TLS — the bearer token and every request/response body transit in cleartext; put a TLS-terminating proxy in front or pass --tls-cert/--tls-key", host))
+	}
+	return warnings, nil
 }
 
 // corsConfig holds the resolved CORS and streamable-HTTP mode options for the

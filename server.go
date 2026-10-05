@@ -104,10 +104,14 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		addr := fmt.Sprintf("%s:%d", cfg.host, cfg.port)
 
 		// Fail fast before binding: no silent unauthenticated remote shells.
-		if warning, err := checkHTTPSecurityPolicy(cfg.host, cfg.apiKey.Token, cfg.insecureNoAuth); err != nil {
+		// The policy check inspects the full posture (bind × auth × CORS × TLS)
+		// and warns loudly about dangerous-but-explicit combinations.
+		warnings, err := checkHTTPSecurityPolicy(cfg.host, cfg.apiKey.Token, cfg.cors, cfg.tlsCert != "", cfg.insecureNoAuth)
+		if err != nil {
 			return err
-		} else if warning != "" {
-			fmt.Fprintln(env.stderr, warning)
+		}
+		for _, w := range warnings {
+			fmt.Fprintln(env.stderr, w)
 		}
 
 		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)

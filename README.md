@@ -168,7 +168,7 @@ Notes:
 
 #### TLS
 
-The HTTP transport is **cleartext by default**: the bearer token and every request body transit unencrypted. For production, terminate TLS — either put a TLS-terminating proxy (Caddy/nginx) in front of the server, or serve HTTPS directly:
+The HTTP transport is **cleartext by default**: the bearer token and every request body transit unencrypted. For production, terminate TLS — either put a TLS-terminating proxy (Caddy/nginx) in front of the server, or serve HTTPS directly. Binding a non-loopback host with `--api-key` but without TLS prints a loud startup warning (the bearer token and every body transit unencrypted); behind a TLS-terminating proxy you can disregard it.
 
 ```bash
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8443 --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
@@ -199,7 +199,7 @@ Configuration (each flag wins over its env var):
 | `--disable-localhost-protection` | *(none, deliberate)* | Disables the SDK's DNS-rebinding 403 for servers on loopback. For dev setups where the page is served from a tunnel/LAN hostname that resolves to `127.0.0.1`. This flag intentionally has no env fallback — it is a mode choice, not a secret. |
 
 Notes:
-- **Security:** this server executes local scripts, so CORS is **not** a security boundary — it only gates which page's JavaScript can *read* responses. Use the explicit `--allowed-origins` list in production; never `--allow-all-origins` on a public, unauthenticated server.
+- **Security:** this server executes local scripts, so CORS is **not** a security boundary — it only gates which page's JavaScript can *read* responses. Use the explicit `--allowed-origins` list in production; never `--allow-all-origins` on a public, unauthenticated server. `--allow-all-origins` combined with **no** `--api-key` prints a loud startup warning: any web page opened in a browser can then invoke tools against the server and read their output.
 - **Behavior change in 0.5.0 — the HTTP transport is always stateless:** each request stands on its own. go-sdk v1.6.1 still issues a vestigial `Mcp-Session-Id` header on `initialize` but ignores it on later requests, so clients that stored and resend a session ID keep working. A request missing the `Mcp-Protocol-Version` header defaults to `2025-03-26` (the oldest supported version). `GET` (SSE stream) returns 405.
 - **Use a fetch-based client**, e.g. the official MCP TypeScript SDK — raw `EventSource` cannot work in any mode. Fetch clients must send `Accept: application/json, text/event-stream` on POST (the SDK returns 400 otherwise; the TS SDK does both automatically).
 - **Do not set `MCPGODEBUG=enableoriginverification=1`** to "fix" CORS failures: it makes the SDK 403 *all* cross-origin requests inside the handler, where the CORS middleware cannot recover.
