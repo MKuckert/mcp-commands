@@ -11,7 +11,7 @@
 - [x] **H3 — Close the registration→watch gap.** `watchChanges` runs its rescan callback exactly once, synchronously, after the watcher is ready and before the event loop; the callback applies changes only when the set differs (registry `replaceIfChanged` / list-print on change), so a quiet start stays quiet.
 - [x] **M8 — Per-tool registry diff.** `replaceLocked` diffs old vs new by tool name: `RemoveTools` only for removed names; `AddTool` for changed and added tools (the SDK `featureSet.add` replaces in place for an existing name, so a changed tool never disappears from a concurrent `ListTools`); `current` updated to a copied new set (the `names` field was removed during review — it had no reader). `replaceIfChanged` does the equality check and the apply under one lock (L4 critical section). Public `replace()` delegates to `replaceLocked`.
 - [x] **H4 — Reattach on watched-path replacement.** `watchChanges` also watches the parent of each primary path; an event *on* a primary path with Remove/Rename (deleted/moved) or Create (recreated) triggers a best-effort `watcher.Add(path)` reattach plus a rescan. Deleting and recreating the scripts directory recovers watching; recreated contents register, deleted scripts revoke. Deleting the directory without recreation keeps the last known set with the existing rescan warning (degraded, visible).
-- [x] **M11 — Watch external symlink targets.** `externalTargets(tools, scriptsDir)` returns deduped resolved tool paths whose parent is not the scripts dir. The rescan callback returns the current target set; `watchChanges` adds watches (path + parent, with the same reattach rule) for new targets and removes vanished ones, best-effort. Editing an external target refreshes its tool; both server mode and `--list-tools --watch` watch targets.
+- [x] **M11 — Watch external symlink targets.** `externalTargets(tools, scriptsDir)` returns deduped resolved tool paths whose parent is not the scripts dir. The rescan callback returns the current target set; `watchChanges` adds watches (path + parent, with the same reattach rule) for new targets and removes vanished ones, best-effort. Editing an external target refreshes its tool; both server mode and `--list-tools --watch` watch targets. *(Reverted per postscript — now a documented limitation.)*
 - [x] **Tests.** Registry: diff correctness (changed/removed/added, unchanged untouched), concurrent `ListTools`/`CallTool` during a changed reload always sees unchanged tools, `replaceIfChanged` atomicity. Watch: pre-watch change picked up (H3, deterministic), delete → recreate → add/revocation (H4), injected `newWatcher` failure → `runListTools` exit 1 and `run()` error (M4), injected closed error channel → `run()` fatal (M4), external-target edit refresh (M11), existing tests (no-spurious-fire, permission error, dir-deleted-keeps-running, identical-rescan-skip) preserved and updated to the new signature.
 - [x] **Docs.** README: `--watch` bullets — the watched directory is re-attached after delete/recreate, symlink targets are watched, a fatal watch failure exits non-zero (server mode) / non-zero exit code (live list mode).
 - [x] **Validate.** `gofmt -l`, `go test ./... -count=1`, `go vet ./...`, `go run . --version` = 0.9.2. (`go test -race` unsupported in this sandbox; note in PR description.)
@@ -26,3 +26,13 @@
 ## Review log
 
 (empty — Plan Reviewer, then Code Reviewer)
+
+## Postscript — M11 descoped (documented-limitation option)
+
+After the Copilot review round added recovery-watch retention + inotify-quota eviction for the external target watches, the maintainer chose M11's second option: **document** that symlink-target changes require touching the link / restart, and **drop** the target-watch machinery. Final state:
+
+- Removed: `externalTargets`, `addTargets`, `evictOverflow`, `recoveryWatchCap`, passive-entry bookkeeping for targets, target reattach, the two external-target tests. (`watchPath` keeps `parent`/`passive`/`dirScope` for the scripts directory + its parent — the H4 reattach core.)
+- `watchChanges` signature: `onRescan func()` (no return).
+- Kept: H3 guaranteed rescan, H4 scripts-dir delete/recreate reattach, M4 fatality, M8 per-tool diff, L4 split, stdio concurrent serving.
+- Documented in README (watch behavior): external targets not watched; in-place target edit keeps execution fresh, metadata stale until the link is touched or the server restarts.
+- Pinned by `TestWatchToolsSymlinkTargetEditNotWatched`: in-place target edit does NOT refresh; re-linking does.

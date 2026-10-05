@@ -80,23 +80,24 @@ How the watch behaves:
   are left alone, removed tools are unregistered, and added/changed tools are
   registered in place — so a `tools/list` from a client never sees a gap, and
   a no-op rescan emits no `tools/list_changed` notifications.
-- A symlinked tool whose target lives *outside* the scripts directory is
-  watched directly, so editing the target refreshes the registered tool.
+- Only the scripts directory (and its parent, for deletion/recreation
+  recovery) is watched. A symlinked tool whose *target* lives outside the
+  directory is therefore not watched directly: calling the tool always runs
+  the current file, but its registered *metadata* (description, parameters,
+  timeout) stays stale after an in-place target edit until the link itself
+  is touched (replace or re-point the symlink — that fires a rescan) or the
+  server restarts. Deliberate trade-off: watching every external target
+  (and keeping recovery watches for deleted ones) added a large amount of
+  complexity for a minor staleness window, so it was dropped.
 - Deleting and recreating the scripts directory is recovered automatically
   (the watch re-attaches to the new directory); a permanent deletion degrades
   to the last known tool set with rescan warnings on stderr.
-- External symlink targets: a deleted target keeps its watch (a recovery
-  watch), so a recreated target re-registers without any other activity.
-  At most 32 *vanished* targets keep recovery watches — the oldest are
-  evicted to keep the inotify footprint bounded (a recreated target whose
-  watch was evicted re-registers on the next unrelated rescan).
-- One inherent inotify limit: if a watched path's *parent directory* is
-  deleted, the parent watch dies and the parent's recreation is not
-  observable — the scripts directory (and any external targets) then degrade
-  to the last known tool set until the server restarts. Deleting and
-  *recreating the watched path itself* (the scripts directory, a target
-  file) is recovered automatically, since the surviving sibling watches
-  observe it.
+- One inherent inotify limit: if the scripts directory's *parent directory*
+  is deleted, the parent watch dies and the parent's recreation is not
+  observable — the registry then degrades to the last known tool set until
+  the server restarts. Deleting and *recreating the scripts directory
+  itself* is recovered automatically, since the surviving parent watch
+  observes it.
 - If the file watcher cannot be set up (e.g. `inotify` exhausted), the server
   fails to start with a visible error on stderr. `--watch` is an explicit
   request, so a fatal watcher failure at any later point also exits the

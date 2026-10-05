@@ -164,25 +164,19 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 
 	// Re-prints only when the discovered tool set differs from the last
 	// printed one: the guaranteed post-readiness rescan (and any other
-	// no-op rescan) therefore stays silent — including quiet startups with
-	// external symlink targets, whose paths are derived from the tools and
-	// already covered by the tool comparison. Symlink targets outside the
-	// directory are watched directly so external-target edits re-print.
+	// no-op rescan) therefore stays silent.
 	lastPrinted := tools
-	var lastTargets []string
-	rescan := func() []string {
+	rescan := func() {
 		newTools, err := discoverTools(scriptsAbs, env.stderr)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
-			return lastTargets
+			return
 		}
 		if !toolsEqual(lastPrinted, newTools) {
 			env.clearScreen(env.stdout)
 			printList(newTools)
 		}
 		lastPrinted = newTools
-		lastTargets = externalTargets(newTools, scriptsAbs)
-		return lastTargets
 	}
 
 	// A watch failure is a real failure: the live list would silently freeze

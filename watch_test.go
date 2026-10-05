@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -350,7 +349,7 @@ func TestWatchChanges(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// Baseline: the guaranteed post-readiness rescan fires the callback once,
@@ -406,7 +405,7 @@ func TestWatchChangesNoSpuriousFire(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	time.Sleep(500 * time.Millisecond) // several debounce windows, no events
@@ -509,7 +508,7 @@ func TestWatchChangesRenameTriggersChange(t *testing.T) {
 
 	var calls atomic.Int32
 	go func() {
-		_ = watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
+		_ = watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// Baseline first: the guaranteed post-readiness rescan fires the
@@ -565,12 +564,12 @@ func TestWatchChangesPermissionError(t *testing.T) {
 	var calls atomic.Int32
 	done := make(chan error, 1)
 	go func() {
-		done <- watchChanges(ctx, env, tmpDir, func() []string { calls.Add(1); return nil })
+		done <- watchChanges(ctx, env, tmpDir, func() { calls.Add(1) })
 	}()
 
 	// Let the loop arm, then deliver the synthetic watcher error.
 	time.Sleep(100 * time.Millisecond)
-	injected <- errors.New("permission denied (synthetic)")
+	injected <- fmt.Errorf("permission denied (synthetic)")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for !strings.Contains(buf.String(), "file watcher error") {
@@ -821,65 +820,6 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 	}
 }
 
-// TestWatchToolsExternalSymlinkTargetChange (M11) verifies that editing the
-// target of a symlinked tool whose target lives outside the scripts directory
-// refreshes the registered tool: the target is watched directly.
-func TestWatchToolsExternalSymlinkTargetChange(t *testing.T) {
-	t.Parallel()
-	registry, clientSession := newTestRegistryClient(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	env := liveEnvFor(t, io.Discard, io.Discard)
-
-	root := t.TempDir()
-	scriptsDir := filepath.Join(root, "scripts")
-	extDir := filepath.Join(root, "external")
-	os.MkdirAll(scriptsDir, 0o755)
-	os.MkdirAll(extDir, 0o755)
-	target := filepath.Join(extDir, "alpha.sh")
-	writeScript(t, target, "#!/bin/bash\nDescription: alpha\necho alpha\n")
-	os.Symlink(target, filepath.Join(scriptsDir, "alpha"))
-
-	tools, err := discoverTools(scriptsDir, env.stderr)
-	if err != nil {
-		t.Fatalf("discoverTools: %v", err)
-	}
-	registry.replace(tools)
-	done := make(chan error, 1)
-	go func() {
-		done <- watchTools(ctx, env, scriptsDir, registry, tools)
-	}()
-	defer cancel()
-
-	// Edit the external target directly. The first write can land inside the
-	// setup window and be picked up by the guaranteed readiness rescan, so
-	// require a *second* edit (v3) to be observed: the readiness rescan runs
-	// exactly once, so any later observation must come from the target
-	// watch.
-	writeScript(t, target, "#!/bin/bash\nDescription: alpha v2\necho alpha\n")
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v2") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "v2") {
-		t.Fatalf("first target edit not observed; description = %q", got)
-	}
-	writeScript(t, target, "#!/bin/bash\nDescription: alpha v3\necho alpha\n")
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "v3") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "v3") {
-		t.Fatalf("second target edit not observed via the target watch; description = %q", got)
-	}
-}
-
 // newTestRegistryClient builds a registry plus an in-memory MCP client
 // session bound to it (the pattern shared by the other watch tools tests).
 func newTestRegistryClient(t *testing.T) (*toolRegistry, *mcp.ClientSession) {
@@ -938,10 +878,10 @@ func TestWatchChangesWatcherSetupFailure(t *testing.T) {
 	defer cancel()
 	env := liveEnvFor(t, io.Discard, io.Discard)
 	env.newWatcher = func() (*fsnotify.Watcher, error) {
-		return nil, errors.New("inotify unavailable")
+		return nil, fmt.Errorf("inotify unavailable")
 	}
 	tmpDir := t.TempDir()
-	err := watchChanges(ctx, env, tmpDir, func() []string { return nil })
+	err := watchChanges(ctx, env, tmpDir, func() {})
 	if err == nil || !strings.Contains(err.Error(), "inotify unavailable") {
 		t.Fatalf("setup failure not surfaced; err = %v", err)
 	}
@@ -963,7 +903,7 @@ func TestWatchChangesChannelClosed(t *testing.T) {
 	close(closed)
 	env.watcherErrors = func(*fsnotify.Watcher) <-chan error { return closed }
 	done := make(chan error, 1)
-	go func() { done <- watchChanges(ctx, env, tmpDir, func() []string { return nil }) }()
+	go func() { done <- watchChanges(ctx, env, tmpDir, func() {}) }()
 	select {
 	case err := <-done:
 		if err == nil || err == context.Canceled {
@@ -977,11 +917,11 @@ func TestWatchChangesChannelClosed(t *testing.T) {
 	}
 }
 
-// TestWatchToolsRecoveryWatchesBounded verifies the inotify-quota bound:
-// more than recoveryWatchCap distinct external targets, all deleted, evict
-// the oldest recovery watches — and the newest (retained) still recovers
-// when recreated.
-func TestWatchToolsRecoveryWatchesBounded(t *testing.T) {
+// TestWatchToolsSymlinkTargetEditNotWatched pins the documented trade-off
+// (README, watch behavior; REVIEW_REPORT M11 decision): external symlink
+// targets are not watched, so an in-place target edit does NOT refresh the
+// registered metadata — touching the link itself does.
+func TestWatchToolsSymlinkTargetEditNotWatched(t *testing.T) {
 	t.Parallel()
 	registry, clientSession := newTestRegistryClient(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -994,14 +934,11 @@ func TestWatchToolsRecoveryWatchesBounded(t *testing.T) {
 	os.MkdirAll(scriptsDir, 0o755)
 	os.MkdirAll(extDir, 0o755)
 
-	const n = recoveryWatchCap + 3
-	targets := make([]string, n)
-	for i := 0; i < n; i++ {
-		targets[i] = filepath.Join(extDir, fmt.Sprintf("t%02d.sh", i))
-		writeScript(t, targets[i], fmt.Sprintf("#!/bin/bash\nDescription: t%02d\n", i))
-		if err := os.Symlink(targets[i], filepath.Join(scriptsDir, fmt.Sprintf("t%02d", i))); err != nil {
-			t.Fatalf("symlink: %v", err)
-		}
+	target := filepath.Join(extDir, "alpha.sh")
+	link := filepath.Join(scriptsDir, "alpha")
+	writeScript(t, target, "#!/bin/bash\nDescription: alpha v1\n")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
 	}
 
 	tools, err := discoverTools(scriptsDir, env.stderr)
@@ -1015,53 +952,46 @@ func TestWatchToolsRecoveryWatchesBounded(t *testing.T) {
 	}()
 	defer cancel()
 
-	// Deterministic readiness: one target edit observed.
-	latest := targets[n-1]
-	writeScript(t, latest, "#!/bin/bash\nDescription: t34 ready\n")
+	// Readiness: edit the target, require the link to observe nothing —
+	// instead use a scripts-dir canary as the readiness signal.
+	canary := filepath.Join(scriptsDir, ".canary")
 	deadline := time.Now().Add(3 * time.Second)
+	ready := false
 	for time.Now().Before(deadline) {
-		if strings.Contains(listDescription(t, ctx, clientSession, fmt.Sprintf("t%02d", n-1)), "ready") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := listDescription(t, ctx, clientSession, fmt.Sprintf("t%02d", n-1)); !strings.Contains(got, "ready") {
-		t.Fatalf("watcher never became ready; description = %q", got)
-	}
-
-	// Delete every target; retry with a recreate/re-delete of the newest
-	// until the rescan has run (first event can race setup).
-	for i := range targets {
-		_ = os.Remove(targets[i])
-	}
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(listNames(t, ctx, clientSession)) == 0 {
-			break
-		}
-		// The deletion burst can race setup; force a rescan with a scripts
-		// directory canary (a child event arms the debounce).
-		canary := filepath.Join(scriptsDir, ".rescan")
 		_ = os.WriteFile(canary, []byte("x"), 0o644)
 		_ = os.Remove(canary)
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
+		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "alpha v1") {
+			ready = true
+			break
+		}
 	}
-	if names := listNames(t, ctx, clientSession); names != "" {
-		t.Fatalf("deleted targets not removed from the registry; tools = %s", names)
+	if !ready {
+		t.Fatalf("watcher never became ready; description = %q", listDescription(t, ctx, clientSession, "alpha"))
 	}
 
-	// Recreate the *newest* target: its recovery watch was retained (only
-	// the oldest overflow was evicted), so it must re-register.
-	_ = os.Remove(latest)
-	writeScript(t, latest, "#!/bin/bash\nDescription: t34 back\n")
+	// In-place target edit: NOT watched, so the metadata must stay stale
+	// well beyond the debounce window.
+	writeScript(t, target, "#!/bin/bash\nDescription: alpha v2\n")
+	time.Sleep(500 * time.Millisecond)
+	if got := listDescription(t, ctx, clientSession, "alpha"); !strings.Contains(got, "alpha v1") {
+		t.Fatalf("external target edit must not refresh the registry; description = %q", got)
+	}
+
+	// Touching the link IS observed (scripts-directory event) and picks up
+	// the new metadata.
+	if err := os.Remove(link); err != nil {
+		t.Fatalf("remove link: %v", err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("re-symlink: %v", err)
+	}
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(listNames(t, ctx, clientSession), fmt.Sprintf("t%02d", n-1)) {
-			break
+		if strings.Contains(listDescription(t, ctx, clientSession, "alpha"), "alpha v2") {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if names := listNames(t, ctx, clientSession); !strings.Contains(names, fmt.Sprintf("t%02d", n-1)) {
-		t.Fatalf("newest recreated target not recovered; tools = %s", names)
-	}
+	t.Fatalf("touching the link did not refresh the tool; description = %q", listDescription(t, ctx, clientSession, "alpha"))
 }
