@@ -162,7 +162,7 @@ Notes:
   time=2025-01-15T10:00:00.000Z level=ERROR msg="refusing to start unauthenticated HTTP server on non-loopback host \"0.0.0.0\": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk"
   ```
 
-  An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, logging a loud `WARNING: UNAUTHENTICATED HTTP server bound to …` record and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
+  An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, logging a loud `UNAUTHENTICATED HTTP server bound to …` warning and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
 
 #### TLS
 
