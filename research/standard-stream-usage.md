@@ -5,8 +5,8 @@ as of branch `feature/logging` (commit c5c3ce6). Subprocess stream capture in
 `execute.go` (`boundedWriter`, `cmd.Stdout/Stderr`, `combineToolOutput`) is
 internal buffering, not process output, and is listed separately at the end.
 
-The front end receives streams through the `liveEnv` struct (`server.go:42-49`),
-which `prodLiveEnv` fills with `os.Stdout`/`os.Stderr` (`server.go:53-60`).
+The front end receives streams through the `liveEnv` struct (`server.go:42-50`),
+which `prodLiveEnv` fills with `os.Stdout`/`os.Stderr` (`server.go:53-61`).
 Only `main.go` touches the real `os.*` streams directly; everything else uses
 the injected writers.
 
@@ -24,8 +24,8 @@ the injected writers.
 | `diagnostic.go:100` | `fmt.Fprintln(env.stdout, err.Error())` | `--call-tool`: required-param validation failure (deliberately on stdout: it is the tool result content) |
 | `diagnostic.go:120` | `fmt.Fprintln(env.stdout, b.String())` | `--call-tool`: tool result text (always stdout, even on `IsError`) |
 | `diagnostic.go:148` | `fmt.Fprint(env.stdout, renderToolList(...))` | `--list-tools`: the tool table (initial print + every watch re-print) |
-| `diagnostic.go` (watch loop) | `env.clearScreen(env.stdout)` | `--list-tools --watch`: ANSI erase-screen before re-print; TTY-gated in `prodClearScreen` (`server.go:24-29`), no-op when piped |
-| `server.go:29` | `stdout.Write("\x1b[2J\x1b[H")` | same clear-screen escape, only when `term.IsTerminal` |
+| `diagnostic.go` (watch loop) | `env.clearScreen(env.stdout)` | `--list-tools --watch`: ANSI erase-screen before re-print; TTY-gated in `prodClearScreen` (`server.go:24-30`), no-op when piped |
+| `server.go:29` | `stdout.Write([]byte("\x1b[2J\x1b[H"))` | same clear-screen escape, only when `term.IsTerminal` |
 
 ## stderr writes
 
@@ -82,8 +82,9 @@ the injected writers.
 
 ## Not process output (excluded)
 
-- `http.go:329` — `w.Write("unauthorized")`: HTTP response body, not a stream.
-- `execute.go:98-147` — `boundedWriter`/`combineToolOutput`: captures the *child
+- `http.go:329` — `w.Write([]byte("unauthorized"))`: HTTP response body, not a stream.
+- `execute.go:98-163` — `boundedWriter`/`combineToolOutput` (bound to the child
+  via `cmd.Stdout`/`cmd.Stderr`, `execute.go:202-203`): captures the *child
   script's* stdout/stderr into a buffer for the MCP result text.
 
 ## Observations for the logging design
@@ -98,9 +99,9 @@ the injected writers.
 3. **The stdio server is strict**: stdout is reserved for the MCP protocol, so
    in `modeServer` the logger must target stderr only (and the clear-screen
    escape is only legal in `--list-tools --watch`).
-4. **~20 call sites** across `main.go`, `diagnostic.go`, `discover.go`,
+4. **~30 call sites** across `main.go`, `diagnostic.go`, `discover.go`,
    `server.go`, `watch.go`; all already funnel through `liveEnv.stderr`
    (injectable for tests) — a logger injected the same way keeps testability.
-5. TTY-aware behavior already exists in two places (`prodClearScreen`,
-   `prodResolveWrapWidth` in `list.go:22`); a color handler should gate on the
+5. TTY-aware behavior already exists in two places (`prodClearScreen` in
+   `server.go:24`, `prodResolveWrapWidth` in `list.go:22`); a color handler should gate on the
    same `term.IsTerminal` check (tint does this automatically).

@@ -24,7 +24,7 @@ log.Error("e")
 ```
 
 - **Severities:** `Debug`/`Info`/`Warn`/`Error`, custom levels via `slog.Level`.
-- **stdout/stderr:** handlers take any `io.Writer`; routing debug→stdout and info+→stderr is two handlers plus `slog.NewRouteHandler`/`slog.NewMultiHandler`.
+- **stdout/stderr:** handlers take any `io.Writer`; routing debug→stdout and info+→stderr is two handlers plus a small custom routing handler (`NewMultiHandler` fans out to *all* handlers, so it cannot split by level).
 - **Code-only config:** yes — `slog.HandlerOptions` (level, time format, attribute replacement) + `NewJSONHandler` for machine output.
 - **Colors:** none built in. Drop-in colored text handler: [`lmittmann/tint`](https://github.com/lmittmann/tint) (auto-detects TTY).
 - Zero dependencies, idiomatic modern Go, no maintenance risk.
@@ -33,14 +33,37 @@ log.Error("e")
 
 ```go
 errH := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
-dbgH := tint.NewHandler(os.Stderr, &tint.Options{Level: slog.LevelDebug, TimeFormat: time.Kitchen})
+// Debug lines go to stdout (kept out of stderr in stdio-server mode).
+// tint.NewHandler(os.Stdout, &tint.Options{Level: slog.LevelDebug, TimeFormat: time.Kitchen}) for colored debug output.
+dbgH := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})
 
-log := slog.New(slog.NewRouteHandler(errH, func(r slog.Record) slog.Handler {
-    if r.Level < slog.LevelInfo {
-        return dbgH
+// slog has no built-in level router: a tiny custom Handler splits by level
+// (Go 1.25+ handler signatures; Go 1.21–1.24 omit the ctx parameters).
+type route struct{ def, low slog.Handler }
+
+func (r route) Enabled(ctx context.Context, l slog.Level) bool {
+    if l < slog.LevelInfo {
+        return r.low.Enabled(ctx, l)
     }
-    return nil // keep default (errH)
-}))
+    return r.def.Enabled(ctx, l)
+}
+
+func (r route) Handle(ctx context.Context, rec slog.Record) error {
+    if rec.Level < slog.LevelInfo {
+        return r.low.Handle(ctx, rec)
+    }
+    return r.def.Handle(ctx, rec)
+}
+
+func (r route) WithAttrs(a []slog.Attr) slog.Handler {
+    return route{r.def.WithAttrs(a), r.low.WithAttrs(a)}
+}
+
+func (r route) WithGroup(g string) slog.Handler {
+    return route{r.def.WithGroup(g), r.low.WithGroup(g)}
+}
+
+log := slog.New(route{def: errH, low: dbgH})
 ```
 
 For a simple case one handler on stderr plus a level setting in code is enough.
@@ -53,7 +76,7 @@ log := zerolog.New(w).Level(zerolog.DebugLevel).With().Timestamp().Logger()
 log.Info().Str("k", "v").Msg("hello")
 ```
 
-- Zero-allocation JSON; `ConsoleWriter` gives colored, TTY-aware pretty output with fully customizable `FormatLevel`/`FormatMessage`/`PartsOrder`.
+- Zero-allocation JSON; `ConsoleWriter` gives colored pretty output with fully customizable `FormatLevel`/`FormatMessage`/`PartsOrder` — but no TTY auto-detection: set `NoColor` yourself when piped.
 - Writer is an `io.Writer` (`zerolog.Output(...)`); level set in code via `.Level(...)`.
 - Builder-style API (`log.Warn().Msg(...)`) is fluent but noisier than slog.
 - Best when allocation/benchmark numbers matter; otherwise slog is simpler.
