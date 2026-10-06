@@ -34,8 +34,8 @@ func TestLogHandlerLevels(t *testing.T) {
 			if !strings.HasPrefix(out, tc.want) {
 				t.Fatalf("record = %q, want prefix %q", out, tc.want)
 			}
-			if !strings.Contains(out, " hello") {
-				t.Fatalf("record = %q, want the message", out)
+			if !strings.Contains(out, " hello\n") {
+				t.Fatalf("record = %q, want the unquoted message and no trailing separator", out)
 			}
 			if !strings.HasSuffix(out, "\n") {
 				t.Fatalf("record = %q, want trailing newline", out)
@@ -44,8 +44,9 @@ func TestLogHandlerLevels(t *testing.T) {
 	}
 }
 
-// TestLogHandlerQuoting pins the quoting rule: the message and any value
-// containing whitespace are double-quoted; everything else renders verbatim.
+// TestLogHandlerQuoting pins the quoting rule: the message renders unquoted,
+// while any *attribute value* containing whitespace is double-quoted and other
+// values render verbatim.
 func TestLogHandlerQuoting(t *testing.T) {
 	var buf bytes.Buffer
 	h := newLogHandler(&buf, slog.LevelDebug)
@@ -55,13 +56,49 @@ func TestLogHandlerQuoting(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{`"hello world"`, `quoted="a b"`, "plain=x.sh", "n=42"} {
+	for _, want := range []string{"hello world", `quoted="a b"`, "plain=x.sh", "n=42"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("record = %q, want it to contain %s", out, want)
 		}
 	}
+	if strings.Contains(out, `"hello world"`) {
+		t.Errorf("record = %q, the message must not be quoted", out)
+	}
 	if strings.Contains(out, `plain="x.sh"`) {
 		t.Errorf("record = %q, value without whitespace must not be quoted", out)
+	}
+}
+
+// TestLogHandlerSeparator pins the conditional ` | ` separator: it is present
+// when at least one attribute renders (including WithAttrs-derived ones) and
+// absent — with no trailing space — when none do.
+func TestLogHandlerSeparator(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+
+	withAttrs := slog.NewRecord(time.Now(), slog.LevelInfo, "m", 0)
+	withAttrs.Add(slog.String("k", "v"))
+	if err := h.Handle(context.Background(), withAttrs); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "m | k=v") {
+		t.Errorf("record = %q, want the ' | ' separator before the first attr", got)
+	}
+
+	buf.Reset()
+	none := slog.NewRecord(time.Now(), slog.LevelInfo, "m", 0)
+	if err := h.Handle(context.Background(), none); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "|") || strings.HasSuffix(got, " \n") {
+		t.Errorf("record = %q, no attrs must leave no separator or trailing space", got)
+	}
+
+	buf.Reset()
+	d := slog.New(h.WithAttrs([]slog.Attr{slog.String("c", "1")}))
+	d.Info("m")
+	if got := buf.String(); !strings.Contains(got, "m | c=1") {
+		t.Errorf("record = %q, want the ' | ' separator before a WithAttrs attr", got)
 	}
 }
 

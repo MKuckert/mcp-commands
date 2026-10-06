@@ -159,7 +159,7 @@ Notes:
 - **Non-loopback binds require auth (0.8.0).** Binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start**:
 
   ```
-  ERROR@10:00:00 "refusing to start unauthenticated HTTP server on non-loopback host \"0.0.0.0\": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk"
+  ERROR@10:00:00 refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
   ```
 
   An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, logging a loud `UNAUTHENTICATED HTTP server bound to …` warning and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
@@ -249,10 +249,10 @@ The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` s
 
 #### Logging
 
-All diagnostics — banners, warnings, and operational errors — are logged to **stderr** as [slog](https://pkg.go.dev/log/slog) records, each rendered on one line as `<LEVEL>@HH:mm:ss message key=value …`:
+All diagnostics — banners, warnings, and operational errors — are logged to **stderr** as [slog](https://pkg.go.dev/log/slog) records, each rendered on one line as `<LEVEL>@HH:mm:ss message key=value …` — the message is unquoted and, when the record carries attributes, a ` | ` separator joins it to the first `key=value` (a record with no attributes ends right after the message):
 
 ```
-WARN@18:02:11 ignoring invalid Timeout file=/path/to/scripts/render.sh error="invalid timeout ..."
+WARN@18:02:11 ignoring invalid Timeout | file=/path/to/scripts/render.sh error="invalid timeout ..."
 ```
 
 stdout is reserved for program output only: in stdio mode it carries the MCP protocol itself, and in diagnostics it carries the tool list, `--call-tool` result text, `-h` help, and `--version`. Routing logs to stdout would corrupt the protocol, so every record goes to stderr in all modes. In HTTP mode stdout is not used at all — no output of any kind is written there.

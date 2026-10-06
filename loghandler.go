@@ -11,9 +11,14 @@ import (
 
 // logHandler is a compact slog.Handler that renders each record on one line as
 //
-//	<LEVEL>@<HH:mm:ss> <message> key=value …
+//	<LEVEL>@<HH:mm:ss> <message> [ | key=value …]
 //
-// e.g. `WARN@18:02:11 ignoring invalid Timeout file=/path/x.sh error="invalid timeout \"abc\""`.
+// The message renders unquoted; attribute values containing whitespace are
+// double-quoted (see renderString). A ` | ` separator joins the message and the
+// attribute list only when at least one attribute renders — a record with no
+// attributes ends right after the message.
+//
+// e.g. `WARN@18:02:11 ignoring invalid Timeout | file=/path/x.sh error="invalid timeout \"abc\""`.
 //
 // The handler is stateless apart from the immutable accumulated attrs and
 // group (WithAttrs/WithGroup return new values, never mutating the receiver),
@@ -39,12 +44,13 @@ func (h *logHandler) Enabled(_ context.Context, level slog.Level) bool {
 // Handle renders the record as one line followed by a newline.
 func (h *logHandler) Handle(_ context.Context, rec slog.Record) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s@%s %s", rec.Level.String(), rec.Time.Format("15:04:05"), renderString(rec.Message))
+	fmt.Fprintf(&b, "%s@%s %s", rec.Level.String(), rec.Time.Format("15:04:05"), rec.Message)
+	first := true
 	for _, attr := range h.attrs {
-		writeAttr(&b, h.group, attr)
+		writeAttr(&b, &first, h.group, attr)
 	}
 	rec.Attrs(func(attr slog.Attr) bool {
-		writeAttr(&b, h.group, attr)
+		writeAttr(&b, &first, h.group, attr)
 		return true
 	})
 	b.WriteByte('\n')
@@ -69,27 +75,34 @@ func (h *logHandler) WithGroup(name string) slog.Handler {
 	return &logHandler{out: h.out, minLevel: h.minLevel, group: group, attrs: h.attrs}
 }
 
-// writeAttr appends ` key=value` (with the group prefix applied); nested
-// groups flatten to `group.key`. Keys are never quoted.
-func writeAttr(b *strings.Builder, group string, attr slog.Attr) {
+// writeAttr appends one `key=value` (with the group prefix applied); the first
+// attribute is joined to the message with a ` | ` separator, each subsequent
+// one with a single space. Nested groups flatten to `group.key`. Keys are never
+// quoted. An empty group writes nothing, leaving `*first` untouched.
+func writeAttr(b *strings.Builder, first *bool, group string, attr slog.Attr) {
 	key := attr.Key
 	if group != "" {
 		key = group + "." + key
 	}
 	if attr.Value.Kind() == slog.KindGroup {
 		for _, sub := range attr.Value.Group() {
-			writeAttr(b, key, sub)
+			writeAttr(b, first, key, sub)
 		}
 		return
 	}
-	b.WriteByte(' ')
+	if *first {
+		b.WriteString(" | ")
+		*first = false
+	} else {
+		b.WriteByte(' ')
+	}
 	b.WriteString(key)
 	b.WriteByte('=')
 	b.WriteString(renderString(attr.Value.String()))
 }
 
-// renderString double-quotes strings containing whitespace; all other values
-// render verbatim (slog Value.String already formats numbers, times, etc.).
+// renderString double-quotes attribute values containing whitespace; all other
+// values render verbatim (slog Value.String already formats numbers, times, etc.).
 func renderString(s string) string {
 	if strings.ContainsAny(s, " \t\n") {
 		return strconv.Quote(s)
