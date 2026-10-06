@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +83,9 @@ func TestParseCLI(t *testing.T) {
 				}
 				if c.server.apiKey.Token != "" {
 					t.Errorf("apiKey = %q, want empty", c.server.apiKey)
+				}
+				if c.logLevel != slog.LevelInfo {
+					t.Errorf("logLevel = %v, want the info default", c.logLevel)
 				}
 			},
 		},
@@ -304,6 +308,63 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--no-such-flag"},
 			wantErr: "flag provided but not defined",
 		},
+		{
+			name:    "log_verbosity_debug",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "debug"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelDebug {
+					t.Errorf("logLevel = %v, want debug", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_verbosity_info",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "info"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelInfo {
+					t.Errorf("logLevel = %v, want info", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_verbosity_warn",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "warn"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelWarn {
+					t.Errorf("logLevel = %v, want warn", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_verbosity_error",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "error"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelError {
+					t.Errorf("logLevel = %v, want error", c.logLevel)
+				}
+			},
+		},
+		{
+			// Accepted in every mode: the value resolves in diagnostic mode too.
+			name:     "log_verbosity_diagnostic_mode",
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--log-verbosity", "debug"},
+			wantErr:  "",
+			wantMode: modeListTools,
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelDebug {
+					t.Errorf("logLevel = %v, want debug", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_verbosity_invalid",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "verbose"},
+			wantErr: `--log-verbosity must be one of debug, info, warn, or error (got "verbose")`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -362,6 +423,7 @@ func TestUsageLineListsRegisteredFlags(t *testing.T) {
 		"tls-cert", "tls-key", "insecure-no-auth", "max-concurrent",
 		"allowed-origins", "allow-all-origins", "disable-localhost-protection",
 		"timeout", "no-timeout", "list-tools", "call-tool", "params",
+		"log-verbosity",
 	} {
 		if !strings.Contains(usageLine, "--"+name) {
 			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)
