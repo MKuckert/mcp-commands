@@ -288,6 +288,10 @@ func TestResolveCORS(t *testing.T) {
 		{name: "comma_space_parsing", flag: "https://a.example, https://b.example",
 			wantOrigins: []string{"https://a.example", "https://b.example"}},
 		{name: "port_accepted", flag: "https://x.example:8443", wantOrigins: []string{"https://x.example:8443"}},
+		// Default ports are valid origins and stored verbatim; canonicalization
+		// happens at match time (see canonicalOrigin) so both spellings match.
+		{name: "default_port_accepted", flag: "http://x.example:80,https://y.example:443",
+			wantOrigins: []string{"http://x.example:80", "https://y.example:443"}},
 		{name: "port_only_authority_rejected", flag: "https://:8443", wantErr: true},
 		{name: "allow_all_flag", allowAllFlag: true, allowAllSet: true, wantOrigins: []string{}, wantAllowAll: true},
 		{name: "allow_all_env_true", allowAllEnv: "TRUE", wantOrigins: []string{}, wantAllowAll: true},
@@ -413,6 +417,53 @@ func TestCORSHandlerPreflight(t *testing.T) {
 	}
 }
 
+func TestCanonicalOrigin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "http://blackberry", want: "http://blackberry"},
+		{in: "http://blackberry:80", want: "http://blackberry"},
+		{in: "http://blackberry:8080", want: "http://blackberry:8080"},
+		{in: "https://blackberry", want: "https://blackberry"},
+		{in: "https://blackberry:443", want: "https://blackberry"},
+		{in: "https://blackberry:8443", want: "https://blackberry:8443"},
+		// Host case is normalized; browsers lowercase the host in Origin.
+		{in: "https://BlackBerry.Example:443", want: "https://blackberry.example"},
+		{in: "https://BlackBerry.Example:8443", want: "https://blackberry.example:8443"},
+		{in: "http://BlackBerry:80", want: "http://blackberry"},
+		// A leading-zero port is not the default: it is kept verbatim and
+		// matches nothing a browser can send (fails closed; documented).
+		{in: "http://x.example:080", want: "http://x.example:080"},
+		// IPv6 literals keep their brackets; dropping them would make distinct
+		// hosts collide (both canonicalizations would read as one).
+		{in: "http://[2001:db8::1]", want: "http://[2001:db8::1]"},
+		{in: "http://[2001:db8::1]:80", want: "http://[2001:db8::1]"},
+		{in: "http://[2001:db8::1]:8080", want: "http://[2001:db8::1]:8080"},
+		{in: "http://[2001:db8::1:8080]", want: "http://[2001:db8::1:8080]"},
+		{in: "http://[2001:DB8::1]:8080", want: "http://[2001:db8::1]:8080"},
+		// Non-http(s) and unparseable origins canonicalize to "" (never match).
+		{in: "ftp://x.example", want: ""},
+		{in: "notaurl", want: ""},
+		{in: "https://", want: ""},
+		// Non-origin-shaped URLs are protocol violations (a browser only sends a
+		// serialized origin or "null"): fail closed, never drop the components.
+		{in: "https://allowed.example/path", want: ""},
+		{in: "https://allowed.example/", want: ""},
+		{in: "https://allowed.example?x=1", want: ""},
+		{in: "https://allowed.example#frag", want: ""},
+		{in: "https://user@allowed.example", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := canonicalOrigin(tt.in); got != tt.want {
+				t.Errorf("canonicalOrigin(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCORSHandlerNonPreflight(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -429,6 +480,36 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 		{name: "allowed_origin", cfg: corsConfig{origins: []string{"https://app.example.com"}}, origin: "https://app.example.com",
 			wantAllowed: true, wantReached: true},
 		{name: "allow_all", cfg: corsConfig{allowAll: true}, origin: "https://any.example",
+			wantAllowed: true, wantReached: true},
+		// Default-port normalization: the browser omits the default port in the
+		// Origin header, so a :80 entry must match a bare http origin — and
+		// vice versa. The echoed header is always the request's raw value.
+		{name: "config_80_matches_bare_http", cfg: corsConfig{origins: []string{"http://blackberry:80"}}, origin: "http://blackberry",
+			wantAllowed: true, wantReached: true},
+		{name: "config_bare_matches_80", cfg: corsConfig{origins: []string{"http://blackberry"}}, origin: "http://blackberry:80",
+			wantAllowed: true, wantReached: true},
+		{name: "config_443_matches_bare_https", cfg: corsConfig{origins: []string{"https://blackberry:443"}}, origin: "https://blackberry",
+			wantAllowed: true, wantReached: true},
+		// A non-default port in the config must not match a bare origin.
+		{name: "config_8080_no_match_bare", cfg: corsConfig{origins: []string{"http://blackberry:8080"}}, origin: "http://blackberry",
+			wantAllowed: false, wantReached: true},
+		// Real-world non-match inputs: sandboxed/null origins and garbage
+		// headers canonicalize to "" and never match.
+		{name: "null_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "null",
+			wantAllowed: false, wantReached: true},
+		{name: "garbage_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "notaurl",
+			wantAllowed: false, wantReached: true},
+		// Protocol-violating Origin (carries a path): must fail closed, not
+		// collapse into the allowlisted host.
+		{name: "origin_with_path_no_match", cfg: corsConfig{origins: []string{"https://allowed.example"}}, origin: "https://allowed.example/path",
+			wantAllowed: false, wantReached: true},
+		// Host case is normalized on both sides.
+		{name: "uppercase_request_host_matches", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "https://BLACKBERRY",
+			wantAllowed: true, wantReached: true},
+		// IPv6 regression: distinct hosts must not collide via bracket loss.
+		{name: "ipv6_distinct_host_no_match", cfg: corsConfig{origins: []string{"http://[2001:db8::1]:8080"}}, origin: "http://[2001:db8::1:8080]",
+			wantAllowed: false, wantReached: true},
+		{name: "ipv6_same_host_80_matches_bare", cfg: corsConfig{origins: []string{"http://[2001:db8::1]:80"}}, origin: "http://[2001:db8::1]",
 			wantAllowed: true, wantReached: true},
 	}
 

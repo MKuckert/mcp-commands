@@ -169,11 +169,48 @@ type corsConfig struct {
 // enabled reports whether any CORS behavior is requested.
 func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
 
-// originSet returns the allowlist as a map for membership checks.
+// canonicalOrigin returns the origin in the exact form a browser sends in
+// the Origin header — the HTML spec's serialized origin: scheme://host[:port]
+// with a lowercased host and the port omitted when it is the scheme's
+// default (80 for http, 443 for https). Both the configured allowlist and
+// the per-request Origin header are compared in this form, so an operator
+// who lists "http://host:80" matches the "http://host" the page actually
+// sends, and vice versa. It returns "" for unparseable, non-http(s), hostless,
+// or non-origin-shaped origins (anything with userinfo, path, query, or fragment
+// — a serialized origin can carry none of those), which callers treat as a
+// non-match. Such values are protocol violations (a browser only sends a
+// serialized origin or "null"); rejecting them fails closed.
+func canonicalOrigin(origin string) string {
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname()) // browsers lowercase the host; Go does not
+	if strings.Contains(host, ":") {
+		// IPv6 literals keep their brackets: the bracketed form is part of the
+		// serialized origin, and dropping them makes distinct hosts collide
+		// (http://[2001:db8::1]:8080 vs http://[2001:db8::1:8080]).
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" {
+		if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+			return u.Scheme + "://" + host
+		}
+		return u.Scheme + "://" + host + ":" + port
+	}
+	return u.Scheme + "://" + host
+}
+
+// originSet returns the allowlist as a canonicalized map for membership
+// checks (see canonicalOrigin). A config entry that does not canonicalize
+// to a valid origin is dropped: it can never match a request header.
 func (c corsConfig) originSet() map[string]bool {
 	set := make(map[string]bool, len(c.origins))
 	for _, origin := range c.origins {
-		set[origin] = true
+		if canon := canonicalOrigin(origin); canon != "" {
+			set[canon] = true
+		}
 	}
 	return set
 }
@@ -306,7 +343,7 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 	allowed := cfg.originSet()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" || (!cfg.allowAll && !allowed[origin]) {
+		if origin == "" || (!cfg.allowAll && !allowed[canonicalOrigin(origin)]) {
 			next.ServeHTTP(w, r)
 			return
 		}
