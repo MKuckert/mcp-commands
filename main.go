@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 )
 
-var serverVersion = "0.9.4"
+// Development version marker. Release binaries never report it:
+// goreleaser injects the tag via ldflags (.goreleaser.yaml), and the
+// Makefile injects its own VERSION the same way.
+var serverVersion = "commit-local"
 
 // resolveToolPaths resolves --dir/--scripts to absolute paths and verifies
 // both are accessible. Shared by the server-mode run() and the diagnostic

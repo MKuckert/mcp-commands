@@ -222,14 +222,14 @@ func validateOrigin(origin string) error {
 
 // resolveCORS resolves flags over env and validates origins. Returns an
 // error for malformed origins or a contradictory --allowed-origins +
-// --allow-all-origins combination. allowedOriginsFlag is empty when the flag
-// was not given (the flag's zero value is unset, so "flag wins" is
-// well-defined); for the bool allowAllFlag, allowAllSet distinguishes an
-// explicit --allow-all-origins[=false] from a plain default, and the env var
-// is consulted only when the flag was not set at all.
-func resolveCORS(allowedOriginsFlag string, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) {
+// --allow-all-origins combination. allowedOriginsSet distinguishes an
+// explicit --allowed-origins[=...] from an unset flag: a non-empty flag
+// value always wins, and an explicitly *empty* value is a deliberate
+// "no origins" choice that does not consult the env var (mirrors the
+// allowAllSet rule for the bool flag).
+func resolveCORS(allowedOriginsFlag string, allowedOriginsSet, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) {
 	originsRaw := allowedOriginsFlag
-	if originsRaw == "" {
+	if originsRaw == "" && !allowedOriginsSet {
 		originsRaw = os.Getenv(allowedOriginsEnvVar)
 	}
 

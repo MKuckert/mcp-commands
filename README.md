@@ -8,7 +8,7 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 
 ## Use Cases
 
-- **Real tooling for sandboxed harnesses.** Your AI agent runs in a sandbox, a container, or on dedicated hardware, but you want access to the unrestricted, high-performance toolchain on the real machine — a full compiler install, faster builds, hardware-attached utilities. Run `mcp-commands` on that host over HTTP and bridge it into the sandbox: the agent gains the capability, while the sandbox remains your security boundary.
+- **Real tooling for sandboxed harnesses.** Your AI agent runs in a sandbox, a container, or on dedicated hardware, but you want access to the unrestricted, high-performance toolchain on the real machine — a full compiler install, faster builds, hardware-attached utilities. Run `mcp-commands` on that host over HTTP and bridge it into the sandbox: the agent gains the capability, and the sandbox stays the boundary around the harness. The server's own trust boundary is its scripts directory — write access to `--scripts` is code execution as the server user, so keep that directory under your control (see [Untrusted Tool Output](#untrusted-tool-output)).
 - **Cross-platform tooling.** The agent harness lives on one machine, the work happens on another — a Linux build box, a Mac with Apple-silicon tooling, a Windows host. The streamable HTTP transport (`--host`, `--port`, auth, TLS, CORS) makes platform-specific commands reachable from wherever the harness runs.
 - **Your utility scripts, now tools.** You already maintain a pile of Bash, Python, Node.js, or Ruby scripts. Drop them into the `--scripts` directory and they become native MCP tools — no custom MCP server to write per script.
 
@@ -40,12 +40,10 @@ brew install MKuckert/homebrew-tap/mcp-commands
 go install github.com/mkuckert/mcp-commands@latest
 ```
 
-_(Adjust package path based on your repository structure)_
-
 **Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<version>_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
 
 ```bash
-tar -xzf mcp-commands_0.9.0_linux_amd64.tar.gz   # unzip on Windows
+tar -xzf mcp-commands_0.9.5_linux_amd64.tar.gz   # unzip on Windows
 ```
 
 ## Usage
@@ -203,21 +201,22 @@ Configuration (each flag wins over its env var):
 
 | Flag | Env | Meaning |
 |---|---|---|
-| `--allowed-origins <o1,o2,...>` | `MCP_COMMANDS_ALLOWED_ORIGINS` | Comma-separated **exact** origin allowlist (`https://app.example.com`). Origins are validated at startup (must be `http`/`https` + host, no path/userinfo) and the flag fails fast even in stdio mode. |
+| `--allowed-origins <o1,o2,...>` | `MCP_COMMANDS_ALLOWED_ORIGINS` | Comma-separated **exact** origin allowlist (`https://app.example.com`). Origins are validated at startup (must be `http`/`https` + host, no path/userinfo) and the flag fails fast even in stdio mode. An explicitly empty `--allowed-origins=` means “no origins” — it disables the allowlist and does **not** fall back to the env var. |
 | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (`1`/`true`/`yes`) | Echo any `Origin`. **Dev convenience only** — safe only with `--api-key` + TLS. The env var is consulted only when the flag is not set at all; an explicit `--allow-all-origins=false` suppresses it. |
 | `--disable-localhost-protection` | *(none, deliberate)* | Disables the SDK's DNS-rebinding 403 for servers on loopback. For dev setups where the page is served from a tunnel/LAN hostname that resolves to `127.0.0.1`. This flag intentionally has no env fallback — it is a mode choice, not a secret. |
 
 Notes:
 - **Security:** this server executes local scripts, so CORS is **not** a security boundary — it only gates which page's JavaScript can *read* responses. Use the explicit `--allowed-origins` list in production; never `--allow-all-origins` on a public, unauthenticated server. `--allow-all-origins` combined with **no** `--api-key` prints a loud startup warning: any web page opened in a browser can then invoke tools against the server and read their output.
 - **Behavior change in 0.5.0 — the HTTP transport is always stateless:** each request stands on its own. go-sdk v1.6.1 still issues a vestigial `Mcp-Session-Id` header on `initialize` but ignores it on later requests, so clients that stored and resend a session ID keep working. A request missing the `Mcp-Protocol-Version` header defaults to `2025-03-26` (the oldest supported version). `GET` (SSE stream) returns 405.
-- **Use a fetch-based client**, e.g. the official MCP TypeScript SDK — raw `EventSource` cannot work in any mode. Fetch clients must send `Accept: application/json, text/event-stream` on POST (the SDK returns 400 otherwise; the TS SDK does both automatically).
+- **Use a fetch-based client**, e.g. the official MCP TypeScript SDK — raw `EventSource` cannot work in any mode. Send an explicit `Accept: application/json, text/event-stream` header on POST — that is the documented contract (the TS SDK sends both `Accept` values automatically); some clients that send only `*/*` happen to work, but do not rely on it.
 - **Do not set `MCPGODEBUG=enableoriginverification=1`** to "fix" CORS failures: it makes the SDK 403 *all* cross-origin requests inside the handler, where the CORS middleware cannot recover.
 - **Production requires TLS:** the server is cleartext HTTP by default; put a TLS-terminating proxy (Caddy/nginx) in front for browser use — the proxy can also add CORS as an alternative to these flags — or serve HTTPS directly with `--tls-cert`/`--tls-key` (see [TLS](#tls)).
 - A client example with the MCP TS SDK:
 
 ```js
-// The URL must be the full transport endpoint (the mcp-commands HTTP root).
-const transport = new StreamableHTTPClientTransport(new URL("https://app.example.com"), {
+// The URL is the mcp-commands transport endpoint — a separate origin from
+// the page. It is the *page's* origin that --allowed-origins must list.
+const transport = new StreamableHTTPClientTransport(new URL("https://mcp.example.com"), {
   requestInit: { headers: { Authorization: `Bearer ${token}` } },
 });
 const client = new Client({ name: "web-client", version: "1.0.0" });
@@ -250,7 +249,7 @@ The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` s
 
 #### Version
 
-`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation.
+`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation. Release binaries report their release tag (injected at build time); local source builds without injected ldflags report `commit-local`.
 
 #### Flags and Environment Variables
 
@@ -263,7 +262,7 @@ Essentials and modes:
 | `--dir <dir>` | _(required)_ | Working directory where tool scripts are executed. |
 | `--scripts <dir>` | _(required)_ | Directory scanned for executable scripts. |
 | `--watch` | off | Hot-reload in server mode; live re-print in `--list-tools` mode (ignored with `--call-tool`). |
-| `--list-tools` | off | Print exactly what the server would register, then exit; no server starts. |
+| `--list-tools` | off | Print a human-readable rendering of the tools the server would register, then exit; no server starts. |
 | `--call-tool <name>` | _(none)_ | Run one discovered tool once and exit (debug mode; no server starts). |
 | `--params <json>` | `{}` | JSON object of named arguments for `--call-tool`. |
 | `--version` | off | Print the version and exit. |
@@ -351,9 +350,10 @@ Treat tool output as **untrusted model input**. The `<stdout>`/`<stderr>` tags a
 Two self-contained diagnostic modes reuse the exact discovery, frontmatter
 parsing and validation of the server — and never start a server.
 
-**List tools** — prints exactly what the LLM sees (the same registered
-descriptions, timeout suffixes and parameter signatures the MCP server would
-expose):
+**List tools** — prints a human-readable rendering of the registered tools
+(names, parameter signatures, descriptions, and effective timeouts) — the
+same information the MCP server exposes, in terminal form, not the raw JSON
+schema:
 
 ```console
 $ mcp-commands --dir . --scripts ./scripts --list-tools
@@ -434,7 +434,7 @@ Duplicate parameter names use the last declaration consistently for the schema, 
 
 - **Script not discovered.** A file becomes a tool only if it is a regular file (or a symlink resolving to one) with the executable bit set — `chmod +x <script>`. Subdirectories and non-executable files are skipped silently, so a missing tool usually means a missing exec bit. Verify what the server registers with `--list-tools` (below).
 - **Frontmatter warnings on stderr.** An invalid `Param:` or `Timeout:` line in a script's first 30 lines is skipped with a warning on stderr. For `Description:` and `Timeout:` the *first occurrence* wins — if the first `Timeout:` is invalid it warns and the global timeout applies, and any later `Timeout:` lines (even valid ones) are ignored; put a single, valid `Timeout:` line first. Discovery and hot reload are not broken.
-- **Inspect what the server registered.** `mcp-commands --dir <dir> --scripts <scripts> --list-tools` prints the exact names, signatures, descriptions, and timeout suffixes the LLM sees, without starting a server.
+- **Inspect what the server registered.** `mcp-commands --dir <dir> --scripts <scripts> --list-tools` prints the registered names, signatures, descriptions, and timeout suffixes in a human-readable form, without starting a server.
 - **Duplicate tool names.** The tool name is the filename minus its extension, so `a.sh` and `a.py` both register as `a`. The first file in directory order wins and a warning is printed to stderr for each shadowed duplicate — rename one of the files to expose both.
 
 ## AI Usage

@@ -8,6 +8,10 @@ before:
 builds:
   - env:
       - CGO_ENABLED=0
+    # Tag-derived version: the binary reports the release tag, never the
+    # hardcoded development constant in main.go.
+    ldflags:
+      - -X main.serverVersion={{.Version}}
     goos:
       - linux
       - windows

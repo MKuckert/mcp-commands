@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version: "stable"
+
+      - name: Vet
+        run: go vet ./...
+
+      # The full suite is Unix-oriented (exec bits, shebang execution).
+      # On Windows it compiles the whole module's test files and runs only
+      # the native .exe discovery/invocation smoke test (windows_test.go)
+      # — the OS-aware discovery predicate and the real exec path against
+      # a genuine PE binary.
+      - name: Test
+        if: matrix.os == 'ubuntu-latest'
+        run: go test ./...
+
+      - name: Test (Windows smoke)
+        if: matrix.os == 'windows-latest'
+        run: go test ./... -run TestWindowsExeSmoke -v

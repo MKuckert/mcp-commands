@@ -268,7 +268,7 @@
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 2l8 3.5V11c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5.5L12 2z"/><path d="M9 12l2 2 4-4.5"/></svg></div>
       <h3>Real tooling for sandboxed harnesses</h3>
-      <p>Your agent runs in a <b>container, sandbox, or on dedicated hardware</b>, but you want the real, unrestricted toolchain — a full compiler install, faster builds, hardware-attached utilities. Run the server on that host over HTTP and bridge it into the sandbox: the agent gains capability, the sandbox stays the security boundary.</p>
+      <p>Your agent runs in a <b>container, sandbox, or on dedicated hardware</b>, but you want the real, unrestricted toolchain — a full compiler install, faster builds, hardware-attached utilities. Run the server on that host over HTTP and bridge it into the sandbox: the agent gains capability, the sandbox stays the boundary around the harness — and the server's own trust boundary is its scripts directory (write access there is code execution as the server user).</p>
     </div>
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M2 5h13v9H2z"/><path d="M8 18h3M9.5 14v4"/><path d="M17 12l4 4-4 4"/><path d="M21 8l-4 4"/></svg></div>
@@ -286,7 +286,7 @@
 <section id="features" class="wrap">
   <div class="sec-head">
     <div class="kicker">Features</div>
-    <h2>Boringly simple. Reliably safe.</h2>
+    <h2>Boringly simple. Bounded by design.</h2>
     <p>Everything you need to expose local utilities to any MCP client — and nothing you have to babysit.</p>
   </div>
   <div class="grid">
@@ -313,7 +313,7 @@
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M4 4l5 5"/></svg></div>
       <h3>Smart argument translation</h3>
-      <p>LLM JSON becomes safe CLI flags: <code>{"force": true}</code> → <code>--force</code>. Sorted, validated, injection-proof.</p>
+      <p>LLM JSON becomes CLI flags: <code>{"force": true}</code> → <code>--force</code>. Sorted, validated against the declared schema, passed straight to the process — no shell in between.</p>
     </div>
     <div class="card">
       <div class="ico"><svg viewBox="0 0 24 24"><path d="M5 12h14M5 12l4-4M5 12l4 4M19 6v12"/></svg></div>
@@ -342,10 +342,17 @@
 <span class="c-m"># Param: source string required "Source file to render"</span>
 <span class="c-m"># Timeout: 1h 30m 5s</span>
 
-<span class="c-f">echo</span> <span class="c-p">"rendering ${source}"</span></pre>
+<span class="c-f">while</span> [ <span class="c-t">$#</span> -gt 0 ]; <span class="c-f">do</span>
+  <span class="c-f">case</span> <span class="c-t">$1</span> <span class="c-f">in</span>
+    <span class="c-p">--source</span>) source=<span class="c-t">$2</span>; shift 2 ;;
+    <span class="c-p">*)</span> shift ;;
+  <span class="c-f">esac</span>
+<span class="c-f">done</span>
+
+<span class="c-f">echo</span> <span class="c-p">"rendering $source"</span></pre>
     </div>
     <div class="codebox">
-      <div class="cb-label">What the LLM sees</div>
+      <div class="cb-label">What the server registers</div>
       <pre><span class="c-t">render(source:str)</span>
 <span class="c-p">     Runs the long-running render</span>
 <span class="c-p">     pipeline.</span> <span class="c-m">(timeout: 1h30m5s)</span></pre>
@@ -395,9 +402,9 @@
   <div class="tabpanel" id="panel-release" role="tabpanel" aria-labelledby="tab-release" tabindex="0" hidden>
     <div class="codebox">
       <div class="cb-label">Your machine
-        <button class="copy" aria-live="polite" data-copy="tar -xzf mcp-commands_0.9.0_linux_amd64.tar.gz">Copy</button>
+        <button class="copy" aria-live="polite" data-copy="tar -xzf mcp-commands_0.9.5_linux_amd64.tar.gz">Copy</button>
       </div>
-      <pre><span class="c-p">$</span> <span class="c-f">tar</span> -xzf mcp-commands_0.9.0_linux_amd64.tar.gz   <span class="c-m"># unzip on Windows</span></pre>
+      <pre><span class="c-p">$</span> <span class="c-f">tar</span> -xzf mcp-commands_0.9.5_linux_amd64.tar.gz   <span class="c-m"># unzip on Windows</span></pre>
     </div>
     <p class="note">Each release ships <code>mcp-commands_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;</code> archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a <code>checksums.txt</code>. Grab the asset for your platform from <a href="https://github.com/mkuckert/mcp-commands/releases" target="_blank" rel="noopener">the releases page</a>, extract it, and put the <code>mcp-commands</code> binary on your <code>PATH</code>.</p>
   </div>
@@ -412,11 +419,16 @@
   <div class="demo-duo">
     <div class="codebox">
       <div class="cb-label">Your machine</div>
-      <pre><span class="c-p">$</span> <span class="c-f">mcp-commands</span> <span class="c-a">--dir</span> /path/to/workdir \
-              <span class="c-a">--scripts</span> /path/to/scripts
+      <pre><span class="c-p">$</span> <span class="c-f">mcp-commands</span> <span class="c-a">--dir</span> /home/dev/proj \
+              <span class="c-a">--scripts</span> /home/dev/proj/scripts
 
-<span class="c-m"># HTTP mode, remote clients, TLS, auth:</span>
-<span class="c-p">$</span> <span class="c-f">mcp-commands</span> <span class="c-a">--port</span> 8080 <span class="c-a">--api-key-file</span> token.txt</pre>
+<span class="c-m"># HTTP mode for remote clients, bearer auth:</span>
+<span class="c-p">$</span> <span class="c-f">mcp-commands</span> <span class="c-a">--dir</span> /home/dev/proj \
+              <span class="c-a">--scripts</span> /home/dev/proj/scripts \
+              <span class="c-a">--port</span> 8080 <span class="c-a">--api-key-file</span> token.txt
+
+<span class="c-m"># TLS: add --tls-cert cert.pem --tls-key key.pem,
+#      or put a TLS-terminating proxy (Caddy/nginx) in front</span></pre>
     </div>
     <div class="codebox">
       <div class="cb-label">client config</div>
@@ -424,8 +436,8 @@
   <span class="c-t">"mcpServers"</span><span class="c-f">:</span> <span class="c-f">{</span>
     <span class="c-t">"mcp-commands"</span><span class="c-f">:</span> <span class="c-f">{</span>
       <span class="c-t">"command"</span><span class="c-f">:</span> <span class="c-p">"mcp-commands"</span><span class="c-f">,</span>
-      <span class="c-t">"args"</span><span class="c-f">:</span> <span class="c-f">[</span><span class="c-p">"--dir"</span><span class="c-f">,</span> <span class="c-p">"~/proj"</span><span class="c-f">,</span>
-                <span class="c-p">"--scripts"</span><span class="c-f">,</span> <span class="c-p">"~/proj/scripts"</span><span class="c-f">]</span>
+      <span class="c-t">"args"</span><span class="c-f">:</span> <span class="c-f">[</span><span class="c-p">"--dir"</span><span class="c-f">,</span> <span class="c-p">"/home/dev/proj"</span><span class="c-f">,</span>
+                <span class="c-p">"--scripts"</span><span class="c-f">,</span> <span class="c-p">"/home/dev/proj/scripts"</span><span class="c-f">]</span>
     <span class="c-f">}</span>
   <span class="c-f">}</span>
 <span class="c-f">}</span></pre>
@@ -494,7 +506,7 @@
   // mirrors the real --list-tools output (see README): name(sig) line, then
   // the registered description word-wrapped at 5 spaces, blank line between
   const lines = [
-    { p: '$', c: ' mcp-commands --dir ~/proj --scripts ~/proj/scripts --list-tools' },
+    { p: '$', c: ' mcp-commands --dir /home/dev/proj --scripts /home/dev/proj/scripts --list-tools' },
     { w: '' },
     { w: 'build(profile:str)', d: '     Build the project with the given profile. (timeout: 5m0s)' },
     { w: '' },
