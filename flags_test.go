@@ -13,7 +13,9 @@ import (
 // These are the branches that were untestable while the logic lived in main()
 // (which calls os.Exit); the extraction into parseCLI makes each one assertable.
 func TestParseCLI(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: t.Setenv. An empty LOG_LEVEL counts as unset by the
+	// resolution logic, so ambient values cannot leak into these cases.
+	t.Setenv(logLevelEnvVar, "")
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -420,8 +422,7 @@ func TestLogLevelPrecedence(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
-		env       string
-		envSet    bool   // set LOG_LEVEL at all (empty value = unset)
+		env       string // LOG_LEVEL value; empty = unset by the resolution logic
 		wantErr   string // substring; empty = success
 		wantLevel slog.Level
 	}{
@@ -429,28 +430,24 @@ func TestLogLevelPrecedence(t *testing.T) {
 			name:      "flag_wins_over_env",
 			args:      []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
 			env:       "warn",
-			envSet:    true,
 			wantLevel: slog.LevelDebug,
 		},
 		{
 			name:      "env_used_when_flag_absent",
 			args:      []string{"--dir", "d", "--scripts", "s"},
 			env:       "warn",
-			envSet:    true,
 			wantLevel: slog.LevelWarn,
 		},
 		{
 			name:    "invalid_env_value_fails_naming_the_source",
 			args:    []string{"--dir", "d", "--scripts", "s"},
 			env:     "verbose",
-			envSet:  true,
 			wantErr: `LOG_LEVEL must be one of debug, info, warn, or error (got "verbose")`,
 		},
 		{
 			name:      "empty_env_ignored_default_applies",
 			args:      []string{"--dir", "d", "--scripts", "s"},
 			env:       "",
-			envSet:    true,
 			wantLevel: slog.LevelInfo,
 		},
 		{
@@ -462,9 +459,9 @@ func TestLogLevelPrecedence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.envSet {
-				t.Setenv(logLevelEnvVar, tt.env)
-			}
+			// Set unconditionally (empty = unset) so an ambient LOG_LEVEL
+			// cannot leak into any case.
+			t.Setenv(logLevelEnvVar, tt.env)
 			cfg, err := parseCLI(tt.args)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
