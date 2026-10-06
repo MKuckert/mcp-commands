@@ -235,8 +235,8 @@ func TestRunCallTool(t *testing.T) {
 	}
 	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
 		os.Remove(marker)
-		var buf bytes.Buffer
-		code, err = runCallTool(liveEnvFor(t, &buf, &buf), scriptsDir, tmpDir, global, name, params)
+		var buf, logBuf bytes.Buffer
+		code, err = runCallTool(liveEnvFor(t, &buf, &logBuf), scriptsDir, tmpDir, global, name, params)
 		stdout = buf.String()
 		return code, err, stdout
 	}

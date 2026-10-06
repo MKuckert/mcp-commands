@@ -88,6 +88,8 @@ func discoverTools(scriptsDir string, log *slog.Logger) ([]discoveredTool, error
 		})
 	}
 
+	log.Debug("discovered tools", "count", len(tools), "scriptsDir", scriptsDir)
+
 	return tools, nil
 }
 

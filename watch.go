@@ -116,6 +116,7 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 	// and the re-Add are lost to inotify, so a rescan is warranted to pick
 	// up whatever appeared in the replacement.
 	reattach := func(p string) {
+		env.log.Debug("reattaching watch", "path", p)
 		if err := watcher.Add(p); err != nil {
 			env.log.Warn("failed to reattach watch", "path", p, "error", err)
 			return
@@ -174,6 +175,7 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 
 		case <-debounceTimer.C:
 			debounceActive = false
+			env.log.Debug("rescan fired")
 			onRescan()
 		}
 	}
