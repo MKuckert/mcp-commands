@@ -183,16 +183,15 @@ func canonicalOrigin(origin string) string {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname()) // browsers lowercase the host; Go does not
+	if strings.Contains(host, ":") {
+		// IPv6 literals keep their brackets: the bracketed form is part of the
+		// serialized origin, and dropping them makes distinct hosts collide
+		// (http://[2001:db8::1]:8080 vs http://[2001:db8::1:8080]).
+		host = "[" + host + "]"
+	}
 	if port := u.Port(); port != "" {
-		switch u.Scheme {
-		case "http":
-			if port == "80" {
-				return "http://" + host
-			}
-		case "https":
-			if port == "443" {
-				return "https://" + host
-			}
+		if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+			return u.Scheme + "://" + host
 		}
 		return u.Scheme + "://" + host + ":" + port
 	}

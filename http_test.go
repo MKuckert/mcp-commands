@@ -436,6 +436,13 @@ func TestCanonicalOrigin(t *testing.T) {
 		// A leading-zero port is not the default: it is kept verbatim and
 		// matches nothing a browser can send (fails closed; documented).
 		{in: "http://x.example:080", want: "http://x.example:080"},
+		// IPv6 literals keep their brackets; dropping them would make distinct
+		// hosts collide (both canonicalizations would read as one).
+		{in: "http://[2001:db8::1]", want: "http://[2001:db8::1]"},
+		{in: "http://[2001:db8::1]:80", want: "http://[2001:db8::1]"},
+		{in: "http://[2001:db8::1]:8080", want: "http://[2001:db8::1]:8080"},
+		{in: "http://[2001:db8::1:8080]", want: "http://[2001:db8::1:8080]"},
+		{in: "http://[2001:DB8::1]:8080", want: "http://[2001:db8::1]:8080"},
 		// Non-http(s) and unparseable origins canonicalize to "" (never match).
 		{in: "ftp://x.example", want: ""},
 		{in: "notaurl", want: ""},
@@ -487,6 +494,11 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 			wantAllowed: false, wantReached: true},
 		// Host case is normalized on both sides.
 		{name: "uppercase_request_host_matches", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "https://BLACKBERRY",
+			wantAllowed: true, wantReached: true},
+		// IPv6 regression: distinct hosts must not collide via bracket loss.
+		{name: "ipv6_distinct_host_no_match", cfg: corsConfig{origins: []string{"http://[2001:db8::1]:8080"}}, origin: "http://[2001:db8::1:8080]",
+			wantAllowed: false, wantReached: true},
+		{name: "ipv6_same_host_80_matches_bare", cfg: corsConfig{origins: []string{"http://[2001:db8::1]:80"}}, origin: "http://[2001:db8::1]",
 			wantAllowed: true, wantReached: true},
 	}
 
