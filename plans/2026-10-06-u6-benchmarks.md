@@ -1,7 +1,7 @@
 # PLAN — U6: Cross-cutting test hygiene (benchmarks)
 
 **Branch:** `fix/u6-benchmarks` from `main` (v0.9.5). **Target:** n/a (no product change).
-**Source:** `REVIEW_REPORT.md` §U6 (L3) + priority test matrix item 4.
+**Source:** `REVIEW_REPORT.md` (removed after merge) §U6 (L3) + priority test matrix item 4.
 **Status:** Approved (see review log).
 
 ## Tasks

@@ -259,6 +259,8 @@ stdout is reserved for program output only: in stdio mode it carries the MCP pro
 
 `--log-level <level>` sets the minimum level that is emitted — `debug`, `info` (default), `warn`, or `error`; records below it are dropped. It is accepted in every mode. The `LOG_LEVEL` environment variable is a fallback consulted only when the flag is not set (an empty value counts as unset) — precedence: `--log-level` > `LOG_LEVEL` > `info`. At the default `info`, you see startup banners, warnings, and errors; `debug` additionally logs the discovery summary, each debounced rescan, and watch reattach attempts.
 
+One exception: flag-parse and validation failures occur before the logger exists and are printed as raw `Error: …` lines — slog formatting (and `--log-level`) do not apply to startup configuration errors.
+
 #### Version
 
 `mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation. Release binaries report their release tag (injected at build time); local source builds without injected ldflags report `commit-local`.

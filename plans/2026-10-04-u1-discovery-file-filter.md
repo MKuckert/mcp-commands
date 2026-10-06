@@ -1,4 +1,4 @@
-# PLAN — U1: Discovery file filter (REVIEW_REPORT.md findings H1, M3 + H5 predicate)
+# PLAN — U1: Discovery file filter (REVIEW_REPORT.md (removed after merge) findings H1, M3 + H5 predicate)
 
 **Branch:** `fix/u1-discovery-file-filter` (from `main` @ 479ab81)
 **Target release:** v0.9.1

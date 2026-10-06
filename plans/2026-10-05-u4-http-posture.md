@@ -1,7 +1,7 @@
 # PLAN — U4: Configuration and HTTP hardening
 
 **Branch:** `fix/u4-http-posture` from `main` (v0.9.3). **Target:** v0.9.4.
-**Source:** `REVIEW_REPORT.md` §U4 (M5, M6, M7).
+**Source:** `REVIEW_REPORT.md` (removed after merge) §U4 (M5, M6, M7).
 **Status:** Approved (all tasks ticked; see review log, round 2).
 
 ## Tasks
