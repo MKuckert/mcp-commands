@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -114,7 +115,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			if strings.Contains(buf.String(), "No executable scripts found") {
+			if strings.Contains(buf.String(), "level=WARN") && strings.Contains(buf.String(), "No executable scripts found") {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -168,7 +169,7 @@ func TestRunHTTPSTLSEndToEnd(t *testing.T) {
 	})
 
 	waitFor(t, 5*time.Second, "TLS startup note", func() bool {
-		return strings.Contains(buf.String(), "(TLS)")
+		return strings.Contains(buf.String(), "notes=TLS")
 	})
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-tls"}, nil)
@@ -271,14 +272,26 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 	}
 }
 
-// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
-// capture) and production behavior for everything else. Tests construct
-// local envs — no shared state — so they can run in parallel.
-func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
+// testLogger builds a logger on the given sink at debug level, so test
+// fakes capture every record the production logger would emit.
+func testLogger(sink io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// testDiscardLogger is a shared logger that drops every record, for call
+// sites that must not emit (a logger is immutable, so sharing it across
+// parallel tests is safe).
+var testDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// liveEnvFor builds a liveEnv with the given stdout sink and a logger on the
+// given log sink (tests capture; io.Discard suppresses) and production
+// behavior for everything else. Tests construct local envs — no shared state
+// — so they can run in parallel.
+func liveEnvFor(t *testing.T, stdout, logSink io.Writer) liveEnv {
 	t.Helper()
-	env := prodLiveEnv()
+	env := prodLiveEnv(slog.LevelDebug)
 	env.stdout = stdout
-	env.stderr = stderr
+	env.log = testLogger(logSink)
 	return env
 }
 

@@ -177,7 +177,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
-	initial, err := discoverTools(tmpDir, io.Discard)
+	initial, err := discoverTools(tmpDir, testDiscardLogger)
 	if err != nil {
 		t.Fatalf("discoverTools failed: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read stderr: %v", err)
 		}
-		if strings.Contains(string(output), "Warning: failed to rediscover tools:") {
+		if strings.Contains(string(output), "level=WARN") && strings.Contains(string(output), "failed to rediscover tools") {
 			break
 		}
 		select {
@@ -730,7 +730,7 @@ func TestWatchToolsChangeBeforeWatcherReady(t *testing.T) {
 	script := filepath.Join(tmpDir, "alpha.sh")
 	writeScript(t, script, "#!/bin/bash\nDescription: alpha\necho alpha\n")
 
-	tools, err := discoverTools(tmpDir, env.stderr)
+	tools, err := discoverTools(tmpDir, env.log)
 	if err != nil {
 		t.Fatalf("discoverTools: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 	alpha := filepath.Join(tmpDir, "alpha.sh")
 	writeScript(t, alpha, "#!/bin/bash\necho alpha\n")
 
-	tools, err := discoverTools(tmpDir, env.stderr)
+	tools, err := discoverTools(tmpDir, env.log)
 	if err != nil {
 		t.Fatalf("discoverTools: %v", err)
 	}
@@ -941,7 +941,7 @@ func TestWatchToolsSymlinkTargetEditNotWatched(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	tools, err := discoverTools(scriptsDir, env.stderr)
+	tools, err := discoverTools(scriptsDir, env.log)
 	if err != nil {
 		t.Fatalf("discoverTools: %v", err)
 	}

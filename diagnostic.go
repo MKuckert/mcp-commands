@@ -24,7 +24,7 @@ var serverModeFlagNames = []string{"host", "port", "api-key", "api-key-file", "t
 // goes to stdout; warnings and operational errors go to stderr.
 func runDiagnostic(env liveEnv, diag diagnostic) int {
 	if len(diag.ignoredFlags) > 0 {
-		fmt.Fprintf(env.stderr, "Note: ignoring server-mode flags in diagnostic mode: %s\n", strings.Join(diag.ignoredFlags, ", "))
+		env.log.Warn("ignoring server-mode flags in diagnostic mode", "flags", strings.Join(diag.ignoredFlags, ", "))
 	}
 	if diag.listTools {
 		return runListTools(env, diag.dir, diag.scriptsDir, diag.watch, diag.timeout)
@@ -32,17 +32,17 @@ func runDiagnostic(env liveEnv, diag diagnostic) int {
 	if diag.callTool == "" {
 		// Only reachable when --call-tool= was explicitly passed (an
 		// omitted flag is handled by main and never reaches here).
-		fmt.Fprintln(env.stderr, "Error: --call-tool requires a non-empty tool name")
+		env.log.Error("--call-tool requires a non-empty tool name")
 		return 1
 	}
 	dirAbs, scriptsAbs, err := resolveToolPaths(diag.dir, diag.scriptsDir)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		env.log.Error(err.Error())
 		return 1
 	}
 	code, err := runCallTool(env, scriptsAbs, dirAbs, diag.timeout, diag.callTool, diag.params)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		env.log.Error(err.Error())
 	}
 	return code
 }
@@ -61,7 +61,7 @@ func runDiagnostic(env liveEnv, diag diagnostic) int {
 // parseToolArguments, which maps an explicitly empty value and JSON null to
 // {} (same leniency as the MCP handler).
 func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
-	tools, err := discoverTools(scriptsAbs, env.stderr)
+	tools, err := discoverTools(scriptsAbs, env.log)
 	if err != nil {
 		return 1, fmt.Errorf("failed to discover tools: %w", err)
 	}
@@ -137,20 +137,20 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
 	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		env.log.Error(err.Error())
 		return 1
 	}
 
 	printList := func(tools []discoveredTool) {
 		if len(tools) == 0 {
-			fmt.Fprintf(env.stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
+			env.log.Warn("No executable scripts found", "scriptsDir", scriptsAbs)
 		}
 		fmt.Fprint(env.stdout, renderToolList(tools, timeout, env.resolveWrapWidth(env.stdout)))
 	}
 
-	tools, err := discoverTools(scriptsAbs, env.stderr)
+	tools, err := discoverTools(scriptsAbs, env.log)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		env.log.Error(err.Error())
 		return 1
 	}
 	printList(tools)
@@ -167,9 +167,9 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 	// no-op rescan) therefore stays silent.
 	lastPrinted := tools
 	rescan := func() {
-		newTools, err := discoverTools(scriptsAbs, env.stderr)
+		newTools, err := discoverTools(scriptsAbs, env.log)
 		if err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
+			env.log.Warn("failed to rediscover tools", "error", err)
 			return
 		}
 		if !toolsEqual(lastPrinted, newTools) {
@@ -184,7 +184,7 @@ func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.
 	// exits 0).
 	if err := watchChanges(sigCtx, env, scriptsAbs, rescan); err != nil {
 		if !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(env.stderr, "Error: watch loop stopped: %v\n", err)
+			env.log.Error("watch loop stopped", "error", err)
 			return 1
 		}
 	}

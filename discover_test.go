@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,7 +41,7 @@ echo "Hello"
 			t.Fatalf("Failed to create subdirectory: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -74,7 +73,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -104,7 +103,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -126,7 +125,7 @@ echo "Hello"
 			t.Fatalf("Failed to create non-executable file: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -145,7 +144,7 @@ echo "Hello"
 			t.Fatalf("Failed to create subdirectory: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -157,7 +156,7 @@ echo "Hello"
 
 	t.Run("handles_nonexistent_directory", func(t *testing.T) {
 		nonExistent := filepath.Join(t.TempDir(), "does_not_exist")
-		_, err := discoverTools(nonExistent, io.Discard)
+		_, err := discoverTools(nonExistent, testDiscardLogger)
 		if err == nil {
 			t.Error("Expected error for nonexistent directory, got nil")
 		}
@@ -175,7 +174,7 @@ echo "Hello"
 			}
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -213,7 +212,7 @@ echo "Processing"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		tools, err := discoverTools(tmpDir, io.Discard)
+		tools, err := discoverTools(tmpDir, testDiscardLogger)
 		if err != nil {
 			t.Fatalf("discoverTools failed: %v", err)
 		}
@@ -243,7 +242,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: no timeout\necho hi\n")
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout != nil {
 			t.Errorf("expected nil timeout for absent Timeout:, got %v", *timeout)
 		}
@@ -253,7 +252,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\necho hi\n")
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout == nil || *timeout != 30*time.Second {
 			t.Errorf("expected pointer to 30s, got %#v", timeout)
 		}
@@ -263,7 +262,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: NONE\necho hi\n")
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout == nil || *timeout != 0 {
 			t.Errorf("expected pointer to 0 for NONE, got %#v", timeout)
 		}
@@ -273,7 +272,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 0s\necho hi\n")
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout == nil || *timeout != 0 {
 			t.Errorf("expected pointer to 0 for 0s, got %#v", timeout)
 		}
@@ -285,7 +284,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 
 		// Capture the stderr warning emitted for the invalid value.
 		var buf bytes.Buffer
-		_, _, timeout := extractFrontmatter(path, &buf)
+		_, _, timeout := extractFrontmatter(path, testLogger(&buf))
 
 		if timeout != nil {
 			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
@@ -302,8 +301,8 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: bogus\n# Param: name string required \"the name\"\necho hi\n")
 
-		// Suppress the warning (io.Discard); assert scan continuity.
-		desc, params, timeout := extractFrontmatter(path, io.Discard)
+		// Suppress the warning (discard logger); assert scan continuity.
+		desc, params, timeout := extractFrontmatter(path, testDiscardLogger)
 
 		if timeout != nil {
 			t.Errorf("expected nil timeout for invalid value, got %v", *timeout)
@@ -317,7 +316,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		tmpDir := t.TempDir()
 		path := writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Timeout: 30s\n# Timeout: 5m\necho hi\n")
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout == nil || *timeout != 30*time.Second {
 			t.Errorf("expected first occurrence (30s), got %#v", timeout)
 		}
@@ -332,7 +331,7 @@ func TestExtractFrontmatterTimeout(t *testing.T) {
 		lines = append(lines, "# Timeout: 30s", "echo done")
 		path := writeTimeoutScript(t, tmpDir, strings.Join(lines, "\n"))
 
-		_, _, timeout := extractFrontmatter(path, io.Discard)
+		_, _, timeout := extractFrontmatter(path, testDiscardLogger)
 		if timeout != nil {
 			t.Errorf("expected nil timeout for line beyond scan window, got %v", *timeout)
 		}
@@ -344,7 +343,7 @@ func TestDiscoverToolsExtractsTimeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeTimeoutScript(t, tmpDir, "#!/bin/bash\n# Description: sleeper\n# Timeout: 1m\necho hi\n")
 
-	tools, err := discoverTools(tmpDir, io.Discard)
+	tools, err := discoverTools(tmpDir, testDiscardLogger)
 	if err != nil {
 		t.Fatalf("discoverTools failed: %v", err)
 	}
@@ -372,7 +371,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 3 {
 			t.Errorf("Expected 3 params, got %d", len(params))
@@ -408,7 +407,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 0 {
 			t.Errorf("Expected 0 params, got %d", len(params))
@@ -427,7 +426,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		// Only the valid param should be extracted
 		if len(params) != 1 {
@@ -450,7 +449,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -472,7 +471,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -493,7 +492,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param, got %d", len(params))
@@ -515,7 +514,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 valid param, got %d", len(params))
@@ -543,7 +542,7 @@ echo "Hello"
 			t.Fatalf("Failed to create test script: %v", err)
 		}
 
-		_, params, _ := extractFrontmatter(scriptPath, io.Discard)
+		_, params, _ := extractFrontmatter(scriptPath, testDiscardLogger)
 
 		if len(params) != 1 {
 			t.Errorf("Expected 1 param (beyond window ignored), got %d", len(params))
@@ -578,7 +577,7 @@ func discoverToolsBounded(t *testing.T, dir string) discoverResult {
 	t.Helper()
 	resCh := make(chan discoverResult, 1)
 	go func() {
-		tools, err := discoverTools(dir, io.Discard)
+		tools, err := discoverTools(dir, testDiscardLogger)
 		resCh <- discoverResult{tools, err}
 	}()
 	select {
@@ -605,7 +604,7 @@ func TestDiscoverSymlinkToDirectory(t *testing.T) {
 	if err := os.Symlink(toolDir, filepath.Join(tmpDir, "adir_link.sh")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	tools, err := discoverTools(tmpDir, io.Discard)
+	tools, err := discoverTools(tmpDir, testDiscardLogger)
 	if err != nil {
 		t.Fatalf("discoverTools failed: %v", err)
 	}
@@ -749,7 +748,7 @@ func TestExtractFrontmatterOversizedLine(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	desc, params, _ := extractFrontmatter(path, &buf)
+	desc, params, _ := extractFrontmatter(path, testLogger(&buf))
 
 	if desc != "captured" {
 		t.Errorf("description read before the oversized line lost, got %q", desc)
@@ -781,7 +780,7 @@ func TestExtractFrontmatterScanWindowBoundary(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, params, _ := extractFrontmatter(path, io.Discard)
+	_, params, _ := extractFrontmatter(path, testDiscardLogger)
 
 	if len(params) != 1 {
 		t.Fatalf("expected 1 param, got %d: %#v", len(params), params)
