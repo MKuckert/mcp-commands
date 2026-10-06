@@ -255,7 +255,7 @@ All diagnostics — banners, warnings, and operational errors — are logged to 
 time=2025-01-15T10:00:00.123Z level=WARN msg="ignoring invalid Timeout" file=/path/to/scripts/render.sh error="invalid timeout ..."
 ```
 
-stdout is reserved for program output only: in stdio mode it carries the MCP protocol itself, and in diagnostics it carries the tool list, `--call-tool` result text, `-h` help, and `--version`. Routing logs to stdout would corrupt the protocol, so every record goes to stderr in all modes.
+stdout is reserved for program output only: in stdio mode it carries the MCP protocol itself, and in diagnostics it carries the tool list, `--call-tool` result text, `-h` help, and `--version`. Routing logs to stdout would corrupt the protocol, so every record goes to stderr in all modes. In HTTP mode stdout is not used at all — no output of any kind is written there.
 
 `--log-level <level>` sets the minimum level that is emitted — `debug`, `info` (default), `warn`, or `error`; records below it are dropped. It is accepted in every mode. The `LOG_LEVEL` environment variable is a fallback consulted only when the flag is not set (an empty value counts as unset) — precedence: `--log-level` > `LOG_LEVEL` > `info`. At the default `info`, you see startup banners, warnings, and errors; `debug` additionally logs the discovery summary, each debounced rescan, and watch reattach attempts.
 
