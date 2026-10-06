@@ -431,8 +431,11 @@ func TestCanonicalOrigin(t *testing.T) {
 		{in: "https://blackberry:8443", want: "https://blackberry:8443"},
 		// Host case is normalized; browsers lowercase the host in Origin.
 		{in: "https://BlackBerry.Example:443", want: "https://blackberry.example"},
-	{in: "https://BlackBerry.Example:8443", want: "https://blackberry.example:8443"},
+		{in: "https://BlackBerry.Example:8443", want: "https://blackberry.example:8443"},
 		{in: "http://BlackBerry:80", want: "http://blackberry"},
+		// A leading-zero port is not the default: it is kept verbatim and
+		// matches nothing a browser can send (fails closed; documented).
+		{in: "http://x.example:080", want: "http://x.example:080"},
 		// Non-http(s) and unparseable origins canonicalize to "" (never match).
 		{in: "ftp://x.example", want: ""},
 		{in: "notaurl", want: ""},
@@ -476,8 +479,16 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 		// A non-default port in the config must not match a bare origin.
 		{name: "config_8080_no_match_bare", cfg: corsConfig{origins: []string{"http://blackberry:8080"}}, origin: "http://blackberry",
 			wantAllowed: false, wantReached: true},
+		// Real-world non-match inputs: sandboxed/null origins and garbage
+		// headers canonicalize to "" and never match.
+		{name: "null_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "null",
+			wantAllowed: false, wantReached: true},
+		{name: "garbage_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "notaurl",
+			wantAllowed: false, wantReached: true},
+		// Host case is normalized on both sides.
+		{name: "uppercase_request_host_matches", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "https://BLACKBERRY",
+			wantAllowed: true, wantReached: true},
 	}
-
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

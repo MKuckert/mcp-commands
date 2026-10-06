@@ -175,8 +175,8 @@ func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
 // default (80 for http, 443 for https). Both the configured allowlist and
 // the per-request Origin header are compared in this form, so an operator
 // who lists "http://host:80" matches the "http://host" the page actually
-// sends, and vice versa. It returns "" for unparseable or non-http(s)
-// origins, which callers treat as a non-match.
+// sends, and vice versa. It returns "" for unparseable, non-http(s) origins,
+// or those with no host, which callers treat as a non-match.
 func canonicalOrigin(origin string) string {
 	u, err := url.Parse(origin)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
