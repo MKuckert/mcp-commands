@@ -95,6 +95,46 @@ Priority order:
 3. Fails with a clear error message
 4. Silently degrades to look "fine" — never do this
 
+## Publishing to GitHub
+
+### `main` branch protection — never push directly
+
+`main` on `MKuckert/mcp-commands` is protected: pushes are rejected with
+`GH013: Repository rule violations` because 2 required status checks
+(CI `test (ubuntu-latest)` / `test (windows-latest)` from
+`.github/workflows/ci.yml`) must pass, which a direct push can never satisfy
+(the checks don't exist before the push). Don't retry, don't try to bypass —
+always go through a PR:
+
+1. Push commits to a topic branch: `git push -u origin <branch>`
+2. Open the PR: `gh pr create --head <branch> --base main`
+3. Poll the PR's check runs until all complete (CI takes a few minutes; the
+   Windows test is the slowest — poll with `sleep 15` between API calls).
+4. Merge with `--rebase` and `--delete-branch`. **Squash merges are
+disallowed on this repo** (`gh pr merge --squash` → "Squash merges are not
+allowed"); `--merge` also works if a merge commit is acceptable.
+5. Re-sync locally: `git pull --rebase origin main` (the rebase merge rewrites
+   SHAs; the local main must follow origin).
+
+Note: `GET /repos/…/rules/refs/heads/main` returns 404 for the app token —
+the protection can't be inspected via API, only learned from the push error.
+
+### GitHub authentication in this sandbox
+
+No personal auth is configured. Mint a temporary app token (≤ 1 h, re-mint on
+401) and use the askpass pattern — git's smart-HTTP needs Basic auth, Bearer
+headers fail with `remote: invalid credentials`:
+
+```sh
+export GITHUB_TOKEN=$(cd /workspace/gh-bot && ./token.sh)   # note the ./ ; bare token.sh is not on PATH
+printf '#!/bin/sh\necho "$GITHUB_TOKEN"\n' > .askpass.sh && chmod +x .askpass.sh
+GIT_ASKPASS=$PWD/.askpass.sh git -c credential.helper= push origin <branch>
+rm -f .askpass.sh
+```
+
+`gh` CLI calls read `$GITHUB_TOKEN` directly (Bearer is fine for the API).
+Keep the token in a shell variable only — never in files, URLs, or logs.
+
 ## The Skills
 
 Research for project relevant facts has been done. Check your skills to load relevant information.
