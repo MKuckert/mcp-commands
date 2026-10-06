@@ -1,4 +1,4 @@
-.PHONY: all build test clean lint cross buildall
+.PHONY: all build test bench clean lint cross buildall
 
 BINARY_NAME := mcp-commands
 VERSION ?= 0.9.5
@@ -13,6 +13,10 @@ build:
 test:
 	@echo "Running tests..."
 	go test -v
+
+bench:
+	@echo "Running benchmarks..."
+	go test -run XXX -bench . -benchmem .
 
 lint:
 	@echo "Running linter..."
