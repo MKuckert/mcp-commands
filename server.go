@@ -57,7 +57,7 @@ type liveEnv struct {
 func prodLiveEnv(level slog.Level) liveEnv {
 	return liveEnv{
 		stdout:           os.Stdout,
-		log:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})),
+		log:              slog.New(newLogHandler(os.Stderr, level)),
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals:    prodNotifySignals,

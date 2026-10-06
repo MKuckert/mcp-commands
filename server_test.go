@@ -116,7 +116,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			if strings.Contains(buf.String(), "level=WARN") && strings.Contains(buf.String(), "No executable scripts found") {
+			if strings.Contains(buf.String(), "WARN@") && strings.Contains(buf.String(), "No executable scripts found") {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -276,13 +276,13 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 // testLogger builds a logger on the given sink at debug level, so test
 // fakes capture every record the production logger would emit.
 func testLogger(sink io.Writer) *slog.Logger {
-	return slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return slog.New(newLogHandler(sink, slog.LevelDebug))
 }
 
 // testDiscardLogger is a shared logger that drops every record, for call
 // sites that must not emit (a logger is immutable, so sharing it across
 // parallel tests is safe).
-var testDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+var testDiscardLogger = slog.New(newLogHandler(io.Discard, 0))
 
 // TestLogLevelFiltering pins the minimum-level gating that
 // --log-level resolves to: records below the configured level are
@@ -304,7 +304,7 @@ func TestLogLevelFiltering(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tc.level}))
+			log := slog.New(newLogHandler(&buf, tc.level))
 			log.Debug("debug record")
 			log.Info("info record")
 			log.Warn("warn record")

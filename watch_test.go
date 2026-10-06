@@ -461,7 +461,7 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read stderr: %v", err)
 		}
-		if strings.Contains(string(output), "level=WARN") && strings.Contains(string(output), "failed to rediscover tools") {
+		if strings.Contains(string(output), "WARN@") && strings.Contains(string(output), "failed to rediscover tools") {
 			break
 		}
 		select {

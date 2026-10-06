@@ -29,7 +29,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Errorf("stdout = %q, want empty", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "level=WARN") ||
+		if !strings.Contains(stderr.String(), "WARN@") ||
 			!strings.Contains(stderr.String(), "No executable scripts found") ||
 			!strings.Contains(stderr.String(), "scriptsDir="+emptyDir) {
 			t.Errorf("stderr = %q, want the no-scripts warning", stderr.String())
@@ -46,7 +46,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Errorf("stdout = %q, want empty", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "level=ERROR") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
+		if !strings.Contains(stderr.String(), "ERROR@") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
 			t.Errorf("stderr = %q, want the path error", stderr.String())
 		}
 	})
@@ -197,7 +197,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1 for a watch setup failure", code)
 		}
-		if !strings.Contains(stderr.String(), "level=ERROR") || !strings.Contains(stderr.String(), "watch loop stopped") {
+		if !strings.Contains(stderr.String(), "ERROR@") || !strings.Contains(stderr.String(), "watch loop stopped") {
 			t.Errorf("stderr = %q, want the visible watch failure", stderr.String())
 		}
 	})
