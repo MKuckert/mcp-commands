@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging` from `main` (v0.10.0). **Target version:** 0.11.0.
 **Source:** issue MKuckert/mcp-commands#23 + `research/logging-libraries.md` + `research/standard-stream-usage.md`.
-**Status:** Approved (T1–T10); T11 in progress.
+**Status:** Fully approved (T1–T11).
 
 ## Design decisions (locked)
 
@@ -30,7 +30,7 @@
 - [x] **T6 — Final.** Full suite + vet green, plan updated, PR ready for the Code Reviewer.
 - [x] **T7 — Rename + env fallback (user change).** `--log-verbosity` → `--log-level` everywhere (flags.go, flags_test.go, server_test.go, README flag table + Logging section, `-h` usage). Add `LOG_LEVEL` env fallback per design §3 (flag > env > default; empty env = unset; validation error names the value and its source). `flags_test.go`: precedence table (flag wins over env; env used when flag absent; invalid env value fails; empty env ignored; default when neither). README: `LOG_LEVEL` row in the environment-variables table.
 - [x] **T8 — Reviewer polish.** (a) `server_test.go` `TestLogVerbosityFiltering`: add the missing `wantError` assertion (error record present at `error` level). (b) Stale comment wording: `discover.go:132-138`, `diagnostic.go:59`, `diagnostic.go:132-136` — reword "stderr warning" / "stderr `Error:`" to the structured-log phrasing. (The server-mode double `level=ERROR` on fatal watch termination stays: pre-existing behavior, T2 mandates no behavior change — note it as a follow-up in the PR description.)
-- [ ] **T11 — Message rendering (user request).** In `loghandler.go`: render the message **unquoted** (drop the message quoting; value quoting for whitespace/`"`-bearing values stays). Add a ` | ` separator between the message and the attribute list **only when at least one attribute renders** (including `WithAttrs`-derived ones) — a record with no attributes ends right after the message, no trailing separator. Update `loghandler_test.go` expectations, any test asserting the quoted message form, and the README sample lines. Example: `WARN@18:02:11 ignoring invalid Timeout | file=/path/x.sh error="invalid timeout \"abc\""` and `INFO@18:02:11 Starting stdio server`.
+- [x] **T11 — Message rendering (user request).** In `loghandler.go`: render the message **unquoted** (drop the message quoting; value quoting for whitespace/`"`-bearing values stays). Add a ` | ` separator between the message and the attribute list **only when at least one attribute renders** (including `WithAttrs`-derived ones) — a record with no attributes ends right after the message, no trailing separator. Update `loghandler_test.go` expectations, any test asserting the quoted message form, and the README sample lines. Example: `WARN@18:02:11 ignoring invalid Timeout | file=/path/x.sh error="invalid timeout \"abc\""` and `INFO@18:02:11 Starting stdio server`.
 - [x] **T10 — Compact record format (user request).** Replace `slog.NewTextHandler` with a small custom `slog.Handler` (new file, e.g. `loghandler.go`) rendering records as `<LEVEL>@<HH:mm:ss> <message> key=value …` — e.g. `WARN@18:02:11 "ignoring invalid Timeout" file=/path/x.sh error="…"`. Level via `rec.Level.String()` (`DEBUG`/`INFO`/`WARN`/`ERROR`); time `rec.Time.Format("15:04:05")`; message and any value containing whitespace are double-quoted, others `%v`; nested groups flatten to `group.key`. The handler takes the minimum `slog.Level` (replaces `HandlerOptions.Level`) and implements `Enabled`; `WithAttrs`/`WithGroup` return copies; must be safe for concurrent use (stateless or guarded). Wire it into `prodLiveEnv` and **every test fake** (all `slog.NewTextHandler` occurrences); update all `level=WARN`/`level=ERROR`/`level=INFO`/`level=DEBUG` assertions to the new shapes (`WARN@` etc. — keep substring style, never exact lines). Add a dedicated handler unit test: all four levels, quoting rules, group flattening, level filtering via `Enabled`, attrs from `WithAttrs`. README Logging section: sample line + one sentence describing the format. Suite + vet green.
 - [x] **T9 — Docs precision (user request).** README Logging section: state explicitly that in **HTTP mode stdout is not used at all** (not merely "not for logs") — one sentence, folded into the existing stdout-reservation paragraph.
 
@@ -106,3 +106,27 @@ One-sentence README addition ("In HTTP mode stdout is not used at all — no out
 - `grep -rn NewTextHandler --include='*.go' .` and `grep -rn 'level=' --include='*.go' .` — zero hits; docs sweep clean (see above).
 
 No blocking findings. T10 ticked; **plan fully approved (T1–T10)** — PR is ready to open.
+
+### Code Reviewer — 2026-10-06 (2e439e6..5ec1359) — **APPROVED**
+
+**T11 spec compliance** (`loghandler.go`). `Handle` renders `rec.Message` verbatim via `fmt.Fprintf(&b, "%s@%s %s", …)` — unquoted even with whitespace (`loghandler.go:47`). The `first` flag (`loghandler.go:48`) is shared across the `h.attrs` loop and the `rec.Attrs` callback, so the ` | ` separator is emitted exactly once, before the first *rendered* attribute, covering record attrs, `WithAttrs`-derived attrs, and group-prefixed keys alike; `writeAttr` (`loghandler.go:82`) leaves `*first` untouched for empty groups, so a record whose attrs all render nothing ends right after the message with no trailing separator or space (`loghandler.go:93-98`). Value quoting/escaping is untouched (`renderString` unchanged); the doc comment for `renderString` was corrected to say *attribute values* only. `Enabled`, `WithAttrs`, `WithGroup`, group flattening, and the concurrency-safety note are all intact (comment reworded in the handler doc to match the new shape).
+
+**Edge cases** — verified empirically with a temporary test (removed after the run): all-attrs-empty-groups renders `INFO@… m\n` (ends after the message, no separator/space); `WithGroup` with attrs inside renders a single ` | ` + flattened `g.g.a=1`; mixed `WithGroup`+`WithAttrs`+record attrs renders exactly one ` | ` then space-separated attrs. All correct.
+
+**Tests** (`loghandler_test.go`). `TestLogHandlerSeparator` covers the three required shapes: record attrs (`m | k=v`), zero attrs (no `|`, no trailing space), and `WithAttrs`-derived (`m | c=1`). `TestLogHandlerQuoting` now asserts the unquoted message (positive `hello world` + negative `"hello world"`) and the unchanged whitespace-value quoting. `TestLogHandlerLevels` assertion tightened to ` hello\n` (pins no trailing separator after the message). Stale-assertion sweep: `grep` for quoted-message patterns (`\"`), `msg=`, `NewTextHandler`, `level=` across `*.go`/`*.md` returns zero hits outside `plans/` and `research/` (historical documents) and the T10-era hits in the plan's own review log.
+
+**Docs** (`README.md`). Logging-section format sentence updated (unquoted message, conditional ` | `) and sample line re-shaped (`… Timeout | file=…`); the auth-section sample matches the new rendering exactly — the message is unquoted, and the inner `"0.0.0.0"` quotes are literal characters in the message, which is what the handler emits. Both consistent with the handler's doc comment and the example line in `loghandler.go`.
+
+**Findings**
+
+1. **Non-blocking** — `loghandler_test.go` `TestLogHandlerSeparator` covers single-source attribute sets only; the two *mixed* cases (handler-accumulated `h.attrs` + record attrs in one record; all-attrs-empty-groups) are behaviorally correct (verified above) but uncommitted-tested. The plan's required test cases are all present, so this is a coverage nicety, not a spec gap.
+2. **Non-blocking** — the standing follow-up persists: server-mode fatal watch termination emits two `ERROR@…` records (deferred to the PR description per the T2 no-change mandate).
+
+**Verification commands & outcomes** (with `GOCACHE=/workspace/.goenv/gocache GOPATH=/workspace/.goenv/gopath TMPDIR=/workspace/.goenv/tmp`):
+- `go vet ./...` — clean
+- `gofmt -l .` — no files
+- `go test -count=1 ./...` — `ok github.com/mkuckert/mcp-commands 7.113s`
+- Temporary edge-case test (`go test -run TestEdgeVerify -v`, file removed after): all-empty-groups → `INFO@… m\n`; WithGroup-prefixed → `INFO@… m2 | g.g.a=1\n`; mixed → `INFO@… m3 | g.c=1 g.k=\"v v\"\n` — all as specified.
+- `git status` — clean; no files modified by this review besides the plan.
+
+No blocking findings. T11 ticked; **plan fully approved (T1–T11)** — PR is ready to open.
