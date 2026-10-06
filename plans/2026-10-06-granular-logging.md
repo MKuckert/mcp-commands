@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging` from `main` (v0.10.0). **Target version:** 0.11.0.
 **Source:** issue MKuckert/mcp-commands#23 + `research/logging-libraries.md` + `research/standard-stream-usage.md`.
-**Status:** Approved (T1–T9); T10 in progress.
+**Status:** Fully approved (T1–T10).
 
 ## Design decisions (locked)
 
@@ -30,7 +30,7 @@
 - [x] **T6 — Final.** Full suite + vet green, plan updated, PR ready for the Code Reviewer.
 - [x] **T7 — Rename + env fallback (user change).** `--log-verbosity` → `--log-level` everywhere (flags.go, flags_test.go, server_test.go, README flag table + Logging section, `-h` usage). Add `LOG_LEVEL` env fallback per design §3 (flag > env > default; empty env = unset; validation error names the value and its source). `flags_test.go`: precedence table (flag wins over env; env used when flag absent; invalid env value fails; empty env ignored; default when neither). README: `LOG_LEVEL` row in the environment-variables table.
 - [x] **T8 — Reviewer polish.** (a) `server_test.go` `TestLogVerbosityFiltering`: add the missing `wantError` assertion (error record present at `error` level). (b) Stale comment wording: `discover.go:132-138`, `diagnostic.go:59`, `diagnostic.go:132-136` — reword "stderr warning" / "stderr `Error:`" to the structured-log phrasing. (The server-mode double `level=ERROR` on fatal watch termination stays: pre-existing behavior, T2 mandates no behavior change — note it as a follow-up in the PR description.)
-- [ ] **T10 — Compact record format (user request).** Replace `slog.NewTextHandler` with a small custom `slog.Handler` (new file, e.g. `loghandler.go`) rendering records as `<LEVEL>@<HH:mm:ss> <message> key=value …` — e.g. `WARN@18:02:11 ignoring invalid Timeout file=/path/x.sh error="…"`. Level via `rec.Level.String()` (`DEBUG`/`INFO`/`WARN`/`ERROR`); time `rec.Time.Format("15:04:05")`; message and any value containing whitespace are double-quoted, others `%v`; nested groups flatten to `group.key`. The handler takes the minimum `slog.Level` (replaces `HandlerOptions.Level`) and implements `Enabled`; `WithAttrs`/`WithGroup` return copies; must be safe for concurrent use (stateless or guarded). Wire it into `prodLiveEnv` and **every test fake** (all `slog.NewTextHandler` occurrences); update all `level=WARN`/`level=ERROR`/`level=INFO`/`level=DEBUG` assertions to the new shapes (`WARN@` etc. — keep substring style, never exact lines). Add a dedicated handler unit test: all four levels, quoting rules, group flattening, level filtering via `Enabled`, attrs from `WithAttrs`. README Logging section: sample line + one sentence describing the format. Suite + vet green.
+- [x] **T10 — Compact record format (user request).** Replace `slog.NewTextHandler` with a small custom `slog.Handler` (new file, e.g. `loghandler.go`) rendering records as `<LEVEL>@<HH:mm:ss> <message> key=value …` — e.g. `WARN@18:02:11 "ignoring invalid Timeout" file=/path/x.sh error="…"`. Level via `rec.Level.String()` (`DEBUG`/`INFO`/`WARN`/`ERROR`); time `rec.Time.Format("15:04:05")`; message and any value containing whitespace are double-quoted, others `%v`; nested groups flatten to `group.key`. The handler takes the minimum `slog.Level` (replaces `HandlerOptions.Level`) and implements `Enabled`; `WithAttrs`/`WithGroup` return copies; must be safe for concurrent use (stateless or guarded). Wire it into `prodLiveEnv` and **every test fake** (all `slog.NewTextHandler` occurrences); update all `level=WARN`/`level=ERROR`/`level=INFO`/`level=DEBUG` assertions to the new shapes (`WARN@` etc. — keep substring style, never exact lines). Add a dedicated handler unit test: all four levels, quoting rules, group flattening, level filtering via `Enabled`, attrs from `WithAttrs`. README Logging section: sample line + one sentence describing the format. Suite + vet green.
 - [x] **T9 — Docs precision (user request).** README Logging section: state explicitly that in **HTTP mode stdout is not used at all** (not merely "not for logs") — one sentence, folded into the existing stdout-reservation paragraph.
 
 ## Review log
@@ -82,3 +82,26 @@ No findings. T7 and T8 ticked; **plan fully approved (T1–T8)** — PR is ready
 ### Orchestrator — T9 (49b0c50) — **Approved (inline)**
 
 One-sentence README addition ("In HTTP mode stdout is not used at all — no output of any kind is written there."). Inline review instead of a full reviewer cycle: docs-only diff, sentence verified accurate against the code (server-mode stdout touches are only the `-h`/`--version` diagnostic paths; HTTP responses go to the connection, banners to stderr). T9 ticked; **plan fully approved (T1–T9)**.
+
+### Code Reviewer — 2026-10-06 (77f5391..HEAD) — **APPROVED**
+
+**Handler correctness** (`loghandler.go`). `Enabled` gates on `level >= h.minLevel` (minimum level lives in the constructor, replacing `HandlerOptions.Level`); `Handle` does **not** re-check the level, per contract, and is safe if called directly (it just renders). `WithAttrs` appends to the accumulated attrs and `WithGroup` chains group names (`h.group + "." + name`) — both return fresh values, never mutating the receiver, so the handler is stateless apart from immutable fields and concurrent `Handle` calls are safe without a mutex (confirmed by reading; `go test -race` unsupported in this sandbox). Group flattening verified empirically: nested groups render `outer.inner.k=x`, attrs accumulated **before** `WithGroup` are prefixed (`g.a`, `g.b`), and nested `WithGroup` chains compose (`g.h.a`). All `slog.Value` kinds exercised live: `time.Time` → `"2026-10-06 18:02:11 +0000 UTC"` (quoted: whitespace), `[]int` → `"[1 2 3]"`, struct → `"{x y z}"`, `nil` → `<nil>` (unquoted: no whitespace), `KindExt` → `"[v 1 7]"` — no panics, all sensibly rendered via `Value.String()` + whitespace-triggered `strconv.Quote`. Quote escaping verified: a value containing `\"` renders `"has \"quotes\" and spaces"`. Quoting rule applies to both message and values.
+
+**Plan compliance** vs T10. Format `<LEVEL>@HH:mm:ss message key=value …`, time `"15:04:05"`, level via `rec.Level.String()`, one line + trailing newline — all match. All `slog.NewTextHandler` occurrences replaced (`grep` returns zero in `*.go`); `prodLiveEnv` wires `newLogHandler(os.Stderr, level)`, fakes via `testLogger`/`testDiscardLogger`/`TestLogLevelFiltering` (zero = debug, as before). All `level=WARN|ERROR|INFO` assertions migrated to `WARN@`/`ERROR@` substrings in `diagnostic_test.go`, `server_test.go`, `watch_test.go` (never exact lines). Dedicated unit test covers all four levels, quoting rules, group flattening, `Enabled` filtering, `WithAttrs` copy semantics, and concurrent `Handle`. README: format sentence + updated sample in the Logging section.
+
+**Builder's self-noted deviations, judged.** (1) Whitespace-bearing messages are double-quoted — **this is the plan's stated spec** ("message and any value containing whitespace are double-quoted"); the plan's T10 *example line* showed the message unquoted, which contradicts that spec sentence. Ruling: the behavior is the intent; the example was stale. The T10 example line is corrected above (one line) to `"ignoring invalid Timeout"`. (2) The README auth-section sample (HTTP non-loopback refusal) was also moved to the new format — beyond T10's letter but **required**: it was a stale `time=… level=ERROR msg=…` sample, and leaving it would have left the README internally inconsistent. Accepted.
+
+**Stale-doc sweep.** `grep` for `time=20…`/`level=WARN|ERROR|INFO|DEBUG` in `README.md`/`docs/` → zero hits.
+
+**Findings**
+
+1. **Non-blocking** — `loghandler.go` `writeAttr`: an **empty** `slog.Group` (no members) is silently dropped; the stdlib `TextHandler` would have rendered `key=`. No production site emits an empty group, so this is unobservable today; note it only if empty groups ever appear.
+2. **Non-blocking** — the prior reviewer finding (double `level=ERROR` on fatal watch termination in server mode) persists; still deferred to the PR description per the plan, now rendered as two `ERROR@…` records.
+
+**Verification commands & outcomes** (with `GOCACHE=/workspace/.goenv/gocache GOPATH=/workspace/.goenv/gopath TMPDIR=/workspace/.goenv/tmp`):
+- `go vet ./...` — clean
+- `gofmt -l .` — no files
+- `go test -count=1 ./...` — `ok github.com/mkuckert/mcp-commands 6.780s`
+- `grep -rn NewTextHandler --include='*.go' .` and `grep -rn 'level=' --include='*.go' .` — zero hits; docs sweep clean (see above).
+
+No blocking findings. T10 ticked; **plan fully approved (T1–T10)** — PR is ready to open.
