@@ -100,6 +100,32 @@ func TestLogHandlerSeparator(t *testing.T) {
 	if got := buf.String(); !strings.Contains(got, "m | c=1") {
 		t.Errorf("record = %q, want the ' | ' separator before a WithAttrs attr", got)
 	}
+
+	// Mixed sources: handler attrs (WithAttrs, group-flattened) and record
+	// attrs render in order after a single ' | ' separator.
+	buf.Reset()
+	mixed := slog.New(h.WithGroup("g").WithAttrs([]slog.Attr{slog.String("c", "1")}))
+	mixed.Info("m3", slog.String("k", "v v"))
+	got := buf.String()
+	if !strings.HasPrefix(got, "INFO@") {
+		t.Fatalf("record = %q, want INFO prefix", got)
+	}
+	if !strings.HasSuffix(got, `m3 | g.c=1 g.k="v v"`+"\n") {
+		t.Errorf("record = %q, want exact suffix %q", got, `m3 | g.c=1 g.k="v v"\n`)
+	}
+
+	// All attrs are empty groups: nothing renders, so the record ends right
+	// after the message — no separator, no trailing space.
+	buf.Reset()
+	emptyGroups := slog.NewRecord(time.Now(), slog.LevelInfo, "message", 0)
+	emptyGroups.Add(slog.Group("g1"), slog.Group("g2"))
+	if err := h.Handle(context.Background(), emptyGroups); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	got = buf.String()
+	if strings.Contains(got, "|") || !strings.HasSuffix(got, " message\n") {
+		t.Errorf("record = %q, empty groups must leave no separator and end ' message\n'", got)
+	}
 }
 
 // TestLogHandlerGroups pins group flattening: nested groups render as
