@@ -284,10 +284,10 @@ func testLogger(sink io.Writer) *slog.Logger {
 // parallel tests is safe).
 var testDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// TestLogVerbosityFiltering pins the minimum-level gating that
-// --log-verbosity resolves to: records below the configured level are
+// TestLogLevelFiltering pins the minimum-level gating that
+// --log-level resolves to: records below the configured level are
 // dropped, records at or above it are written.
-func TestLogVerbosityFiltering(t *testing.T) {
+func TestLogLevelFiltering(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
@@ -295,11 +295,12 @@ func TestLogVerbosityFiltering(t *testing.T) {
 		wantDebug bool
 		wantInfo  bool
 		wantWarn  bool
+		wantError bool
 	}{
-		{"debug", slog.LevelDebug, true, true, true},
-		{"info", slog.LevelInfo, false, true, true},
-		{"warn", slog.LevelWarn, false, false, true},
-		{"error", slog.LevelError, false, false, false},
+		{"debug", slog.LevelDebug, true, true, true, true},
+		{"info", slog.LevelInfo, false, true, true, true},
+		{"warn", slog.LevelWarn, false, false, true, true},
+		{"error", slog.LevelError, false, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
@@ -317,6 +318,9 @@ func TestLogVerbosityFiltering(t *testing.T) {
 			}
 			if got := strings.Contains(out, "warn record"); got != tc.wantWarn {
 				t.Errorf("warn record captured = %v, want %v; output: %q", got, tc.wantWarn, out)
+			}
+			if got := strings.Contains(out, "error record"); got != tc.wantError {
+				t.Errorf("error record captured = %v, want %v; output: %q", got, tc.wantError, out)
 			}
 		})
 	}

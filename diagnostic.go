@@ -56,8 +56,8 @@ func runDiagnostic(env liveEnv, diag diagnostic) int {
 // success; 1 on any failure. Execution failures (missing required param,
 // non-zero script exit, timeout) print the tool's result content to stdout
 // with a nil error; operational failures (discovery, unknown tool, --params
-// parse, unstartable script) yield a non-nil error for the stderr "Error:"
-// line and never start the script. A non-object --params is rejected by
+// parse, unstartable script) yield a non-nil error that is logged as an
+// error record, and the script never starts. A non-object --params is rejected by
 // parseToolArguments, which maps an explicitly empty value and JSON null to
 // {} (same leniency as the MCP handler).
 func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Duration, name, paramsRaw string) (int, error) {
@@ -129,11 +129,11 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 // list (renderToolList, width re-queried at every print) to stdout, then
 // exit 0. With watch it becomes a live list: after the initial print, every
 // debounced change that alters the tool set clears the screen (TTY only) and
-// re-prints the full list with the existing per-scan stderr warnings, until
+// re-prints the full list with the existing per-scan warning records, until
 // the process is signaled. A watch setup failure or a fatal watch
-// termination (not signal cancellation) is an operational failure: stderr
-// "Error:" line, exit 1. Path resolution errors are a startup failure
-// (stderr, exit 1).
+// termination (not signal cancellation) is an operational failure: an error
+// record, exit 1. Path resolution errors are a startup failure (an error
+// record, exit 1).
 func runListTools(env liveEnv, dir, scriptsDir string, watch bool, timeout time.Duration) int {
 	_, scriptsAbs, err := resolveToolPaths(dir, scriptsDir)
 	if err != nil {

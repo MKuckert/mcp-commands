@@ -129,13 +129,13 @@ func isWindowsExecutable(name string) bool {
 // extractFrontmatter reads the first scanHeaderLines lines of a file in a
 // single pass and collects the tool's frontmatter: the first Description:
 // line (first occurrence wins; populates the MCP tool description), all
-// Param: annotations (invalid ones log a stderr warning and are skipped),
+// Param: annotations (invalid ones log a warning record and are skipped),
 // and the first Timeout: value. First-occurrence wins: `timeoutSeen` is set
-// on the first Timeout: line even when it is invalid (which logs a stderr
-// warning and yields nil, so the global applies), so later valid values are
+// on the first Timeout: line even when it is invalid (which logs a warning
+// record and yields nil, so the global applies), so later valid values are
 // ignored. nil when undeclared, &0 for NONE/0. An unreadable file yields
 // zero values. A line exceeding the scanner buffer aborts the scan early and
-// logs a stderr warning; the metadata read so far is returned.
+// logs a warning record; the metadata read so far is returned.
 func extractFrontmatter(filePath string, log *slog.Logger) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)
 	if err != nil {
