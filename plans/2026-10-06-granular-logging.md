@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging` from `main` (v0.10.0). **Target version:** 0.11.0.
 **Source:** issue MKuckert/mcp-commands#23 + `research/logging-libraries.md` + `research/standard-stream-usage.md`.
-**Status:** Fully approved (T1–T9).
+**Status:** Approved (T1–T9); T10 in progress.
 
 ## Design decisions (locked)
 
@@ -30,6 +30,7 @@
 - [x] **T6 — Final.** Full suite + vet green, plan updated, PR ready for the Code Reviewer.
 - [x] **T7 — Rename + env fallback (user change).** `--log-verbosity` → `--log-level` everywhere (flags.go, flags_test.go, server_test.go, README flag table + Logging section, `-h` usage). Add `LOG_LEVEL` env fallback per design §3 (flag > env > default; empty env = unset; validation error names the value and its source). `flags_test.go`: precedence table (flag wins over env; env used when flag absent; invalid env value fails; empty env ignored; default when neither). README: `LOG_LEVEL` row in the environment-variables table.
 - [x] **T8 — Reviewer polish.** (a) `server_test.go` `TestLogVerbosityFiltering`: add the missing `wantError` assertion (error record present at `error` level). (b) Stale comment wording: `discover.go:132-138`, `diagnostic.go:59`, `diagnostic.go:132-136` — reword "stderr warning" / "stderr `Error:`" to the structured-log phrasing. (The server-mode double `level=ERROR` on fatal watch termination stays: pre-existing behavior, T2 mandates no behavior change — note it as a follow-up in the PR description.)
+- [ ] **T10 — Compact record format (user request).** Replace `slog.NewTextHandler` with a small custom `slog.Handler` (new file, e.g. `loghandler.go`) rendering records as `<LEVEL>@<HH:mm:ss> <message> key=value …` — e.g. `WARN@18:02:11 ignoring invalid Timeout file=/path/x.sh error="…"`. Level via `rec.Level.String()` (`DEBUG`/`INFO`/`WARN`/`ERROR`); time `rec.Time.Format("15:04:05")`; message and any value containing whitespace are double-quoted, others `%v`; nested groups flatten to `group.key`. The handler takes the minimum `slog.Level` (replaces `HandlerOptions.Level`) and implements `Enabled`; `WithAttrs`/`WithGroup` return copies; must be safe for concurrent use (stateless or guarded). Wire it into `prodLiveEnv` and **every test fake** (all `slog.NewTextHandler` occurrences); update all `level=WARN`/`level=ERROR`/`level=INFO`/`level=DEBUG` assertions to the new shapes (`WARN@` etc. — keep substring style, never exact lines). Add a dedicated handler unit test: all four levels, quoting rules, group flattening, level filtering via `Enabled`, attrs from `WithAttrs`. README Logging section: sample line + one sentence describing the format. Suite + vet green.
 - [x] **T9 — Docs precision (user request).** README Logging section: state explicitly that in **HTTP mode stdout is not used at all** (not merely "not for logs") — one sentence, folded into the existing stdout-reservation paragraph.
 
 ## Review log
