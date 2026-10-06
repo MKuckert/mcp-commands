@@ -57,7 +57,7 @@ type diagnostic struct {
 type cliConfig struct {
 	version    bool
 	mode       cliMode
-	logLevel   slog.Level // resolved --log-verbosity (all modes)
+	logLevel   slog.Level // resolved --log-level (all modes)
 	server     serverConfig
 	diagnostic diagnostic
 }
@@ -99,7 +99,11 @@ func checkTLSFile(path string) error {
 	return nil
 }
 
-// logLevels is the accepted --log-verbosity value set, mapped to slog levels.
+// logLevelEnvVar is the environment-variable fallback for --log-level;
+// it is consulted only when the flag is not set (empty value = unset).
+const logLevelEnvVar = "LOG_LEVEL"
+
+// logLevels is the accepted --log-level value set, mapped to slog levels.
 var logLevels = map[string]slog.Level{
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
@@ -107,18 +111,19 @@ var logLevels = map[string]slog.Level{
 	"error": slog.LevelError,
 }
 
-// resolveLogLevel validates the --log-verbosity value and resolves it to the
-// slog level that gates the logger (records below it are dropped).
-func resolveLogLevel(value string) (slog.Level, error) {
+// resolveLogLevel validates a log-level value and resolves it to the slog
+// level that gates the logger (records below it are dropped). source names
+// where the value came from (--log-level or LOG_LEVEL) for the error text.
+func resolveLogLevel(value, source string) (slog.Level, error) {
 	level, ok := logLevels[value]
 	if !ok {
-		return 0, fmt.Errorf("--log-verbosity must be one of debug, info, warn, or error (got %q)", value)
+		return 0, fmt.Errorf("%s must be one of debug, info, warn, or error (got %q)", source, value)
 	}
 	return level, nil
 }
 
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
-const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-verbosity <level>]"
+const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-level <level>]"
 
 func parseCLI(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
@@ -144,7 +149,7 @@ func parseCLI(args []string) (cliConfig, error) {
 	listToolsFlag := fs.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
 	callToolFlag := fs.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
 	paramsFlag := fs.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
-	logVerbosityFlag := fs.String("log-verbosity", "info", "Minimum log level: debug, info, warn, or error (logs always go to stderr)")
+	logLevelFlag := fs.String("log-level", "info", "Minimum log level: debug, info, warn, or error (or LOG_LEVEL when the flag is absent; logs always go to stderr)")
 
 	if err := fs.Parse(args); err != nil {
 		// Wrapped so main can restore the flag package's parse-error
@@ -192,6 +197,7 @@ func parseCLI(args []string) (cliConfig, error) {
 	allowedOriginsSet := false
 	timeoutSet := false
 	callToolSet := false
+	logLevelSet := false
 	visited := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
 		visited[f.Name] = true
@@ -204,6 +210,8 @@ func parseCLI(args []string) (cliConfig, error) {
 			timeoutSet = true
 		case "call-tool":
 			callToolSet = true
+		case "log-level":
+			logLevelSet = true
 		}
 	})
 
@@ -222,8 +230,16 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cliConfig{}, errors.New("--list-tools and --call-tool are mutually exclusive")
 	}
 
-	// Shared by every mode (fail-fast); run only consumes the resolved value.
-	logLevel, err := resolveLogLevel(*logVerbosityFlag)
+	// Shared by every mode (fail-fast); run only consumes the resolved
+	// value. Precedence: --log-level > LOG_LEVEL > info; an empty env
+	// value counts as unset.
+	logLevelValue, logLevelSource := *logLevelFlag, "--log-level"
+	if !logLevelSet {
+		if envValue := os.Getenv(logLevelEnvVar); envValue != "" {
+			logLevelValue, logLevelSource = envValue, logLevelEnvVar
+		}
+	}
+	logLevel, err := resolveLogLevel(logLevelValue, logLevelSource)
 	if err != nil {
 		return cliConfig{}, err
 	}

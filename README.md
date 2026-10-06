@@ -257,7 +257,7 @@ time=2025-01-15T10:00:00.123Z level=WARN msg="ignoring invalid Timeout" file=/pa
 
 stdout is reserved for program output only: in stdio mode it carries the MCP protocol itself, and in diagnostics it carries the tool list, `--call-tool` result text, `-h` help, and `--version`. Routing logs to stdout would corrupt the protocol, so every record goes to stderr in all modes.
 
-`--log-verbosity <level>` sets the minimum level that is emitted — `debug`, `info` (default), `warn`, or `error`; records below it are dropped. It is accepted in every mode and has no env-var fallback. At the default `info`, you see startup banners, warnings, and errors; `debug` additionally logs the discovery summary, each debounced rescan, and watch reattach attempts.
+`--log-level <level>` sets the minimum level that is emitted — `debug`, `info` (default), `warn`, or `error`; records below it are dropped. It is accepted in every mode. The `LOG_LEVEL` environment variable is a fallback consulted only when the flag is not set (an empty value counts as unset) — precedence: `--log-level` > `LOG_LEVEL` > `info`. At the default `info`, you see startup banners, warnings, and errors; `debug` additionally logs the discovery summary, each debounced rescan, and watch reattach attempts.
 
 #### Version
 
@@ -278,7 +278,7 @@ Essentials and modes:
 | `--call-tool <name>` | _(none)_ | Run one discovered tool once and exit (debug mode; no server starts). |
 | `--params <json>` | `{}` | JSON object of named arguments for `--call-tool`. |
 | `--version` | off | Print the version and exit. |
-| `--log-verbosity <level>` | `info` | Minimum log level: `debug`, `info`, `warn`, or `error`; every record goes to stderr (see [Logging](#logging)). |
+| `--log-level <level>` | `info` | Minimum log level: `debug`, `info`, `warn`, or `error` (or `LOG_LEVEL` when the flag is absent); every record goes to stderr (see [Logging](#logging)). |
 
 HTTP server:
 
@@ -301,6 +301,7 @@ Environment variables (each is consulted only when its flag is not set):
 | `MCP_COMMANDS_API_KEY` | `--api-key` |
 | `MCP_COMMANDS_ALLOWED_ORIGINS` | `--allowed-origins` |
 | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | `--allow-all-origins` (`1`/`true`/`yes`) |
+| `LOG_LEVEL` | `--log-level` |
 
 ### Creating Tools
 

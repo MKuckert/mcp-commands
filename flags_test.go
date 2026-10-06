@@ -309,8 +309,8 @@ func TestParseCLI(t *testing.T) {
 			wantErr: "flag provided but not defined",
 		},
 		{
-			name:    "log_verbosity_debug",
-			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "debug"},
+			name:    "log_level_debug",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
 				if c.logLevel != slog.LevelDebug {
@@ -319,8 +319,8 @@ func TestParseCLI(t *testing.T) {
 			},
 		},
 		{
-			name:    "log_verbosity_info",
-			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "info"},
+			name:    "log_level_info",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "info"},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
 				if c.logLevel != slog.LevelInfo {
@@ -329,8 +329,8 @@ func TestParseCLI(t *testing.T) {
 			},
 		},
 		{
-			name:    "log_verbosity_warn",
-			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "warn"},
+			name:    "log_level_warn",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "warn"},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
 				if c.logLevel != slog.LevelWarn {
@@ -339,8 +339,8 @@ func TestParseCLI(t *testing.T) {
 			},
 		},
 		{
-			name:    "log_verbosity_error",
-			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "error"},
+			name:    "log_level_error",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "error"},
 			wantErr: "",
 			check: func(t *testing.T, c cliConfig) {
 				if c.logLevel != slog.LevelError {
@@ -350,8 +350,8 @@ func TestParseCLI(t *testing.T) {
 		},
 		{
 			// Accepted in every mode: the value resolves in diagnostic mode too.
-			name:     "log_verbosity_diagnostic_mode",
-			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--log-verbosity", "debug"},
+			name:     "log_level_diagnostic_mode",
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--log-level", "debug"},
 			wantErr:  "",
 			wantMode: modeListTools,
 			check: func(t *testing.T, c cliConfig) {
@@ -361,9 +361,9 @@ func TestParseCLI(t *testing.T) {
 			},
 		},
 		{
-			name:    "log_verbosity_invalid",
-			args:    []string{"--dir", "d", "--scripts", "s", "--log-verbosity", "verbose"},
-			wantErr: `--log-verbosity must be one of debug, info, warn, or error (got "verbose")`,
+			name:    "log_level_invalid",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "verbose"},
+			wantErr: `--log-level must be one of debug, info, warn, or error (got "verbose")`,
 		},
 	}
 
@@ -413,6 +413,75 @@ func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
 	}
 }
 
+// TestLogLevelPrecedence: the --log-level flag wins over the LOG_LEVEL env
+// var; the env var is consulted only when the flag is absent (an empty
+// value counts as unset); the default is info. No t.Parallel: t.Setenv.
+func TestLogLevelPrecedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		env       string
+		envSet    bool   // set LOG_LEVEL at all (empty value = unset)
+		wantErr   string // substring; empty = success
+		wantLevel slog.Level
+	}{
+		{
+			name:      "flag_wins_over_env",
+			args:      []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
+			env:       "warn",
+			envSet:    true,
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "env_used_when_flag_absent",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			env:       "warn",
+			envSet:    true,
+			wantLevel: slog.LevelWarn,
+		},
+		{
+			name:    "invalid_env_value_fails_naming_the_source",
+			args:    []string{"--dir", "d", "--scripts", "s"},
+			env:     "verbose",
+			envSet:  true,
+			wantErr: `LOG_LEVEL must be one of debug, info, warn, or error (got "verbose")`,
+		},
+		{
+			name:      "empty_env_ignored_default_applies",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			env:       "",
+			envSet:    true,
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "default_when_neither_set",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			wantLevel: slog.LevelInfo,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSet {
+				t.Setenv(logLevelEnvVar, tt.env)
+			}
+			cfg, err := parseCLI(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.logLevel != tt.wantLevel {
+				t.Errorf("logLevel = %v, want %v", cfg.logLevel, tt.wantLevel)
+			}
+		})
+	}
+}
+
 // TestUsageLineListsRegisteredFlags: the one-line synopsis printed with
 // errMissingRequiredFlags must stay in sync with the flags parseCLI
 // registers — a new flag without a synopsis entry fails here.
@@ -423,7 +492,7 @@ func TestUsageLineListsRegisteredFlags(t *testing.T) {
 		"tls-cert", "tls-key", "insecure-no-auth", "max-concurrent",
 		"allowed-origins", "allow-all-origins", "disable-localhost-protection",
 		"timeout", "no-timeout", "list-tools", "call-tool", "params",
-		"log-verbosity",
+		"log-level",
 	} {
 		if !strings.Contains(usageLine, "--"+name) {
 			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)
