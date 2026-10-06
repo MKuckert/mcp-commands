@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging` from `main` (v0.10.0). **Target version:** 0.11.0.
 **Source:** issue MKuckert/mcp-commands#23 + `research/logging-libraries.md` + `research/standard-stream-usage.md`.
-**Status:** Approved (T1–T6); T7–T8 in progress (user change: flag renamed, env fallback added).
+**Status:** Fully approved (T1–T8).
 
 ## Design decisions (locked)
 
@@ -28,8 +28,8 @@
 - [x] **T4 — Tests.** Update every existing test that asserts the old `Warning:`/`Error:`/banner text: assert on `level=WARN`/`level=ERROR`/`level=INFO` plus the message substring, never exact whole lines (timestamps vary). Test fakes build the logger on a `bytes.Buffer`. Add: level-filtering tests (a debug record is captured at `debug`, absent at `info`; a warn record is captured at `info`, absent at `error`). Full suite `go test ./...` + `go vet ./...` green.
 - [x] **T5 — Documentation.** `README.md`: new **Logging** section (levels, `--log-verbosity`, default `info`, stderr-only routing with the stdio-protocol rationale, one sample output line); `--log-verbosity` row in the flags table; update every prose mention of the old `Warning: ...`-to-stderr format (Timeouts, frontmatter `Param:`/`Timeout:`, duplicate names, watch) to describe the new structured format; version references `0.10.0` → `0.11.0`. `Makefile`: `VERSION ?= 0.11.0`. No `go.mod` change (slog is stdlib) — state this in the PR description.
 - [x] **T6 — Final.** Full suite + vet green, plan updated, PR ready for the Code Reviewer.
-- [ ] **T7 — Rename + env fallback (user change).** `--log-verbosity` → `--log-level` everywhere (flags.go, flags_test.go, server_test.go, README flag table + Logging section, `-h` usage). Add `LOG_LEVEL` env fallback per design §3 (flag > env > default; empty env = unset; validation error names the value and its source). `flags_test.go`: precedence table (flag wins over env; env used when flag absent; invalid env value fails; empty env ignored; default when neither). README: `LOG_LEVEL` row in the environment-variables table.
-- [ ] **T8 — Reviewer polish.** (a) `server_test.go` `TestLogVerbosityFiltering`: add the missing `wantError` assertion (error record present at `error` level). (b) Stale comment wording: `discover.go:132-138`, `diagnostic.go:59`, `diagnostic.go:132-136` — reword "stderr warning" / "stderr `Error:`" to the structured-log phrasing. (The server-mode double `level=ERROR` on fatal watch termination stays: pre-existing behavior, T2 mandates no behavior change — note it as a follow-up in the PR description.)
+- [x] **T7 — Rename + env fallback (user change).** `--log-verbosity` → `--log-level` everywhere (flags.go, flags_test.go, server_test.go, README flag table + Logging section, `-h` usage). Add `LOG_LEVEL` env fallback per design §3 (flag > env > default; empty env = unset; validation error names the value and its source). `flags_test.go`: precedence table (flag wins over env; env used when flag absent; invalid env value fails; empty env ignored; default when neither). README: `LOG_LEVEL` row in the environment-variables table.
+- [x] **T8 — Reviewer polish.** (a) `server_test.go` `TestLogVerbosityFiltering`: add the missing `wantError` assertion (error record present at `error` level). (b) Stale comment wording: `discover.go:132-138`, `diagnostic.go:59`, `diagnostic.go:132-136` — reword "stderr warning" / "stderr `Error:`" to the structured-log phrasing. (The server-mode double `level=ERROR` on fatal watch termination stays: pre-existing behavior, T2 mandates no behavior change — note it as a follow-up in the PR description.)
 
 ## Review log
 
@@ -56,3 +56,23 @@
 - Live smoke: `--log-verbosity verbose` → `Error: --log-verbosity must be one of debug, info, warn, or error (got "verbose")`, exit 1; `--list-tools` at default `info` → no debug record; at `debug` → 1 `level=DEBUG` discovery-summary record; `--version`/`-h` → stdout only; stdio server → banner/warning on stderr, 0 bytes stdout.
 
 No blocking findings. T1–T6 ticked, status set to **Approved**.
+
+### Code Reviewer — 2026-10-06 (4e3b41b..1084a41) — **APPROVED**
+
+**Plan compliance.** T7: `--log-verbosity` renamed to `--log-level` in every live site — `flags.go` (flag, help text, `usageLine`, `cliConfig` comment), `flags_test.go` (all table cases, usage-line sync test), `server_test.go` (filtering test renamed to `TestLogLevelFiltering`), `README.md` (Logging section, flags table, env-var table). `grep` for `log-verbosity`/`Verbosity` outside `plans/` returns zero hits. `LOG_LEVEL` env fallback (`flags.go:102`, `logLevelEnvVar` const) with the specified precedence: flag > env > `info`, empty env = unset, `fs.Visit`-tracked `logLevelSet` distinguishes "flag absent" from "flag set to a value". Validation error names value **and** source (`%s must be one of … (got %q)`); `flags_test.go` `TestLogLevelPrecedence` covers all five required cases (flag wins, env used when flag absent, invalid env fails naming source, empty env ignored, default when neither). README env-var table gained the `LOG_LEVEL` row under the existing "consulted only when its flag is not set" header. T8: `TestLogLevelFiltering` now carries a `wantError` column + assertion for all four levels (error record present at `error`); the three stale comment sites (`discover.go`, `diagnostic.go` ×2) reworded to structured-record phrasing.
+
+**Security & stability.** `t.Setenv` is confined to non-parallel tests (`TestLogLevelPrecedence` has no `t.Parallel` and is annotated; the env-mutating `TestParseCLI` case at `flags_test.go:396` predates this delta and is likewise non-parallel); `TestLogLevelFiltering` uses `t.Parallel` but no env mutation. `--version` short-circuit verified **before** the log-level resolution in `parseCLI` (`flags.go`: `if *versionFlag { return }` precedes the `os.Getenv(logLevelEnvVar)` block) — live run `LOG_LEVEL=bogus mcp-commands --version` → exit 0, version on stdout, 0 bytes stderr. No new package-level mutable state (the addition is one `const` + one `bool` in `cliConfig`).
+
+**Completeness.** No residual `--log-verbosity` in code, tests, README, or the usage line; `-h` help text is sensible. **Builder self-noted choices, judged:** (1) help text "(or LOG_LEVEL when the flag is absent; …)" mirrors the established `--api-key` ("alternatives: … MCP_COMMANDS_API_KEY") and `--allowed-origins` ("or set MCP_COMMANDS_…") conventions and is consistent with the README's full precedence statement — accepted. (2) Two commits (feat for rename+fallback, test for `wantError`+comment rewording) is a clean Conventional-Commits split — accepted.
+
+**Findings**
+
+None blocking, none non-blocking. The server-mode double `level=ERROR` on fatal watch termination remains, as the plan explicitly defers to the PR description (pre-existing behavior, T2 no-change mandate).
+
+**Verification commands & outcomes** (with `GOCACHE=/workspace/.goenv/gocache GOPATH=/workspace/.goenv/gopath TMPDIR=/workspace/.goenv/tmp`):
+- `go vet ./...` — clean
+- `gofmt -l .` — no files
+- `go test -count=1 ./...` — `ok github.com/mkuckert/mcp-commands 6.833s`
+- Live smoke (built binary): `LOG_LEVEL=bogus --version` → exit 0, stdout only; `LOG_LEVEL=bogus --list-tools` → `Error: LOG_LEVEL must be one of debug, info, warn, or error (got "bogus")`, exit 1; `LOG_LEVEL=warn --log-level debug --list-tools` → flag wins (debug summary emitted).
+
+No findings. T7 and T8 ticked; **plan fully approved (T1–T8)** — PR is ready to open.
