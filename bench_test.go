@@ -79,9 +79,19 @@ func BenchmarkRegistryReload(b *testing.B) {
 	set := benchToolSet(100)
 	registry.replace(set)
 	// Testing re-runs a subbenchmark's closure (calibration, then final)
-	// while the registry persists across runs; a per-invocation counter
-	// would collide with the baseline the previous invocation left behind.
-	var updated int
+	// while the registry persists across runs; the alternation index must
+	// survive re-invocation so the first iteration never matches the
+	// baseline the previous run left behind.
+	var variant int
+	// Two prebuilt one-tool-changed variants, alternated per iteration:
+	// replaceIfChanged advances its baseline to the passed set, so each
+	// call must differ from the previous one — and fixture construction
+	// stays out of the timed loop entirely.
+	va := benchToolSet(100)
+	va[7].Description = "Tool number 7, variant A."
+	vb := benchToolSet(100)
+	vb[7].Description = "Tool number 7, variant B."
+	variants := [2][]discoveredTool{va, vb}
 
 	b.Run("no_op_rescan", func(b *testing.B) {
 		identical := benchToolSet(100)
@@ -93,15 +103,10 @@ func BenchmarkRegistryReload(b *testing.B) {
 	})
 
 	b.Run("one_tool_changed", func(b *testing.B) {
-		base := benchToolSet(100)
 		for i := 0; i < b.N; i++ {
-			// replaceIfChanged advances its baseline to the passed set, so
-			// each iteration must differ from the previous one (unique
-			// description) to keep measuring a one-tool diff, not a no-op.
-			changed := append([]discoveredTool(nil), base...)
-			changed[7].Description = fmt.Sprintf("Tool number 7, updated %d.", updated)
-			updated++
-			if !registry.replaceIfChanged(changed) {
+			v := variants[variant]
+			variant = 1 - variant
+			if !registry.replaceIfChanged(v) {
 				b.Fatal("replaceIfChanged reported no change for a changed set")
 			}
 		}
@@ -120,9 +125,10 @@ func BenchmarkExecuteCappedOutput(b *testing.B) {
 	writeBenchScript(b, scriptPath, "#!/bin/bash\nhead -c 2097152 /dev/zero | tr '\\0' 'x'\n")
 	slot := newExecSlot(16)
 
-	// Per-call throughput: each counted operation is one executeTool call
-	// capturing at maxToolOutputBytes; the 16-deep concurrency is the
-	// saturation condition, not a 16× of the counted work.
+	// Aggregate throughput: testing.B divides b.N × bytes by wall clock,
+	// and up to 16 calls overlap — so the reported MB/s is across the
+	// concurrent pool, not per call. Each counted operation is one
+	// executeTool call capturing at maxToolOutputBytes.
 	b.SetBytes(1 << 20)
 	b.ResetTimer()
 	const workers = 16
