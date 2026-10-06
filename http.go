@@ -175,11 +175,15 @@ func (c corsConfig) enabled() bool { return len(c.origins) > 0 || c.allowAll }
 // default (80 for http, 443 for https). Both the configured allowlist and
 // the per-request Origin header are compared in this form, so an operator
 // who lists "http://host:80" matches the "http://host" the page actually
-// sends, and vice versa. It returns "" for unparseable, non-http(s) origins,
-// or those with no host, which callers treat as a non-match.
+// sends, and vice versa. It returns "" for unparseable, non-http(s), hostless,
+// or non-origin-shaped origins (anything with userinfo, path, query, or fragment
+// — a serialized origin can carry none of those), which callers treat as a
+// non-match. Such values are protocol violations (a browser only sends a
+// serialized origin or "null"); rejecting them fails closed.
 func canonicalOrigin(origin string) string {
 	u, err := url.Parse(origin)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname()) // browsers lowercase the host; Go does not

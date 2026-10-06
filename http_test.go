@@ -447,6 +447,13 @@ func TestCanonicalOrigin(t *testing.T) {
 		{in: "ftp://x.example", want: ""},
 		{in: "notaurl", want: ""},
 		{in: "https://", want: ""},
+		// Non-origin-shaped URLs are protocol violations (a browser only sends a
+		// serialized origin or "null"): fail closed, never drop the components.
+		{in: "https://allowed.example/path", want: ""},
+		{in: "https://allowed.example/", want: ""},
+		{in: "https://allowed.example?x=1", want: ""},
+		{in: "https://allowed.example#frag", want: ""},
+		{in: "https://user@allowed.example", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -491,6 +498,10 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 		{name: "null_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "null",
 			wantAllowed: false, wantReached: true},
 		{name: "garbage_origin_no_match", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "notaurl",
+			wantAllowed: false, wantReached: true},
+		// Protocol-violating Origin (carries a path): must fail closed, not
+		// collapse into the allowlisted host.
+		{name: "origin_with_path_no_match", cfg: corsConfig{origins: []string{"https://allowed.example"}}, origin: "https://allowed.example/path",
 			wantAllowed: false, wantReached: true},
 		// Host case is normalized on both sides.
 		{name: "uppercase_request_host_matches", cfg: corsConfig{origins: []string{"https://blackberry"}}, origin: "https://BLACKBERRY",
