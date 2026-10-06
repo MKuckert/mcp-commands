@@ -32,14 +32,14 @@ jobs:
         run: go vet ./...
 
       # The full suite is Unix-oriented (exec bits, shebang execution).
-      # On Windows it runs the native .exe discovery/invocation smoke test
-      # (windows_test.go), which is the only part of the suite the
-      # windows-latest job can execute — the OS-aware discovery predicate
-      # and the real exec path against a genuine PE binary.
+      # On Windows it compiles the whole module's test files and runs only
+      # the native .exe discovery/invocation smoke test (windows_test.go)
+      # — the OS-aware discovery predicate and the real exec path against
+      # a genuine PE binary.
       - name: Test
         if: matrix.os == 'ubuntu-latest'
         run: go test ./...
 
       - name: Test (Windows smoke)
         if: matrix.os == 'windows-latest'
-        run: go test -run TestWindowsExeSmoke -v .
+        run: go test ./... -run TestWindowsExeSmoke -v

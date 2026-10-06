@@ -437,6 +437,10 @@ Duplicate parameter names use the last declaration consistently for the schema, 
 - **Inspect what the server registered.** `mcp-commands --dir <dir> --scripts <scripts> --list-tools` prints the registered names, signatures, descriptions, and timeout suffixes in a human-readable form, without starting a server.
 - **Duplicate tool names.** The tool name is the filename minus its extension, so `a.sh` and `a.py` both register as `a`. The first file in directory order wins and a warning is printed to stderr for each shadowed duplicate — rename one of the files to expose both.
 
+## AI Usage
+
+The implementation of `mcp-commands` is completely done by an AI. The idea and guidance for the plan is mine, the plan writing and code is the AI. It wrote the entire server, including argument parsing, script discovery, and MCP protocol handling, I did the review.
+
 ## License
 
 MIT License
