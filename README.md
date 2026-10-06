@@ -201,7 +201,7 @@ Configuration (each flag wins over its env var):
 
 | Flag | Env | Meaning |
 |---|---|---|
-| `--allowed-origins <o1,o2,...>` | `MCP_COMMANDS_ALLOWED_ORIGINS` | Comma-separated **exact** origin allowlist (`https://app.example.com`). Origins are validated at startup (must be `http`/`https` + host, no path/userinfo) and the flag fails fast even in stdio mode. An explicitly empty `--allowed-origins=` means “no origins” — it disables the allowlist and does **not** fall back to the env var. |
+| `--allowed-origins <o1,o2,...>` | `MCP_COMMANDS_ALLOWED_ORIGINS` | Comma-separated **exact** origin allowlist (`https://app.example.com`). Origins are validated at startup (must be `http`/`https` + host, no path/userinfo) and the flag fails fast even in stdio mode. Default ports are normalized on match, so `http://app.example.com:80` and `http://app.example.com` are equivalent — matching what browsers send in the `Origin` header (which omits default ports). An explicitly empty `--allowed-origins=` means “no origins” — it disables the allowlist and does **not** fall back to the env var. |
 | `--allow-all-origins` | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (`1`/`true`/`yes`) | Echo any `Origin`. **Dev convenience only** — safe only with `--api-key` + TLS. The env var is consulted only when the flag is not set at all; an explicit `--allow-all-origins=false` suppresses it. |
 | `--disable-localhost-protection` | *(none, deliberate)* | Disables the SDK's DNS-rebinding 403 for servers on loopback. For dev setups where the page is served from a tunnel/LAN hostname that resolves to `127.0.0.1`. This flag intentionally has no env fallback — it is a mode choice, not a secret. |
 

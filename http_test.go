@@ -288,6 +288,10 @@ func TestResolveCORS(t *testing.T) {
 		{name: "comma_space_parsing", flag: "https://a.example, https://b.example",
 			wantOrigins: []string{"https://a.example", "https://b.example"}},
 		{name: "port_accepted", flag: "https://x.example:8443", wantOrigins: []string{"https://x.example:8443"}},
+		// Default ports are valid origins and stored verbatim; canonicalization
+		// happens at match time (see canonicalOrigin) so both spellings match.
+		{name: "default_port_accepted", flag: "http://x.example:80,https://y.example:443",
+			wantOrigins: []string{"http://x.example:80", "https://y.example:443"}},
 		{name: "port_only_authority_rejected", flag: "https://:8443", wantErr: true},
 		{name: "allow_all_flag", allowAllFlag: true, allowAllSet: true, wantOrigins: []string{}, wantAllowAll: true},
 		{name: "allow_all_env_true", allowAllEnv: "TRUE", wantOrigins: []string{}, wantAllowAll: true},
@@ -413,6 +417,36 @@ func TestCORSHandlerPreflight(t *testing.T) {
 	}
 }
 
+func TestCanonicalOrigin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "http://blackberry", want: "http://blackberry"},
+		{in: "http://blackberry:80", want: "http://blackberry"},
+		{in: "http://blackberry:8080", want: "http://blackberry:8080"},
+		{in: "https://blackberry", want: "https://blackberry"},
+		{in: "https://blackberry:443", want: "https://blackberry"},
+		{in: "https://blackberry:8443", want: "https://blackberry:8443"},
+		// Host case is normalized; browsers lowercase the host in Origin.
+		{in: "https://BlackBerry.Example:443", want: "https://blackberry.example"},
+	{in: "https://BlackBerry.Example:8443", want: "https://blackberry.example:8443"},
+		{in: "http://BlackBerry:80", want: "http://blackberry"},
+		// Non-http(s) and unparseable origins canonicalize to "" (never match).
+		{in: "ftp://x.example", want: ""},
+		{in: "notaurl", want: ""},
+		{in: "https://", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := canonicalOrigin(tt.in); got != tt.want {
+				t.Errorf("canonicalOrigin(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCORSHandlerNonPreflight(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -430,7 +464,20 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 			wantAllowed: true, wantReached: true},
 		{name: "allow_all", cfg: corsConfig{allowAll: true}, origin: "https://any.example",
 			wantAllowed: true, wantReached: true},
+		// Default-port normalization: the browser omits the default port in the
+		// Origin header, so a :80 entry must match a bare http origin — and
+		// vice versa. The echoed header is always the request's raw value.
+		{name: "config_80_matches_bare_http", cfg: corsConfig{origins: []string{"http://blackberry:80"}}, origin: "http://blackberry",
+			wantAllowed: true, wantReached: true},
+		{name: "config_bare_matches_80", cfg: corsConfig{origins: []string{"http://blackberry"}}, origin: "http://blackberry:80",
+			wantAllowed: true, wantReached: true},
+		{name: "config_443_matches_bare_https", cfg: corsConfig{origins: []string{"https://blackberry:443"}}, origin: "https://blackberry",
+			wantAllowed: true, wantReached: true},
+		// A non-default port in the config must not match a bare origin.
+		{name: "config_8080_no_match_bare", cfg: corsConfig{origins: []string{"http://blackberry:8080"}}, origin: "http://blackberry",
+			wantAllowed: false, wantReached: true},
 	}
+
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
