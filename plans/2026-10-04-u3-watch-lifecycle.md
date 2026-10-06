@@ -2,7 +2,7 @@
 
 **Branch:** `fix/u3-watch-lifecycle` from `main` (v0.9.2). **Target:** v0.9.2 (no version bump — U2 already landed it).
 **Source:** `REVIEW_REPORT.md` §U3 (H3, H4, M4, M8, M11, L4).
-**Status:** Approved — PR #18 open. Three local review passes completed plus Copilot PR review; all findings fixed (last round: stdio serves concurrently with the watcher, live-list re-print gated on the tool set, test determinism fixes; the external-target watch machinery was later descoped per the postscript (M11 documented limitation)).
+**Status:** Done — PR #18 merged. Three local review passes completed plus Copilot PR review; all findings fixed (last round: stdio serves concurrently with the watcher, live-list re-print gated on the tool set, test determinism fixes; the external-target watch machinery was later descoped per the postscript (M11 documented limitation)).
 
 ## Tasks
 
