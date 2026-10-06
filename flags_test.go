@@ -395,6 +395,9 @@ func TestParseCLI(t *testing.T) {
 // document their server flags as ignored, so an invalid CORS flag/env var
 // (and an invalid --max-concurrent) must not block --list-tools/--call-tool.
 func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
+	// No --log-level flag: pin the env var to "" (unset by design) so an
+	// ambient LOG_LEVEL cannot leak into the resolution logic.
+	t.Setenv(logLevelEnvVar, "")
 	t.Setenv(allowedOriginsEnvVar, "not-a-url")
 	t.Setenv(allowAllOriginsEnvVar, "banana")
 
