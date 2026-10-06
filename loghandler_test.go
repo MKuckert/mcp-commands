@@ -196,6 +196,79 @@ func TestLogHandlerWithAttrs(t *testing.T) {
 	}
 }
 
+// TestLogHandlerLogValuer pins that LogValuer values are resolved before
+// kind-checking and rendering: a redacting LogValue() wins over the raw type.
+type redactingValue struct{}
+
+func (redactingValue) LogValue() slog.Value { return slog.StringValue("[redacted]") }
+
+func TestLogHandlerLogValuer(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	log.Info("leaking", slog.Any("token", redactingValue{}))
+	out := buf.String()
+	if !strings.Contains(out, "token=[redacted]") {
+		t.Fatalf("record = %q, want the resolved LogValue form token=[redacted]", out)
+	}
+	if strings.Contains(out, "redactingValue") {
+		t.Errorf("record = %q, the raw type leaked past the LogValue redaction", out)
+	}
+}
+
+// TestLogHandlerGroupContract pins the baked-in group keys: attrs added via
+// WithAttrs keep their keys, WithGroup prefixes only the record's attrs, and
+// WithGroup("") is a no-op.
+func TestLogHandlerGroupContract(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	log.With("a", 1).WithGroup("g").Info("m", "b", 2)
+	got := buf.String()
+	if !strings.Contains(got, "m | a=1 g.b=2") {
+		t.Fatalf("record = %q, want the ordering and keys 'm | a=1 g.b=2'", got)
+	}
+
+	buf.Reset()
+	log.With("a", 1).WithGroup("g").WithGroup("").Info("m", "b", 2)
+	got = buf.String()
+	if !strings.HasSuffix(got, "m | a=1 g.b=2\n") {
+		t.Fatalf("record = %q, WithGroup(\"\") must be a no-op ending 'm | a=1 g.b=2'", got)
+	}
+}
+
+// TestLogHandlerMessageNewlines pins that a message containing \n and \r
+// renders on exactly one physical line with the escapes visible.
+func TestLogHandlerMessageNewlines(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	log.Info("line1\nline2\rcr", slog.String("k", "v"))
+	out := buf.String()
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("record = %q, want exactly one physical line (single trailing newline)", out)
+	}
+	if !strings.Contains(out, "line1\\nline2\\rcr | k=v") {
+		t.Fatalf("record = %q, want the escaped message 'line1\\nline2\\rcr | k=v'", out)
+	}
+}
+
+// TestLogHandlerCRValue pins that a CR-only-bearings value is quoted (and
+// strconv.Quote escapes the CR), like any whitespace-bearing value.
+func TestLogHandlerCRValue(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	log.Info("m", slog.String("cr", "abc\rdef"))
+	got := buf.String()
+	if !strings.Contains(got, `cr="abc\rdef"`) {
+		t.Fatalf("record = %q, want the CR-bearing value quoted and escaped: cr=\"abc\\rdef\"", got)
+	}
+	if !strings.HasSuffix(got, "\n") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("record = %q, must stay on one physical line", got)
+	}
+}
+
 // TestLogHandlerConcurrentHandle exercises many goroutines calling Handle on
 // the same handler value to prove it is safe for concurrent use (the sink is
 // mutex-guarded; the handler itself must be — go test -race would catch it).
