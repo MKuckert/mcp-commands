@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -282,6 +283,44 @@ func testLogger(sink io.Writer) *slog.Logger {
 // sites that must not emit (a logger is immutable, so sharing it across
 // parallel tests is safe).
 var testDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// TestLogVerbosityFiltering pins the minimum-level gating that
+// --log-verbosity resolves to: records below the configured level are
+// dropped, records at or above it are written.
+func TestLogVerbosityFiltering(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		level     slog.Level
+		wantDebug bool
+		wantInfo  bool
+		wantWarn  bool
+	}{
+		{"debug", slog.LevelDebug, true, true, true},
+		{"info", slog.LevelInfo, false, true, true},
+		{"warn", slog.LevelWarn, false, false, true},
+		{"error", slog.LevelError, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tc.level}))
+			log.Debug("debug record")
+			log.Info("info record")
+			log.Warn("warn record")
+			log.Error("error record")
+			out := buf.String()
+			if got := strings.Contains(out, "debug record"); got != tc.wantDebug {
+				t.Errorf("debug record captured = %v, want %v; output: %q", got, tc.wantDebug, out)
+			}
+			if got := strings.Contains(out, "info record"); got != tc.wantInfo {
+				t.Errorf("info record captured = %v, want %v; output: %q", got, tc.wantInfo, out)
+			}
+			if got := strings.Contains(out, "warn record"); got != tc.wantWarn {
+				t.Errorf("warn record captured = %v, want %v; output: %q", got, tc.wantWarn, out)
+			}
+		})
+	}
+}
 
 // liveEnvFor builds a liveEnv with the given stdout sink and a logger on the
 // given log sink (tests capture; io.Discard suppresses) and production
