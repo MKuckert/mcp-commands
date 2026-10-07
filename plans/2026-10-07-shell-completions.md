@@ -10,7 +10,7 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 - [x] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
 - [x] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
 - [x] U3: version bump 0.11.0 → 0.11.1 (main repo)
-- [/] U4: README — Shell completion section (main repo)
+- [x] U4: README — Shell completion section (main repo)
 - [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
 - [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
 
@@ -450,3 +450,52 @@ residual findings; U1 is ticked.
   consistent with the diff.
 
 **Verdict: Approved** — no residual findings; U3 is ticked.
+
+### Review (round 6, U4)
+
+`2255712` ("docs: README shell completion section") verified against the README diff,
+Decision 9, the BF-1 amendment, and the three `completion/` script headers:
+
+- **Placement (check 1) — satisfies the intent.** Decision 9 says "main README, after the
+  Homebrew section"; the Builder placed a `### Shell completion` subsection at the **end**
+  of `## Installation` (after the container paragraph, before `## Usage`). It is literally
+  after the Homebrew section, and the alternative reading (insert *between* the Homebrew
+  block and the Go block) would have split the Homebrew/Go/release/container install-method
+  list — strictly worse. Placing it as the section's closing subsection keeps the method
+  list intact, and the section opens by anchoring to the formula ("The Homebrew formula
+  installs…") plus a non-brew paragraph, so both audiences are served from the
+  Installation area. ✔
+- **Content coverage (check 2) — all six Decision 9 items present:** brew `bash-completion`
+  (macOS stock bash 3.2) **or** `bash-completion@2` + `brew install bash`; the
+  `~/.bashrc` profile.d source line; the "both v1 and `@2` source `etc/bash_completion.d`"
+  note; the `~/.zshrc` fpath line + Homebrew-zsh-automatically note; fish automatic +
+  vendor-dir note; the non-brew paragraph (release archives ship the scripts, drop them in
+  your shell's completion dir; `go install` carries none); the Linuxbrew
+  `/usr/share/bash-completion/completions` note. Nothing from Decision 9 is missing. ✔
+- **Technical accuracy (check 3) — README and script headers agree on every path:**
+  `$(brew --prefix)/etc/profile.d/bash_completion.sh` (the canonical Homebrew
+  bash-completion v1/@2 profile script) ✔; `$(brew --prefix)/etc/bash_completion.d` +
+  `mcp-commands` ↔ `completion/mcp-commands.bash:4` ✔; `share/zsh/site-functions` +
+  `_mcp-commands` rename ↔ `completion/mcp-commands.zsh:7` (and the `#compdef` autoload
+  naming) ✔; `share/fish/vendor_completions.d` + `mcp-commands.fish` ↔
+  `completion/mcp-commands.fish:4` ✔; the Linuxbrew `/usr/share/bash-completion/completions`
+  path ↔ the same path in the bash header ✔. The unquoted `fpath=($(brew --prefix) …)`
+  form is the Homebrew-documented recipe (fine for space-free default prefixes) and is the
+  exact line Decision 9 prescribed. (Trivia, no action: the zsh snippet is fenced
+  ```bash``` — cosmetic only.)
+- **BF-1 consistency (check 4) — no contradiction.** The non-brew paragraph names the three
+  scripts by **basename** ("`mcp-commands.bash`, `mcp-commands.zsh`, `mcp-commands.fish`")
+  and gives no archive location, so it is compatible with the BF-1 `completion/` prefix
+  (the `.goreleaser.yaml` `files:` entries confirm the scripts archive as
+  `completion/mcp-commands.*`). No statement in the section claims a root location. ✔
+- **Forward-looking formula claim — accepted, non-blocking.** "The Homebrew formula installs
+  completion scripts…" is only true once U5 lands on the tap; in the window between the
+  v0.11.1 release and the U5 push, the formula (now bumped to v0.11.1) ships the new README
+  without the `*_completion.install` lines. This is an inherent consequence of the plan's
+  approved U4-before-release / U5-after-bump ordering (Decisions 8/9) and a documentation
+  inaccuracy, not an install failure — the formula remains fully functional. U5 is the
+  immediately next step, so the window is minimal. Not a finding. (Trivia, no action:
+  mentioning the `completion/` subdirectory in the non-brew paragraph would be marginally
+  more helpful for `tar`/`unzip` users; basenames alone are unambiguous in practice.)
+
+**Verdict: Approved** — all four checks pass with no residual findings; U4 is ticked.
