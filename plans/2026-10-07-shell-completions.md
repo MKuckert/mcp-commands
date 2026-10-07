@@ -1,7 +1,7 @@
 # PLAN — Shell completions shipped with the release (bash + zsh + fish)
 
 **Branch:** `feat/shell-completions` (from `main` @ `7c4122f`, worktree `/workspace/mcp-commands-shell-completions`)
-**Target version:** v0.12.0
+**Target version:** v0.11.1
 **Repos touched:** `MKuckert/mcp-commands` (main) + `MKuckert/homebrew-tap` (formula, manual PR)
 Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
@@ -9,10 +9,10 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
 - [ ] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
 - [ ] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
-- [ ] U3: version bump 0.11.0 → 0.12.0 (main repo)
+- [ ] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [ ] U4: README — Shell completion section (main repo)
-- [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.12.0 release)
-- [ ] U6: cut v0.12.0, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
+- [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
+- [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
 
 ## Design decisions
 
@@ -88,8 +88,8 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
    PR/push to the tap, like the one-time v0.8.3 seed — never touched by the dispatch.
 8. **Ordering (same discipline as the v0.8.3 tap seed).** The formula must never reference
    files the archive lacks (`bash_completion.install` on a missing staged file fails the
-   whole install). Sequence: merge main-repo PR (U1–U4, incl. version bump) → **tag v0.12.0**
-   (release archives now contain the scripts; dispatch bumps the formula's URLs/shas to v0.12.0)
+   whole install). Sequence: merge main-repo PR (U1–U4, incl. version bump) → **tag v0.11.1**
+   (release archives now contain the scripts; dispatch bumps the formula's URLs/shas to v0.11.1)
    → **then** push the formula completion PR (U5) → U6 verification. In this order the only
    formula state that ever ships is either "no completion lines + old archive" or "completion
    lines + archive that has the files".
@@ -130,32 +130,32 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 - Table-test: temporarily add a flag to a script copy / the binary in the PR to prove the
   check fails, then restore
 
-**U3 — version bump 0.12.0** (main repo)
-- `Makefile` `VERSION` 0.11.0 → 0.12.0. `main.go`'s `serverVersion = "commit-local"`
+**U3 — version bump 0.11.1** (main repo)
+- `Makefile` `VERSION` 0.11.0 → 0.11.1. `main.go`'s `serverVersion = "commit-local"`
   development marker **stays as-is** (deliberate local-build marker, documented in
   `main.go:13-14` and README.md:276; release versions come from the tag via the
   `.goreleaser.yaml` ldflags — bumping it would contradict that documentation and change
   what local source builds report)
-- README release-download examples → `mcp-commands_0.12.0_*` names
+- README release-download examples → `mcp-commands_0.11.1_*` names
 - `go test ./...` green (tag-injection assertion in release.yml covers the rest at tag time)
 
 **U4 — README shell completion section** (main repo, per Decision 9)
 
 **U5 — tap formula** (tap repo, direct push to tap main **after the `bump-formula` commit has
-landed on the tap** — i.e. the formula already points at the v0.12.0 archives that contain the
-scripts; "v0.12.0 published" alone is not enough — per Decision 8)
+landed on the tap** — i.e. the formula already points at the v0.11.1 archives that contain the
+scripts; "v0.11.1 published" alone is not enough — per Decision 8)
 - Three install lines in each stage branch + test block + `:test` deps (Decision 5/6)
 - Commit message: `mcp-commands add bash/zsh/fish completion installs`
 - The tap's `bump-formula` audit gate runs on the next dispatch; run `brew audit` locally as well
 
 **U6 — release + end-to-end verification**
-- Tag `v0.12.0` → release workflow green (6 files per archive: binary, 3 scripts, LICENSE,
-  README.md) → dispatch → `bump-formula` commits `mcp-commands 0.12.0`
+- Tag `v0.11.1` → release workflow green (6 files per archive: binary, 3 scripts, LICENSE,
+  README.md) → dispatch → `bump-formula` commits `mcp-commands 0.11.1`
 - Push U5 → `brew audit --formula mcp-commands` clean in tap CI
 - Real machine (macOS): `brew trust --formula … && brew install … && brew test mcp-commands`
   (the three sourcing checks run), then a live tab test:
   `bash -ic 'complete -p mcp-commands'` shows the registration — **manual gate**
-- Re-dispatch `v0.12.0` to confirm the bump stays a no-op (idempotency with the manual U5 commit
+- Re-dispatch `v0.11.1` to confirm the bump stays a no-op (idempotency with the manual U5 commit
   in place: dispatch rewrites identical url/sha lines → `git diff --quiet` → no commit)
 
 ## Out of scope
@@ -213,7 +213,7 @@ scripts; "v0.12.0 published" alone is not enough — per Decision 8)
 - **Naming collisions:** `mcp-commands.{bash,zsh,fish}` at the archive root collide with
   nothing (binary is `mcp-commands` / `mcp-commands.exe`). ✔
 - **Decision 8 ordering:** the only formula states ever shipped are "v0.11.0 URLs + no
-  completion lines" and "v0.12.0 URLs + completion lines"; no state references files the
+  completion lines" and "v0.11.1 URLs + completion lines"; no state references files the
   archive lacks — *provided* U5 waits for the bump commit (wording gap → N-2).
 
 **Findings:**
@@ -223,11 +223,11 @@ claimed the archive shows "… LICENSE + README.md + CHANGELOG.md at root" and U
 "9 files per archive: binary, 3 scripts, LICENSE, README, CHANGELOG" — but there is **no
 `CHANGELOG.md` in the repo** (no `CHANGELOG*` file at the root; the v0.11.0 tarball
 contains exactly 3 entries), so the `changelog*`/`CHANGELOG*` globs match nothing and the
-v0.12.0 archive will contain **6** files. The "9" also contradicted its own six-item
+v0.11.1 archive will contain **6** files. The "9" also contradicted its own six-item
 list. U1/U6 now assert the true 6-file set.
 
 R-2 (blocking, **corrected in this commit**): **U3 targeted the wrong constant.** It said
-"`main.go` `serverVersion` → `0.12.0`", but `main.go:15` is
+"`main.go` `serverVersion` → `0.11.1`", but `main.go:15` is
 `serverVersion = "commit-local"` (not `0.11.0` — `0.11.0` exists only in `Makefile:4`
 `VERSION ?= 0.11.0`), and the `commit-local` dev marker is *documented behavior*
 (`main.go:13-14` comment, README.md:276). Bumping it would contradict the docs and change
@@ -239,7 +239,7 @@ N-1 (minor, **corrected in this commit**): **U2 lint steps need an explicit matr
 the Windows job stays untouched.
 
 N-2 (minor, **corrected in this commit**): **U5's gate was one step too early.** "after
-v0.12.0 is published" is not the right gate: in the window between the release publishing
+v0.11.1 is published" is not the right gate: in the window between the release publishing
 and the `bump-formula` commit landing, the tap formula still points at the **v0.11.0**
 archives (3 files, no scripts) — a completion-lines push there would make
 `bash_completion.install` fail the whole `brew install` on a missing staged file. U5 now
@@ -250,3 +250,9 @@ commit; every other concrete claim (flag inventory, GoReleaser glob semantics, f
 structure, awk pass-through, idempotency, CI availability, shell-sourcing feasibility,
 ordering window) was verified against the code and the live tap/release artifacts and
 holds. No residual contradictions remain; the Builder may start at U1.
+
+### Amendment (2026-10-07)
+
+Target version changed v0.12.0 → v0.11.1 per user request (patch release); all version
+references in the plan updated. Scope, design decisions, and review findings are otherwise
+unchanged — the round-1 verdict carries over.
