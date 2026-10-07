@@ -3,7 +3,7 @@
 **Branch:** `feat/shell-completions` (from `main` @ `7c4122f`, worktree `/workspace/mcp-commands-shell-completions`)
 **Target version:** v0.12.0
 **Repos touched:** `MKuckert/mcp-commands` (main) + `MKuckert/homebrew-tap` (formula, manual PR)
-Status: Approved — Plan Reviewer, round 1 (2026-07-09); see Review Log
+Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
 ## Scope
 
@@ -181,7 +181,7 @@ scripts; "v0.12.0 published" alone is not enough — per Decision 8)
 
 ## Review Log
 
-### Review (round 1, 2026-07-09)
+### Review (round 1, 2026-10-07)
 
 **Verified against the code — no finding:**
 
