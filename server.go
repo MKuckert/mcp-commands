@@ -171,7 +171,8 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			// bind failure racing the shutdown) is reported below.
 		case err := <-watchDone:
 			if err != nil && !errors.Is(err, context.Canceled) {
-				env.log.Error(err.Error())
+				// Not logged here: run() returns it and main() is the single
+				// reporting site (a log here would double the record).
 				cancel()
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
@@ -201,7 +202,8 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	case <-sigCtx.Done():
 	case err := <-watchDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			env.log.Error(err.Error())
+			// Not logged here: run() returns it and main() is the single
+			// reporting site (a log here would double the record).
 			cancel()
 			return fmt.Errorf("failed to watch scripts directory: %w", err)
 		}
