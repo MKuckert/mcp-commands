@@ -15,10 +15,10 @@ end
 
 complete -c mcp-commands -n '__fish_use_subcommand' -f -a "(__mcp_commands_flag_candidates $flags)" -d 'mcp-commands flag'
 
-# Value-taking flags get value completion; the directory flags complete
-# directories, the file flags complete files, --log-level its fixed set.
-complete -c mcp-commands -n '__fish_seen_subcommand_from --dir --scripts' -f -d 'Directory'
-complete -c mcp-commands -n '__fish_seen_subcommand_from --api-key-file --tls-cert --tls-key' -f -d 'File'
+# Value-taking flags keep fish's default file+directory completion (the -d
+# entries document the value kind); --log-level completes its fixed set.
+complete -c mcp-commands -n '__fish_seen_subcommand_from --dir --scripts' -d 'Directory'
+complete -c mcp-commands -n '__fish_seen_subcommand_from --api-key-file --tls-cert --tls-key' -d 'File'
 complete -c mcp-commands -n '__fish_seen_subcommand_from --log-level' -f -x -a 'debug info warn error' -d 'Log level'
 
 # Free-form values: suppress file completion.

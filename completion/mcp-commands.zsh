@@ -18,7 +18,7 @@ log_levels=( debug info warn error )
 # sourceable in a plain zsh, where compdef does not exist.
 _mcp-commands() {
   local prev
-  prev="${words[1]}"
+  prev="${words[CURRENT-1]}"
 
   case "$prev" in
   --log-level)
@@ -31,7 +31,7 @@ _mcp-commands() {
     _files
     ;;
   *)
-    if [[ "${words[CURRENT]}" == - ]]; then
+    if [[ "${words[CURRENT]}" == -* ]]; then
       compadd -- "${flags[@]}"
     fi
     ;;
