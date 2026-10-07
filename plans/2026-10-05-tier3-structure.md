@@ -3,21 +3,21 @@
 **Branch:** `fix/tier3-structure` (from `main` @ b88e58c, post-Tier-2)
 **Target version:** v0.8.2
 **Source of truth:** `REVIEW.md` §Tier 3 (F-14…F-22). F-21 (docs) rides along per REVIEW's "can ride along anytime".
-Status: in progress — tick as units land; checkboxes are the Code Reviewer's.
+Status: **Approved** (Code Reviewer quality pass against current `main`, 2026-10-07 — all items landed and still hold; see review log below).
 
 ## Scope
 
-- [ ] F-14: `serverConfig` / `diagnostic` structs — `run` (11 params) and `runDiagnostic` (10 params) take one struct; `main()` shrinks to ~25 lines
-- [ ] F-15: one `liveEnv` struct (`resolveWrapWidth`, `clearScreen`, `notifySignals`, `watcherErrors`, `errOut`) replaces the three mutable package-level injection vars; unblocks `t.Parallel()`
-- [ ] F-16: delete dead code — `toolRegistry.lastHandler`, `watchTools`'s unread `interval` param, `watchToolsInterval` constant
-- [ ] F-17: no double initial discovery at startup — `watchTools` receives the already-discovered set and skips its initial scan when it matches the registry's current set
-- [ ] F-18: local simplifications — `warnParam` helper (5× duplicated block) + type set lookup in `parseParamAnnotation`; `strings.Cut` in `extractFrontmatter`; `textResult(text, isErr)` helper for the 4 near-identical `CallToolResult` constructions; fix `discoveredTool` loop-var shadowing
-- [ ] F-19: `discoverTools` name collisions — first wins + stderr warning (house style)
-- [ ] F-20: 12-file split of `main.go` + 1:1 mirrored test split
-- [ ] F-21: README docs gaps (~5 targeted edits)
-- [ ] F-22: test hygiene — `writeScript` helper, `waitFor(t, …)` polling helper, table-driven `TestBuildInputSchema`, `t.Parallel()` where F-15 unblocks, named timeout constant, `TestRegistryReplaceConcurrency` (stand-in for unavailable `-race`)
-- [ ] Bump `serverVersion` + Makefile `VERSION` → 0.8.2
-- [ ] `REVIEW.md`: mark F-14…F-22 ✅ with this branch's commits, note deviations
+- [x] F-14: `serverConfig` / `diagnostic` structs — `run` (11 params) and `runDiagnostic` (10 params) take one struct; `main()` shrinks to ~25 lines
+- [x] F-15: one `liveEnv` struct (`resolveWrapWidth`, `clearScreen`, `notifySignals`, `watcherErrors`, `errOut`) replaces the three mutable package-level injection vars; unblocks `t.Parallel()`
+- [x] F-16: delete dead code — `toolRegistry.lastHandler`, `watchTools`'s unread `interval` param, `watchToolsInterval` constant
+- [x] F-17: no double initial discovery at startup — `watchTools` receives the already-discovered set and skips its initial scan when it matches the registry's current set
+- [x] F-18: local simplifications — `warnParam` helper (5× duplicated block) + type set lookup in `parseParamAnnotation`; `strings.Cut` in `extractFrontmatter`; `textResult(text, isErr)` helper for the 4 near-identical `CallToolResult` constructions; fix `discoveredTool` loop-var shadowing
+- [x] F-19: `discoverTools` name collisions — first wins + stderr warning (house style)
+- [x] F-20: 12-file split of `main.go` + 1:1 mirrored test split
+- [x] F-21: README docs gaps (~5 targeted edits)
+- [x] F-22: test hygiene — `writeScript` helper, `waitFor(t, …)` polling helper, table-driven `TestBuildInputSchema`, `t.Parallel()` where F-15 unblocks, named timeout constant, `TestRegistryReplaceConcurrency` (stand-in for unavailable `-race`)
+- [x] Bump `serverVersion` + Makefile `VERSION` → 0.8.2 (superseded by later releases; current 0.11.0)
+- [x] `REVIEW.md`: mark F-14…F-22 ✅ with this branch's commits, note deviations — **N/A at review time**: `REVIEW.md` was deleted in `9b51ce8` (PR #24 close-out) after this branch landed; the plan file is the standing record
 
 ## Design decisions
 
@@ -52,3 +52,13 @@ Deviations from the plan, all deliberate:
 5. **F-21: README changes committed with the F-14 commit** (`git add -A` timing), so the F-14 commit contains doc changes alongside the struct refactor.
 
 Verification (final state): `gofmt -l` clean, `go vet ./...` clean, `go test ./...` green (~11 s with the new `t.Parallel` suite).
+
+### Code Reviewer — 2026-10-07 (quality pass against current `main` @ 7b59584) — **APPROVED**
+
+Full re-verification of all 9 scope items against the current tree (four feature lines landed after the branch merged: tool-diagnostics, granular logging, U3 watch lifecycle, Containerfile). All items **still hold**: F-14 (`serverConfig` flags.go:25 / `diagnostic` :42 / `cliConfig` :57; `main()` ~35 lines), F-15 (`liveEnv` + `prodLiveEnv`; zero mutable package-level injection vars; fields evolved — `stderr`/`errOut` → `log`, `+ newWatcher` — guarantee intact), F-16 (`lastHandler`/`watchToolsInterval` absent), F-17 (`initialTools` re-assert + diff-skip rescan), F-18 (`warnParam` ×5, `strings.Cut` ×3, `textResult` ×4, `paramTypes`), F-19 (first-wins + structured `log.Warn` — equivalent to the planned stderr warning), F-20 (1:1 mirror; 15 prod files = tier3's 13 + later-feature `diagnostic.go`/`loghandler.go`), F-21 (README 472 lines covers the gaps), F-22 (`writeScript`/`waitFor` in `server_test.go`, `t.Parallel()` ×63, `defaultToolTimeout`, `TestRegistryReplaceConcurrency`).
+
+Post-merge drift is benign feature growth, all annotated in code. The `REVIEW.md` task is N/A (file deleted in `9b51ce8` after the branch landed); the 0.8.2 version target is superseded by 0.11.0.
+
+Verification (current tree): `gofmt -l .` clean · `go vet ./...` clean · `go test -count=1 ./...` → `ok … 6.795s` · `GOOS=windows GOARCH=amd64 go build ./...` OK. (`-race` unsupported in this sandbox; registry mutex unchanged, `TestRegistryReplaceConcurrency` is the stand-in.)
+
+No blocking findings. All checkboxes ticked; status → Approved.
