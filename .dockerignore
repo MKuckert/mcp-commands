@@ -1,0 +1,13 @@
+.git
+dist
+tmp
+plans
+docs
+*.go
+go.mod
+go.sum
+Makefile
+Containerfile
+README.md
+tui.jsonc
+mcp-commands
