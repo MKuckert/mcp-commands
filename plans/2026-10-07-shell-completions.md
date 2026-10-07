@@ -9,8 +9,8 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
 - [x] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
 - [x] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
-- [/] U3: version bump 0.11.0 → 0.11.1 (main repo)
-- [ ] U4: README — Shell completion section (main repo)
+- [x] U3: version bump 0.11.0 → 0.11.1 (main repo)
+- [/] U4: README — Shell completion section (main repo)
 - [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
 - [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
 
@@ -416,3 +416,37 @@ residual findings; U1 is ticked.
   dist/mcp-commands .` creates a `dist/` dir in the CI workspace; harmless.)
 
 **Verdict: Approved** — no residual findings; U2 is ticked.
+
+### Review (round 5, U3)
+
+`74d04a5` ("chore: bump version to 0.11.1") verified against the diff, `main.go`,
+`README.md`, and `Containerfile`:
+
+- **Makefile:** `VERSION ?= 0.11.0` → `VERSION ?= 0.11.1` (`Makefile:4`) — exactly U3's
+  first item. `LDFLAGS` already injects `main.serverVersion=$(VERSION)`, so local
+  `make build`s will report 0.11.1. ✔
+- **README:** the release-download example at line ~46 now reads
+  `tar -xzf mcp-commands_0.11.1_linux_amd64.tar.gz` — the only 0.11.0 asset name in the
+  README; no other versioned asset names exist to update. ✔
+- **main.go untouched (R-2):** the diff touches only `Makefile`, `README.md`, and the plan.
+  `serverVersion = "commit-local"` and its dev-marker comment (`main.go:12-15`) are
+  unchanged, and the README's Version section (line ~276) still documents `commit-local`
+  for non-injected source builds — the comment, code, and README remain mutually
+  consistent with the plan's R-2 rationale (release versions come from the goreleaser
+  tag ldflags). ✔
+- **Completeness:** a repo-wide grep for `0.11.0` over tracked files finds only
+  (a) `Containerfile` (3 hits: a comment example, the build-arg example, and the
+  `ARG MCP_COMMANDS_VERSION=0.11.0` default) and (b) the three historical `plans/*.md`
+  documents. All are outside U3's declared scope (Makefile, README). ✔
+- **Containerfile non-bump — acceptable.** The `MCP_COMMANDS_VERSION` ARG is a
+  *build-time default for pulling a prebuilt release into the image*, not the project's
+  own version constant; the plan's out-of-scope section excludes container changes, and
+  `git log -- Containerfile` shows two commits, neither a per-release bump — the file has
+  never been version-bumped per release, so leaving it is consistent with established
+  project practice, not an oversight. (Trivia, no action: the comment example on line 9
+  will slowly age as releases ship; a "e.g." phrasing makes that harmless.)
+- **Tests:** Builder reports `go test ./...` green on this commit; the diff is two
+  one-line value changes plus the plan, so no test can be affected — the claim is
+  consistent with the diff.
+
+**Verdict: Approved** — no residual findings; U3 is ticked.
