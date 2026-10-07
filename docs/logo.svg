@@ -1,22 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 124 118" fill="none">
-  <!-- speech bubble with tail at bottom-right -->
-  <path d="M32 16 H68 A18 18 0 0 1 86 34 V58 L102 92 L72 88 H34 A18 18 0 0 1 16 70 V34 A18 18 0 0 1 34 16 Z"
-        stroke="#0FA37E" stroke-width="8" stroke-linejoin="round" stroke-linecap="round"/>
-  <!-- chevron prompt -->
-  <path d="M33 45 L49 58.5 L33 72" stroke="#0FA37E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- gear -->
-  <g fill="#0FA37E" transform="translate(67 58)">
-    <path fill-rule="evenodd" d="M-10 0 a10 10 0 1 0 20 0 a10 10 0 1 0 -20 0 M-4 0 a4 4 0 1 1 8 0 a4 4 0 1 1 -8 0"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(45)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(90)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(135)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(180)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(225)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(270)"/>
-    <rect x="-2.4" y="-14.5" width="4.8" height="5" rx="1.4" transform="rotate(315)"/>
+<svg id="mcp-logo" viewBox="140 30 220 240" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Core gradients matching the site theme -->
+    <linearGradient id="mcp-teal-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0fa37e"></stop>
+      <stop offset="50%" stop-color="#2ee6b0"></stop>
+      <stop offset="100%" stop-color="#4dd9ff"></stop>
+    </linearGradient>
+
+    <linearGradient id="mcp-glow-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2ee6b0"></stop>
+      <stop offset="100%" stop-color="#4dd9ff"></stop>
+    </linearGradient>
+
+    <linearGradient id="mcp-terminal-fill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0c1216"></stop>
+      <stop offset="100%" stop-color="#070b0e"></stop>
+    </linearGradient>
+
+    <!-- Glow filters -->
+    <filter id="mcp-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"></feGaussianBlur>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"></feComposite>
+    </filter>
+
+    <filter id="mcp-soft-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur"></feGaussianBlur>
+    </filter>
+  </defs>
+
+  <!-- Soft glowing halo behind the icon -->
+  <circle cx="250" cy="150" r="80" fill="url(#mcp-teal-grad)" opacity="0.25" filter="url(#mcp-soft-glow)"></circle>
+
+  <!-- Protocol connection node lines -->
+  <g stroke="url(#mcp-teal-grad)" stroke-width="2.5" stroke-dasharray="4 4" opacity="0.7">
+    <line x1="250" y1="150" x2="250" y2="55"></line>
+    <line x1="250" y1="150" x2="155" y2="100"></line>
+    <line x1="250" y1="150" x2="345" y2="100"></line>
+    <line x1="250" y1="150" x2="155" y2="200"></line>
+    <line x1="250" y1="150" x2="345" y2="200"></line>
   </g>
-  <!-- key on the tail -->
-  <path d="M99 89 L109 99" stroke="#0FA37E" stroke-width="8" stroke-linecap="round"/>
-  <circle cx="112" cy="104" r="6.5" stroke="#0FA37E" stroke-width="6"/>
+
+  <!-- Hexagonal outer frame -->
+  <polygon points="250,45 345,100 345,200 250,255 155,200 155,100" fill="none" stroke="url(#mcp-teal-grad)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#mcp-glow)"></polygon>
+
+  <!-- Node dots -->
+  <g fill="#070b0e" stroke="url(#mcp-glow-grad)" stroke-width="3">
+    <circle cx="250" cy="45" r="7"></circle>
+    <circle cx="345" cy="100" r="7"></circle>
+    <circle cx="345" cy="200" r="7"></circle>
+    <circle cx="250" cy="255" r="7"></circle>
+    <circle cx="155" cy="200" r="7"></circle>
+    <circle cx="155" cy="100" r="7"></circle>
+  </g>
+
+  <!-- Inner central terminal badge -->
+  <rect x="195" y="105" width="110" height="90" rx="14" fill="url(#mcp-terminal-fill)" stroke="rgba(255,255,255,0.09)" stroke-width="2"></rect>
+
+  <!-- Terminal header dots -->
+  <circle cx="212" cy="120" r="3" fill="#f87171"></circle>
+  <circle cx="222" cy="120" r="3" fill="#facc15"></circle>
+  <circle cx="232" cy="120" r="3" fill="#4ade80"></circle>
+
+  <!-- Terminal prompt symbol (>_) -->
+  <path d="M215 142 L227 152 L215 162" fill="none" stroke="#2ee6b0" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"></path>
+  <line x1="235" y1="162" x2="247" y2="162" stroke="#4dd9ff" stroke-width="3.5" stroke-linecap="round"></line>
+
+  <!-- Command spark accent -->
+  <path d="M305 132 Q315 132 315 122 Q315 132 325 132 Q315 132 315 142 Q315 132 305 132 Z" fill="#2ee6b0"></path>
 </svg>
