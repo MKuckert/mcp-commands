@@ -19,7 +19,7 @@
 #   MCP_COMMANDS_ALLOWED_ORIGINS    comma-separated CORS allowlist (native)
 #   MCP_COMMANDS_ALLOW_ALL_ORIGINS  true = echo any Origin  (native)
 #   MCP_COMMANDS_TIMEOUT            per-tool timeout, e.g. 5m (default: binary's 5m)
-#   MCP_COMMANDS_WATCH              true = hot-reload scripts (default: false)
+#   MCP_COMMANDS_WATCH              1|true|yes = hot-reload scripts (default: off)
 #   LOG_LEVEL                       debug|info|warn|error   (native)
 #
 # Build:
@@ -35,23 +35,29 @@ ARG TARGETARCH
 
 FROM alpine:3.21
 
+# Build args are stage-scoped: re-declare after FROM so they expand in RUN.
+ARG MCP_COMMANDS_VERSION
+ARG TARGETARCH
+
 RUN set -eux; \
-	arch="${TARGETARCH:-amd64}"; \
-	case "$arch" in \
+	[ -n "$TARGETARCH" ] || { echo "TARGETARCH is empty (pass --platform linux/<arch>)" >&2; exit 1; }; \
+	case "$TARGETARCH" in \
 		amd64 | arm64) ;; \
-		*) echo "unsupported TARGETARCH: $arch" >&2; exit 1 ;; \
+		*) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
 	esac; \
-	curl -fsSL "https://github.com/MKuckert/mcp-commands/releases/download/v${MCP_COMMANDS_VERSION}/mcp-commands_${MCP_COMMANDS_VERSION}_linux_${arch}.tar.gz" | tar -xz; \
+	wget -qO - "https://github.com/MKuckert/mcp-commands/releases/download/v${MCP_COMMANDS_VERSION}/mcp-commands_${MCP_COMMANDS_VERSION}_linux_${TARGETARCH}.tar.gz" | tar -xz; \
 	install -m 0755 mcp-commands /usr/local/bin/mcp-commands; \
 	rm -rf mcp-commands LICENSE README.md
 
 COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# Create the working dirs as root, hand them to the service user, then drop
+# privileges: a non-root user cannot mkdir under / (root-owned).
+RUN mkdir -p /work /scripts && chown 10001:10001 /work /scripts
 RUN adduser -D -u 10001 mcpuser
 USER 10001
 
-RUN mkdir -p /work /scripts
 WORKDIR /work
 VOLUME ["/work", "/scripts"]
 
