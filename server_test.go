@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -114,7 +116,7 @@ func TestRunHTTPEndToEnd(t *testing.T) {
 
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			if strings.Contains(buf.String(), "No executable scripts found") {
+			if strings.Contains(buf.String(), "WARN@") && strings.Contains(buf.String(), "No executable scripts found") {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -168,7 +170,7 @@ func TestRunHTTPSTLSEndToEnd(t *testing.T) {
 	})
 
 	waitFor(t, 5*time.Second, "TLS startup note", func() bool {
-		return strings.Contains(buf.String(), "(TLS)")
+		return strings.Contains(buf.String(), "notes=TLS")
 	})
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "e2e-tls"}, nil)
@@ -271,14 +273,68 @@ func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) 
 	}
 }
 
-// liveEnvFor builds a liveEnv with the given stdout/stderr sinks (tests
-// capture) and production behavior for everything else. Tests construct
-// local envs — no shared state — so they can run in parallel.
-func liveEnvFor(t *testing.T, stdout, stderr io.Writer) liveEnv {
+// testLogger builds a logger on the given sink at debug level, so test
+// fakes capture every record the production logger would emit.
+func testLogger(sink io.Writer) *slog.Logger {
+	return slog.New(newLogHandler(sink, slog.LevelDebug))
+}
+
+// testDiscardLogger is a shared logger that drops every record, for call
+// sites that must not emit (a logger is immutable, so sharing it across
+// parallel tests is safe).
+var testDiscardLogger = slog.New(newLogHandler(io.Discard, 0))
+
+// TestLogLevelFiltering pins the minimum-level gating that
+// --log-level resolves to: records below the configured level are
+// dropped, records at or above it are written.
+func TestLogLevelFiltering(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		level     slog.Level
+		wantDebug bool
+		wantInfo  bool
+		wantWarn  bool
+		wantError bool
+	}{
+		{"debug", slog.LevelDebug, true, true, true, true},
+		{"info", slog.LevelInfo, false, true, true, true},
+		{"warn", slog.LevelWarn, false, false, true, true},
+		{"error", slog.LevelError, false, false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(newLogHandler(&buf, tc.level))
+			log.Debug("debug record")
+			log.Info("info record")
+			log.Warn("warn record")
+			log.Error("error record")
+			out := buf.String()
+			if got := strings.Contains(out, "debug record"); got != tc.wantDebug {
+				t.Errorf("debug record captured = %v, want %v; output: %q", got, tc.wantDebug, out)
+			}
+			if got := strings.Contains(out, "info record"); got != tc.wantInfo {
+				t.Errorf("info record captured = %v, want %v; output: %q", got, tc.wantInfo, out)
+			}
+			if got := strings.Contains(out, "warn record"); got != tc.wantWarn {
+				t.Errorf("warn record captured = %v, want %v; output: %q", got, tc.wantWarn, out)
+			}
+			if got := strings.Contains(out, "error record"); got != tc.wantError {
+				t.Errorf("error record captured = %v, want %v; output: %q", got, tc.wantError, out)
+			}
+		})
+	}
+}
+
+// liveEnvFor builds a liveEnv with the given stdout sink and a logger on the
+// given log sink (tests capture; io.Discard suppresses) and production
+// behavior for everything else. Tests construct local envs — no shared state
+// — so they can run in parallel.
+func liveEnvFor(t *testing.T, stdout, logSink io.Writer) liveEnv {
 	t.Helper()
-	env := prodLiveEnv()
+	env := prodLiveEnv(slog.LevelDebug)
 	env.stdout = stdout
-	env.stderr = stderr
+	env.log = testLogger(logSink)
 	return env
 }
 

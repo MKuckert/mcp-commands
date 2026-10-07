@@ -43,7 +43,7 @@ go install github.com/mkuckert/mcp-commands@latest
 **Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<version>_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
 
 ```bash
-tar -xzf mcp-commands_0.10.0_linux_amd64.tar.gz   # unzip on Windows
+tar -xzf mcp-commands_0.11.0_linux_amd64.tar.gz   # unzip on Windows
 ```
 
 ## Usage
@@ -127,7 +127,7 @@ or via the `MCP_COMMANDS_API_KEY` environment variable:
 MCP_COMMANDS_API_KEY=my-secret-token mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
-Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. **Prefer `--api-key-file` or `MCP_COMMANDS_API_KEY` over `--api-key <value>`**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; a file over **8 KiB** is rejected as a likely misconfiguration — a token is a short secret — and an empty file is a startup error rather than a silent fall-through to no-auth.) When a token is configured (the server logs `Starting HTTP server on <addr> (API key auth enabled)`), every MCP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized` (CORS preflight `OPTIONS` requests are answered by the CORS layer before authentication):
+Precedence: `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY`. **Prefer `--api-key-file` or `MCP_COMMANDS_API_KEY` over `--api-key <value>`**: command-line arguments are world-readable via `/proc/<pid>/cmdline` for the server's entire lifetime. (`--api-key-file` content is trimmed, so a trailing newline in the file is fine; a file over **8 KiB** is rejected as a likely misconfiguration — a token is a short secret — and an empty file is a startup error rather than a silent fall-through to no-auth.) When a token is configured (the server logs `Starting HTTP server` at startup, with an `API key auth enabled` note), every MCP request must send the token in the `Authorization` header or it is rejected with `401 Unauthorized` (CORS preflight `OPTIONS` requests are answered by the CORS layer before authentication):
 
 ```bash
 curl -s http://localhost:8080 \
@@ -159,10 +159,10 @@ Notes:
 - **Non-loopback binds require auth (0.8.0).** Binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start**:
 
   ```
-  Error: refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
+  ERROR@10:00:00 refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
   ```
 
-  An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, printing a loud `WARNING: UNAUTHENTICATED HTTP server bound to …` line and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
+  An unauthenticated HTTP server is a remote command-execution endpoint: anyone who can reach the port can run your scripts as the server user. The escape hatch `--insecure-no-auth` starts the server anyway, logging a loud `UNAUTHENTICATED HTTP server bound to …` warning and an `UNAUTHENTICATED` note in the startup log. Use it only for trusted networks.
 
 #### TLS
 
@@ -174,7 +174,7 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8443 --tls
 
 - `--tls-cert` and `--tls-key` must be **given together** (exactly one of the two is a startup error), and both files are checked at startup — an unreadable file fails fast before binding.
 - In stdio mode (no `--port`) both flags are ignored, like the other HTTP-only options.
-- The startup log carries a `TLS` note: `Starting HTTP server on <addr> (…, TLS)`.
+- The startup log carries a `TLS` note: `Starting HTTP server … notes=…, TLS`.
 
 #### Concurrency Cap
 
@@ -243,9 +243,23 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --timeout 10m
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --no-timeout
 ```
 
-`--timeout` and `--no-timeout` are **mutually exclusive**: passing both is a startup error, and an explicitly empty `--timeout=` fails the same way (the flags must be passed deliberately). A script that declares `Timeout: 30s` in its frontmatter always gets 30 seconds regardless of the global setting. An invalid per-tool `Timeout:` value does **not** break discovery: the server logs `Warning: ignoring invalid Timeout in <file>: <reason>` to stderr and the tool falls back to the global timeout. With no deadline, a client abort/cancel still kills the running script — "no timeout" means "no deadline", never "uninterruptible".
+`--timeout` and `--no-timeout` are **mutually exclusive**: passing both is a startup error, and an explicitly empty `--timeout=` fails the same way (the flags must be passed deliberately). A script that declares `Timeout: 30s` in its frontmatter always gets 30 seconds regardless of the global setting. An invalid per-tool `Timeout:` value does **not** break discovery: the server logs a warning (`ignoring invalid Timeout`, with the file and reason) to stderr and the tool falls back to the global timeout. With no deadline, a client abort/cancel still kills the running script — "no timeout" means "no deadline", never "uninterruptible".
 
 The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` suffix so the LLM knows its budget.
+
+#### Logging
+
+All diagnostics — banners, warnings, and operational errors — are logged to **stderr** as [slog](https://pkg.go.dev/log/slog) records, each rendered on one line as `<LEVEL>@HH:mm:ss message key=value …` — the message is unquoted and, when the record carries attributes, a ` | ` separator joins it to the first `key=value` (a record with no attributes ends right after the message):
+
+```
+WARN@18:02:11 ignoring invalid Timeout | file=/path/to/scripts/render.sh error="invalid timeout ..."
+```
+
+stdout is reserved for program output only: in stdio mode it carries the MCP protocol itself, and in diagnostics it carries the tool list, `--call-tool` result text, `-h` help, and `--version`. Routing logs to stdout would corrupt the protocol, so every record goes to stderr in all modes. In HTTP mode stdout is not used at all — no output of any kind is written there.
+
+`--log-level <level>` sets the minimum level that is emitted — `debug`, `info` (default), `warn`, or `error`; records below it are dropped. It is accepted in every mode. The `LOG_LEVEL` environment variable is a fallback consulted only when the flag is not set (an empty value counts as unset) — precedence: `--log-level` > `LOG_LEVEL` > `info`. At the default `info`, you see startup banners, warnings, and errors; `debug` additionally logs the discovery summary, each debounced rescan, and watch reattach attempts.
+
+One exception: flag-parse and validation failures occur before the logger exists and are printed as raw `Error: …` lines — slog formatting (and `--log-level`) do not apply to startup configuration errors.
 
 #### Version
 
@@ -266,6 +280,7 @@ Essentials and modes:
 | `--call-tool <name>` | _(none)_ | Run one discovered tool once and exit (debug mode; no server starts). |
 | `--params <json>` | `{}` | JSON object of named arguments for `--call-tool`. |
 | `--version` | off | Print the version and exit. |
+| `--log-level <level>` | `info` | Minimum log level: `debug`, `info`, `warn`, or `error` (or `LOG_LEVEL` when the flag is absent); every record goes to stderr (see [Logging](#logging)). |
 
 HTTP server:
 
@@ -288,6 +303,7 @@ Environment variables (each is consulted only when its flag is not set):
 | `MCP_COMMANDS_API_KEY` | `--api-key` |
 | `MCP_COMMANDS_ALLOWED_ORIGINS` | `--allowed-origins` |
 | `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | `--allow-all-origins` (`1`/`true`/`yes`) |
+| `LOG_LEVEL` | `--log-level` |
 
 ### Creating Tools
 

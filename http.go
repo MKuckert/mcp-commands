@@ -147,13 +147,13 @@ func checkHTTPSecurityPolicy(host, apiKey string, cors corsConfig, tlsEnabled, a
 		if !acceptsRisk {
 			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
 		}
-		warnings = append(warnings, fmt.Sprintf("WARNING: UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host))
+		warnings = append(warnings, fmt.Sprintf("UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host))
 	}
 	if cors.allowAll && apiKey == "" {
-		warnings = append(warnings, "WARNING: --allow-all-origins with no bearer token (set --api-key or "+apiKeyEnvVar+") — any web page opened in a browser can invoke tools against this server and read their output")
+		warnings = append(warnings, "--allow-all-origins with no bearer token (set --api-key or "+apiKeyEnvVar+") — any web page opened in a browser can invoke tools against this server and read their output")
 	}
 	if apiKey != "" && !isLoopbackHost(host) && !tlsEnabled {
-		warnings = append(warnings, fmt.Sprintf("WARNING: authenticated HTTP server on non-loopback host %q without TLS — the bearer token and every request/response body transit in cleartext; put a TLS-terminating proxy in front or pass --tls-cert/--tls-key", host))
+		warnings = append(warnings, fmt.Sprintf("authenticated HTTP server on non-loopback host %q without TLS — the bearer token and every request/response body transit in cleartext; put a TLS-terminating proxy in front or pass --tls-cert/--tls-key", host))
 	}
 	return warnings, nil
 }

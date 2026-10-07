@@ -5,7 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,12 +42,12 @@ func BenchmarkDiscoverLargeDirectory(b *testing.B) {
 	for i := 0; i < n; i++ {
 		writeBenchScript(b, filepath.Join(dir, fmt.Sprintf("tool-%03d.sh", i)), benchScriptBody)
 	}
-	var stderr io.Writer = io.Discard
+	var log *slog.Logger = testDiscardLogger
 	// benchScriptBody is ~197 bytes; 200 of them is the work per op.
 	b.SetBytes(int64(n) * int64(len(benchScriptBody)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := discoverTools(dir, stderr); err != nil {
+		if _, err := discoverTools(dir, log); err != nil {
 			b.Fatalf("discoverTools: %v", err)
 		}
 	}

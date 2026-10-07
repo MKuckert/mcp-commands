@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,9 @@ import (
 // These are the branches that were untestable while the logic lived in main()
 // (which calls os.Exit); the extraction into parseCLI makes each one assertable.
 func TestParseCLI(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: t.Setenv. An empty LOG_LEVEL counts as unset by the
+	// resolution logic, so ambient values cannot leak into these cases.
+	t.Setenv(logLevelEnvVar, "")
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
 	if err := os.WriteFile(keyFile, []byte("filetoken\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -82,6 +85,9 @@ func TestParseCLI(t *testing.T) {
 				}
 				if c.server.apiKey.Token != "" {
 					t.Errorf("apiKey = %q, want empty", c.server.apiKey)
+				}
+				if c.logLevel != slog.LevelInfo {
+					t.Errorf("logLevel = %v, want the info default", c.logLevel)
 				}
 			},
 		},
@@ -304,6 +310,63 @@ func TestParseCLI(t *testing.T) {
 			args:    []string{"--dir", "d", "--scripts", "s", "--no-such-flag"},
 			wantErr: "flag provided but not defined",
 		},
+		{
+			name:    "log_level_debug",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelDebug {
+					t.Errorf("logLevel = %v, want debug", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_level_info",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "info"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelInfo {
+					t.Errorf("logLevel = %v, want info", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_level_warn",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "warn"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelWarn {
+					t.Errorf("logLevel = %v, want warn", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_level_error",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "error"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelError {
+					t.Errorf("logLevel = %v, want error", c.logLevel)
+				}
+			},
+		},
+		{
+			// Accepted in every mode: the value resolves in diagnostic mode too.
+			name:     "log_level_diagnostic_mode",
+			args:     []string{"--dir", "d", "--scripts", "s", "--list-tools", "--log-level", "debug"},
+			wantErr:  "",
+			wantMode: modeListTools,
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != slog.LevelDebug {
+					t.Errorf("logLevel = %v, want debug", c.logLevel)
+				}
+			},
+		},
+		{
+			name:    "log_level_invalid",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "verbose"},
+			wantErr: `--log-level must be one of debug, info, warn, or error (got "verbose")`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -332,6 +395,9 @@ func TestParseCLI(t *testing.T) {
 // document their server flags as ignored, so an invalid CORS flag/env var
 // (and an invalid --max-concurrent) must not block --list-tools/--call-tool.
 func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
+	// No --log-level flag: pin the env var to "" (unset by design) so an
+	// ambient LOG_LEVEL cannot leak into the resolution logic.
+	t.Setenv(logLevelEnvVar, "")
 	t.Setenv(allowedOriginsEnvVar, "not-a-url")
 	t.Setenv(allowAllOriginsEnvVar, "banana")
 
@@ -352,6 +418,70 @@ func TestParseCLIDiagnosticIgnoresInvalidServerValidation(t *testing.T) {
 	}
 }
 
+// TestLogLevelPrecedence: the --log-level flag wins over the LOG_LEVEL env
+// var; the env var is consulted only when the flag is absent (an empty
+// value counts as unset); the default is info. No t.Parallel: t.Setenv.
+func TestLogLevelPrecedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		env       string // LOG_LEVEL value; empty = unset by the resolution logic
+		wantErr   string // substring; empty = success
+		wantLevel slog.Level
+	}{
+		{
+			name:      "flag_wins_over_env",
+			args:      []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
+			env:       "warn",
+			wantLevel: slog.LevelDebug,
+		},
+		{
+			name:      "env_used_when_flag_absent",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			env:       "warn",
+			wantLevel: slog.LevelWarn,
+		},
+		{
+			name:    "invalid_env_value_fails_naming_the_source",
+			args:    []string{"--dir", "d", "--scripts", "s"},
+			env:     "verbose",
+			wantErr: `LOG_LEVEL must be one of debug, info, warn, or error (got "verbose")`,
+		},
+		{
+			name:      "empty_env_ignored_default_applies",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			env:       "",
+			wantLevel: slog.LevelInfo,
+		},
+		{
+			name:      "default_when_neither_set",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			wantLevel: slog.LevelInfo,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set unconditionally (empty = unset) so an ambient LOG_LEVEL
+			// cannot leak into any case.
+			t.Setenv(logLevelEnvVar, tt.env)
+			cfg, err := parseCLI(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.logLevel != tt.wantLevel {
+				t.Errorf("logLevel = %v, want %v", cfg.logLevel, tt.wantLevel)
+			}
+		})
+	}
+}
+
 // TestUsageLineListsRegisteredFlags: the one-line synopsis printed with
 // errMissingRequiredFlags must stay in sync with the flags parseCLI
 // registers — a new flag without a synopsis entry fails here.
@@ -362,6 +492,7 @@ func TestUsageLineListsRegisteredFlags(t *testing.T) {
 		"tls-cert", "tls-key", "insecure-no-auth", "max-concurrent",
 		"allowed-origins", "allow-all-origins", "disable-localhost-protection",
 		"timeout", "no-timeout", "list-tools", "call-tool", "params",
+		"log-level",
 	} {
 		if !strings.Contains(usageLine, "--"+name) {
 			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)

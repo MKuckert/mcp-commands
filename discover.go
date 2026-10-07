@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,7 +38,7 @@ type discoveredTool struct {
 // (FIFOs, devices — including symlinks to them), and non-executable files.
 // For each valid executable, it extracts the description and parameters, then
 // constructs a discoveredTool record for later registration with the MCP server.
-func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error) {
+func discoverTools(scriptsDir string, log *slog.Logger) ([]discoveredTool, error) {
 	entries, err := os.ReadDir(scriptsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read scripts directory: %w", err)
@@ -67,14 +67,14 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 			continue
 		}
 
-		description, params, timeout := extractFrontmatter(resolvedPath, stderr)
+		description, params, timeout := extractFrontmatter(resolvedPath, log)
 		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 
 		// Name collisions (a.sh and a.py both register as "a") are first-
 		// wins in ReadDir (i.e. filename) order, with a loud warning — the
 		// duplicate would be silently shadowed without it.
 		if firstFile, dup := registeredNames[name]; dup {
-			fmt.Fprintf(stderr, "Warning: ignoring %s: tool name %q already registered by %s\n", entry.Name(), name, firstFile)
+			log.Warn("ignoring duplicate tool name", "file", entry.Name(), "name", name, "registeredBy", firstFile)
 			continue
 		}
 		registeredNames[name] = entry.Name()
@@ -87,6 +87,8 @@ func discoverTools(scriptsDir string, stderr io.Writer) ([]discoveredTool, error
 			Timeout:     timeout,
 		})
 	}
+
+	log.Debug("discovered tools", "count", len(tools), "scriptsDir", scriptsDir)
 
 	return tools, nil
 }
@@ -127,14 +129,14 @@ func isWindowsExecutable(name string) bool {
 // extractFrontmatter reads the first scanHeaderLines lines of a file in a
 // single pass and collects the tool's frontmatter: the first Description:
 // line (first occurrence wins; populates the MCP tool description), all
-// Param: annotations (invalid ones log a stderr warning and are skipped),
+// Param: annotations (invalid ones log a warning record and are skipped),
 // and the first Timeout: value. First-occurrence wins: `timeoutSeen` is set
-// on the first Timeout: line even when it is invalid (which logs a stderr
-// warning and yields nil, so the global applies), so later valid values are
+// on the first Timeout: line even when it is invalid (which logs a warning
+// record and yields nil, so the global applies), so later valid values are
 // ignored. nil when undeclared, &0 for NONE/0. An unreadable file yields
 // zero values. A line exceeding the scanner buffer aborts the scan early and
-// logs a stderr warning; the metadata read so far is returned.
-func extractFrontmatter(filePath string, stderr io.Writer) (description string, params []paramSpec, timeout *time.Duration) {
+// logs a warning record; the metadata read so far is returned.
+func extractFrontmatter(filePath string, log *slog.Logger) (description string, params []paramSpec, timeout *time.Duration) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", []paramSpec{}, nil
@@ -167,7 +169,7 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 				if duration, err := parseTimeoutDuration(after); err != nil {
 					// Warn and keep timeout nil (global applies) without
 					// interrupting the scan, so later Param: lines are still collected.
-					fmt.Fprintf(stderr, "Warning: ignoring invalid Timeout in %s: %v\n", filePath, err)
+					log.Warn("ignoring invalid Timeout", "file", filePath, "error", err)
 				} else {
 					timeout = &duration
 				}
@@ -177,8 +179,8 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 		}
 
 		if _, after, found := strings.Cut(line, scanParamPrefix); found {
-			// Invalid annotations log their own stderr warning.
-			if param, err := parseParamAnnotation(strings.TrimSpace(after), filePath, line, stderr); err == nil {
+			// Invalid annotations log their own warning.
+			if param, err := parseParamAnnotation(strings.TrimSpace(after), filePath, line, log); err == nil {
 				params = append(params, param)
 			}
 		}
@@ -188,7 +190,7 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 	// scan early. Surface it: the tool registers with the metadata collected
 	// so far, and the warning makes the incompleteness visible.
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(stderr, "Warning: frontmatter of %s is incomplete (%v); using the metadata read so far\n", filePath, err)
+		log.Warn("frontmatter is incomplete; using the metadata read so far", "file", filePath, "error", err)
 	}
 
 	return description, params, timeout
@@ -198,23 +200,23 @@ func extractFrontmatter(filePath string, stderr io.Writer) (description string, 
 // else on a Param: annotation is skipped with a warning.
 var paramTypes = map[string]bool{"string": true, "number": true, "boolean": true}
 
-// warnParam logs the single stderr warning shape shared by every rejected
+// warnParam logs the single warning shape shared by every rejected
 // Param: annotation variant.
-func warnParam(filePath, reason, fullLine string, stderr io.Writer) {
-	fmt.Fprintf(stderr, "Warning: skipping invalid Param annotation in %s because %s: %q\n", filePath, reason, fullLine)
+func warnParam(filePath, reason, fullLine string, log *slog.Logger) {
+	log.Warn("skipping invalid Param annotation", "file", filePath, "reason", reason, "line", fullLine)
 }
 
 // parseParamAnnotation parses a single parameter annotation string.
 // It expects format: <name> <type> <required|optional> "<description>"
 // Returns error if validation fails (warning already logged to stderr).
-func parseParamAnnotation(annotation, filePath, fullLine string, stderr io.Writer) (paramSpec, error) {
+func parseParamAnnotation(annotation, filePath, fullLine string, log *slog.Logger) (paramSpec, error) {
 	// The description is the last field, wrapped in quotes; the first
 	// quoted span is the one we take.
 	lastQuoteIdx := strings.LastIndex(annotation, "\"")
 	firstQuoteIdx := strings.Index(annotation, "\"")
 
 	if firstQuoteIdx < 0 || lastQuoteIdx < 0 || firstQuoteIdx == lastQuoteIdx {
-		warnParam(filePath, "description must be quoted", fullLine, stderr)
+		warnParam(filePath, "description must be quoted", fullLine, log)
 		return paramSpec{}, fmt.Errorf("malformed param annotation")
 	}
 
@@ -227,7 +229,7 @@ func parseParamAnnotation(annotation, filePath, fullLine string, stderr io.Write
 	// Split prefix into name, type, and required/optional token
 	tokens := strings.Fields(prefix)
 	if len(tokens) != 3 {
-		warnParam(filePath, "expected 3 fields (name, type, required|optional)", fullLine, stderr)
+		warnParam(filePath, "expected 3 fields (name, type, required|optional)", fullLine, log)
 		return paramSpec{}, fmt.Errorf("wrong field count")
 	}
 
@@ -237,13 +239,13 @@ func parseParamAnnotation(annotation, filePath, fullLine string, stderr io.Write
 
 	// Validate name against argumentKeyPattern
 	if !argumentKeyPattern.MatchString(name) {
-		warnParam(filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine, stderr)
+		warnParam(filePath, fmt.Sprintf("parameter name %q must match %s", name, argumentKeyPattern.String()), fullLine, log)
 		return paramSpec{}, fmt.Errorf("invalid parameter name")
 	}
 
 	// Validate type
 	if !paramTypes[paramType] {
-		warnParam(filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine, stderr)
+		warnParam(filePath, fmt.Sprintf("type must be string, number, or boolean, got %q", paramType), fullLine, log)
 		return paramSpec{}, fmt.Errorf("invalid type")
 	}
 
@@ -255,7 +257,7 @@ func parseParamAnnotation(annotation, filePath, fullLine string, stderr io.Write
 	case "optional":
 		required = false
 	default:
-		warnParam(filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine, stderr)
+		warnParam(filePath, fmt.Sprintf("status must be 'required' or 'optional', got %q", requiredToken), fullLine, log)
 		return paramSpec{}, fmt.Errorf("invalid required token")
 	}
 

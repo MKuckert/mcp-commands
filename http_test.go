@@ -81,7 +81,7 @@ func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// captureWriter is a goroutine-safe strings.Builder for env.stderr capture.
+// captureWriter is a goroutine-safe strings.Builder for log output capture.
 type captureWriter struct {
 	mu  sync.Mutex
 	buf strings.Builder

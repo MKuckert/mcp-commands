@@ -48,13 +48,13 @@ func TestWindowsExeSmoke(t *testing.T) {
 	}
 
 	// Discovery: the PE binary registers, the batch file does not.
-	var stderr bytes.Buffer
-	tools, err := discoverTools(scriptsDir, &stderr)
+	var logBuf bytes.Buffer
+	tools, err := discoverTools(scriptsDir, testLogger(&logBuf))
 	if err != nil {
 		t.Fatalf("discoverTools: %v", err)
 	}
 	if len(tools) != 1 || tools[0].Name != "tool" {
-		t.Fatalf("discovered %d tools %v, want exactly [tool] (stderr: %s)", len(tools), toolNames(tools), stderr.String())
+		t.Fatalf("discovered %d tools %v, want exactly [tool] (log: %s)", len(tools), toolNames(tools), logBuf.String())
 	}
 
 	// Invocation through the real exec path.

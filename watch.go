@@ -116,8 +116,9 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 	// and the re-Add are lost to inotify, so a rescan is warranted to pick
 	// up whatever appeared in the replacement.
 	reattach := func(p string) {
+		env.log.Debug("reattaching watch", "path", p)
 		if err := watcher.Add(p); err != nil {
-			fmt.Fprintf(env.stderr, "Warning: failed to reattach watch on %s: %v\n", p, err)
+			env.log.Warn("failed to reattach watch", "path", p, "error", err)
 			return
 		}
 		if !debounceActive {
@@ -170,10 +171,11 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 			}
 			// Log the error but don't crash the watcher
 			// This handles cases like permission denied, file not found, etc.
-			fmt.Fprintf(env.stderr, "Warning: file watcher error: %v\n", err)
+			env.log.Warn("file watcher error", "error", err)
 
 		case <-debounceTimer.C:
 			debounceActive = false
+			env.log.Debug("rescan fired")
 			onRescan()
 		}
 	}
@@ -198,10 +200,10 @@ func watchTools(ctx context.Context, env liveEnv, scriptsDir string, registry *t
 		// After debounce delay, rediscover tools. The diff-skip avoids
 		// the remove/re-add churn and N list_changed notifications for a
 		// no-op rescan (e.g. a touched file with unchanged frontmatter).
-		tools, err := discoverTools(scriptsDir, env.stderr)
+		tools, err := discoverTools(scriptsDir, env.log)
 		if err != nil {
 			// The registry keeps the last known tool set.
-			fmt.Fprintf(env.stderr, "Warning: failed to rediscover tools: %v\n", err)
+			env.log.Warn("failed to rediscover tools", "error", err)
 			return
 		}
 		registry.replaceIfChanged(tools)

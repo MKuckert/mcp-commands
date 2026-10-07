@@ -1,7 +1,7 @@
 # PLAN — U4: Configuration and HTTP hardening
 
 **Branch:** `fix/u4-http-posture` from `main` (v0.9.3). **Target:** v0.9.4.
-**Source:** `REVIEW_REPORT.md` §U4 (M5, M6, M7).
+**Source:** `REVIEW_REPORT.md` (removed after merge) §U4 (M5, M6, M7).
 **Status:** Approved (all tasks ticked; see review log, round 2).
 
 ## Tasks
@@ -15,7 +15,7 @@
 
 - **M5** lives in the two existing validation seams: the server-mode block of `parseCLI` (`flags.go`) and `resolveAPIKey` (`http.go`). The concurrency ceiling constant (`maxConcurrentCap = 256`) sits next to `defaultMaxConcurrentTools` in `registry.go`; `newExecSlot` is untouched — fail-fast at the flag is the single guard. The token-file size bound (`maxAPIKeyFileBytes = 8 << 10`) is a const in `http.go`; an over-size or empty explicit file is an error naming the file, mirroring the missing-file behavior.
 - **M7**: `MaxBytesReader` caps size, not time — a client dribbling a few bytes per second pins a connection and its handler indefinitely without ever consuming a tool-execution slot. A *total* deadline is the right bound (a per-read deadline does not stop dribbling); 30 s is generous for the real workload (small JSON; even a full 10 MiB upload should not take long). The deadline reader is a tiny `io.ReadCloser` wrapper (`bodyReadDeadline`) that arms the socket read deadline once per read via `ResponseController.SetReadDeadline` and does **not** clear it per read — the runtime processes deadline clears asynchronously, so a stale clear can land after the next read re-arms the deadline and silently disarm it; the http server resets the read deadline when the connection is released for keep-alive or closed, so leaving it armed is harmless. When no real connection is behind the `ResponseWriter` (a test fake, or a closed/hijacked connection) it falls back to a plain synchronous read — deliberately **not** a read raced in a goroutine against a timer, because that read is uncancellable and would keep writing into the caller's buffer (and leak) after the timeout returns. In production `SetReadDeadline` never fails on a live connection, so the fallback is test-only. `MaxBytesReader` stays outermost so its 413 behavior is unchanged. The timeout is a package `var` (not const) so the stalled-POST test can shorten it; that test is deliberately not `t.Parallel()` because it mutates the var.
-- **M6** (done): the pre-existing refusal for unauthenticated non-loopback binds without `--insecure-no-auth` is unchanged; the function now returns `[]string` warnings and the `run()` caller prints each. README documents both new warnings (TLS section, CORS section); the decision is recorded in `REVIEW_REPORT.md` §M6/§U4.
+- **M6** (done): the pre-existing refusal for unauthenticated non-loopback binds without `--insecure-no-auth` is unchanged; the function now returns `[]string` warnings and the `run()` caller prints each. README documents both new warnings (TLS section, CORS section); the decision is recorded in `REVIEW_REPORT.md` (removed after merge) §M6/§U4.
 
 ## Review log
 

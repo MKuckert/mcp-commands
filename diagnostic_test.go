@@ -29,7 +29,9 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Errorf("stdout = %q, want empty", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "Warning: No executable scripts found in "+emptyDir) {
+		if !strings.Contains(stderr.String(), "WARN@") ||
+			!strings.Contains(stderr.String(), "No executable scripts found") ||
+			!strings.Contains(stderr.String(), "scriptsDir="+emptyDir) {
 			t.Errorf("stderr = %q, want the no-scripts warning", stderr.String())
 		}
 	})
@@ -44,7 +46,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Errorf("stdout = %q, want empty", stdout.String())
 		}
-		if !strings.Contains(stderr.String(), "Error:") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
+		if !strings.Contains(stderr.String(), "ERROR@") || !strings.Contains(stderr.String(), "scripts path inaccessible") {
 			t.Errorf("stderr = %q, want the path error", stderr.String())
 		}
 	})
@@ -60,11 +62,11 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if !strings.Contains(stdout.String(), "alpha()") || !strings.Contains(stdout.String(), "alpha tool (timeout: 5m0s)") {
 			t.Errorf("stdout = %q, want the rendered tool", stdout.String())
 		}
-		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --port"
-		if !strings.Contains(stderr.String(), wantNotice) {
+		wantNotice := "ignoring server-mode flags in diagnostic mode"
+		if !strings.Contains(stderr.String(), wantNotice) || !strings.Contains(stderr.String(), "--host, --port") {
 			t.Errorf("stderr = %q, want notice %q", stderr.String(), wantNotice)
 		}
-		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 {
+		if strings.Count(stderr.String(), "ignoring server-mode flags in diagnostic mode") != 1 {
 			t.Errorf("stderr = %q, want exactly one notice", stderr.String())
 		}
 	})
@@ -195,7 +197,7 @@ func TestRunDiagnosticListTools(t *testing.T) {
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1 for a watch setup failure", code)
 		}
-		if !strings.Contains(stderr.String(), "Error: watch loop stopped") {
+		if !strings.Contains(stderr.String(), "ERROR@") || !strings.Contains(stderr.String(), "watch loop stopped") {
 			t.Errorf("stderr = %q, want the visible watch failure", stderr.String())
 		}
 	})
@@ -233,8 +235,8 @@ func TestRunCallTool(t *testing.T) {
 	}
 	run := func(name, params string, global time.Duration) (code int, err error, stdout string) {
 		os.Remove(marker)
-		var buf bytes.Buffer
-		code, err = runCallTool(liveEnvFor(t, &buf, &buf), scriptsDir, tmpDir, global, name, params)
+		var buf, logBuf bytes.Buffer
+		code, err = runCallTool(liveEnvFor(t, &buf, &logBuf), scriptsDir, tmpDir, global, name, params)
 		stdout = buf.String()
 		return code, err, stdout
 	}
@@ -446,8 +448,8 @@ func TestRunDiagnosticCallTool(t *testing.T) {
 		if !strings.Contains(captured, "ran") {
 			t.Errorf("stdout = %q, want the script output", captured)
 		}
-		wantNotice := "Note: ignoring server-mode flags in diagnostic mode: --host, --watch"
-		if strings.Count(stderr.String(), "Note: ignoring server-mode flags") != 1 || !strings.Contains(stderr.String(), wantNotice) {
+		wantNotice := "ignoring server-mode flags in diagnostic mode"
+		if strings.Count(stderr.String(), "ignoring server-mode flags in diagnostic mode") != 1 || !strings.Contains(stderr.String(), wantNotice) || !strings.Contains(stderr.String(), "--host, --watch") {
 			t.Errorf("stderr = %q, want exactly one notice %q", stderr.String(), wantNotice)
 		}
 	})

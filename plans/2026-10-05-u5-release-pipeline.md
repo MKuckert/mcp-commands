@@ -1,7 +1,7 @@
 # PLAN — U5: Release pipeline and documentation
 
 **Branch:** `fix/u5-release-pipeline` from `main` (v0.9.4). **Target:** v0.9.5.
-**Source:** `REVIEW_REPORT.md` §U5 (M10, H5's CI leg, M9, L1, L2).
+**Source:** `REVIEW_REPORT.md` (removed after merge) §U5 (M10, H5's CI leg, M9, L1, L2).
 **Status:** Approved (code review, 2026-10-05).
 
 ## Tasks

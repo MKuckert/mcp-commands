@@ -60,12 +60,12 @@ func main() {
 		fmt.Println(serverVersion)
 		os.Exit(0)
 	}
-	env := prodLiveEnv()
+	env := prodLiveEnv(cfg.logLevel)
 	if cfg.mode != modeServer {
 		os.Exit(runDiagnostic(env, cfg.diagnostic))
 	}
 	if err := run(context.Background(), env, cfg.server); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		env.log.Error(err.Error())
 		os.Exit(1)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,12 +37,13 @@ func prodNotifySignals(ctx context.Context, sig ...os.Signal) (context.Context, 
 }
 
 // liveEnv bundles the live system dependencies of the CLI front end: the
-// standard streams, signal handling, and the TTY-dependent behaviors. main
-// constructs one via prodLiveEnv; tests construct local fakes and pass them
-// in — no package-level mutable state, so every test can t.Parallel().
+// standard streams, the logger, signal handling, and the TTY-dependent
+// behaviors. main constructs one via prodLiveEnv; tests construct local
+// fakes and pass them in — no package-level mutable state, so every test
+// can t.Parallel().
 type liveEnv struct {
 	stdout           io.Writer
-	stderr           io.Writer
+	log              *slog.Logger
 	resolveWrapWidth func(stdout io.Writer) int
 	clearScreen      func(stdout io.Writer)
 	notifySignals    func(ctx context.Context, sig ...os.Signal) (context.Context, context.CancelFunc)
@@ -49,10 +51,13 @@ type liveEnv struct {
 	watcherErrors    func(w *fsnotify.Watcher) <-chan error
 }
 
-func prodLiveEnv() liveEnv {
+// prodLiveEnv builds the live environment. Every log record goes to stderr
+// at the configured minimum level: stdout is reserved for program output
+// (the MCP protocol in stdio mode, tool lists, call results, help).
+func prodLiveEnv(level slog.Level) liveEnv {
 	return liveEnv{
 		stdout:           os.Stdout,
-		stderr:           os.Stderr,
+		log:              slog.New(newLogHandler(os.Stderr, level)),
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals:    prodNotifySignals,
@@ -70,13 +75,13 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		return err
 	}
 
-	tools, err := discoverTools(scriptsAbs, env.stderr)
+	tools, err := discoverTools(scriptsAbs, env.log)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
 
 	if len(tools) == 0 {
-		fmt.Fprintf(env.stderr, "Warning: No executable scripts found in %s\n", scriptsAbs)
+		env.log.Warn("No executable scripts found", "scriptsDir", scriptsAbs)
 	}
 
 	impl := &mcp.Implementation{
@@ -111,7 +116,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			return err
 		}
 		for _, w := range warnings {
-			fmt.Fprintln(env.stderr, w)
+			env.log.Warn(w)
 		}
 
 		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)
@@ -154,11 +159,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		if cfg.cors.enabled() {
 			notes = append(notes, cfg.cors.summary())
 		}
-		line := fmt.Sprintf("Starting HTTP server on %s", addr)
+		args := []any{"addr", addr}
 		if len(notes) > 0 {
-			line += " (" + strings.Join(notes, ", ") + ")"
+			args = append(args, "notes", strings.Join(notes, ", "))
 		}
-		fmt.Fprintf(env.stderr, "%s\n", line)
+		env.log.Info("Starting HTTP server", args...)
 		var serveErr error
 		select {
 		case <-sigCtx.Done():
@@ -166,7 +171,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			// bind failure racing the shutdown) is reported below.
 		case err := <-watchDone:
 			if err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(env.stderr, "Error: %v\n", err)
+				env.log.Error(err.Error())
 				cancel()
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
@@ -189,14 +194,14 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		return nil
 	}
 
-	fmt.Fprintf(env.stderr, "Starting stdio server\n")
+	env.log.Info("Starting stdio server")
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Run(sigCtx, &mcp.StdioTransport{}) }()
 	select {
 	case <-sigCtx.Done():
 	case err := <-watchDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(env.stderr, "Error: %v\n", err)
+			env.log.Error(err.Error())
 			cancel()
 			return fmt.Errorf("failed to watch scripts directory: %w", err)
 		}

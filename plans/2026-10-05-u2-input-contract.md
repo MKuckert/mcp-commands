@@ -1,7 +1,7 @@
 # PLAN — U2: Enforce the input contract
 
 **Branch:** `fix/u2-input-contract` from `main` (v0.9.1). **Target:** v0.9.2.
-**Source:** `REVIEW_REPORT.md` §U2 (H2, M1, M2, L3).
+**Source:** `REVIEW_REPORT.md` (removed after merge) §U2 (H2, M1, M2, L3).
 **Status:** Done.
 
 ## Tasks
