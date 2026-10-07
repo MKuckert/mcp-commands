@@ -7,7 +7,7 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
 ## Scope
 
-- [ ] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
+- [/] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
 - [ ] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
 - [ ] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [ ] U4: README — Shell completion section (main repo)
@@ -40,9 +40,13 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
      (Decision 4) extracts from that one block per script. The Builder keeps the value-class
      `case`/`-n` conditionals separate from the list block.
 3. **Archive layout.** `.goreleaser.yaml` `archives.files` lists the three scripts
-   (`completion/mcp-commands.{bash,zsh,fish}`) — non-glob sources land at the archive root with
-   their basenames, alongside the binary (consistent with `wrap_in_directory: false`).
-   **CRITICAL:** GoReleaser applies its default globs (`license*`, `LICENSE*`, `readme*`,
+   (`completion/mcp-commands.{bash,zsh,fish}`). **Amended by Builder (see Review Log, BF-1):**
+   GoReleaser v2 archives listed files with their project-root-relative path — a snapshot
+   build verified the entries land as `completion/mcp-commands.*`, **not** at the root with
+   their basenames (there is no basename remap in v2 `archives.files`). The archive root
+   thus holds `LICENSE`, `README.md`, `mcp-commands` + a `completion/` dir with the three
+   scripts — 6 files total, same count as the plan's root layout; the formula install lines
+   reference the `completion/` prefix (Decision 5, likewise amended). **CRITICAL:** GoReleaser applies its default globs (`license*`, `LICENSE*`, `readme*`,
    `README*`, `changelog*`, `CHANGELOG*`) **only when `files` is unset**
    (`internal/pipe/archive/archive.go`, `len(archive.Files) == 0`). The current v0.11.0 archive
    (verified: `LICENSE`, `README.md`, `mcp-commands`) relies on those defaults, so the explicit
@@ -60,9 +64,10 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
    three archives, and `*.install` reads from the active staging dir, so the installs must live
    in the same `stage` blocks as `bin.install`:
    ```ruby
-   bash_completion.install "mcp-commands.bash" => "mcp-commands"   # etc/bash_completion.d
-   zsh_completion.install    "mcp-commands.zsh"  => "_mcp-commands" # share/zsh/site-functions
-   fish_completion.install   "mcp-commands.fish"                   # share/fish/vendor_completions.d
+   # completion files land in the archive under completion/ (see Decision 3, BF-1)
+   bash_completion.install "completion/mcp-commands.bash" => "mcp-commands"   # etc/bash_completion.d
+   zsh_completion.install    "completion/mcp-commands.zsh"  => "_mcp-commands" # share/zsh/site-functions
+   fish_completion.install   "completion/mcp-commands.fish"                   # share/fish/vendor_completions.d
    ```
    (zsh files must be named `_mcp-commands` to autoload; fish files keep the command name.)
    No `depends_on "bash-completion"`/`"zsh"`/`"fish"` — homebrew-core convention
@@ -256,3 +261,13 @@ holds. No residual contradictions remain; the Builder may start at U1.
 Target version changed v0.12.0 → v0.11.1 per user request (patch release); all version
 references in the plan updated. Scope, design decisions, and review findings are otherwise
 unchanged — the round-1 verdict carries over.
+
+### Builder finding BF-1 (2026-10-07, U1)
+
+Decision 3 claimed `files` entries "land at the archive root with their basenames". GoReleaser
+v2 does not remap paths: the U1 snapshot build shows the scripts archived as
+`completion/mcp-commands.{bash,zsh,fish}` (relative path preserved), so the archive root
+holds the binary + LICENSE + README.md plus a `completion/` directory — still 6 files total.
+Decision 3 and the Decision 5 formula install lines were amended in-place to reference the
+`completion/` prefix; the 6-file archive-count assertion is unchanged. No other consequence:
+brew `*_completion.install` accepts staging-relative paths, and the U5/U6 gates are unaffected.

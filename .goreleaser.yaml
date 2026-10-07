@@ -28,6 +28,18 @@ archives:
         format: zip
     wrap_in_directory: false
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # An explicit files list disables GoReleaser's implicit default globs,
+    # so re-enumerate them alongside the shell completion scripts.
+    files:
+      - license*
+      - LICENSE*
+      - readme*
+      - README*
+      - changelog*
+      - CHANGELOG*
+      - completion/mcp-commands.bash
+      - completion/mcp-commands.zsh
+      - completion/mcp-commands.fish
 
 checksum:
   name_template: "checksums.txt"
