@@ -164,3 +164,7 @@ T12 not ticked. Correction loop 1 of 3. Status unchanged (T12 in progress).
 - `gofmt -l .` — no files
 
 Blocking finding 1 resolved; no new findings. T12 ticked; status set to **fully approved (T1–T12)** — PR is ready to open.
+
+### Standing follow-up resolved (2026-10-07, `fix/watch-double-error`)
+
+The double `ERROR@…` record on a fatal `--watch` termination in server mode is fixed: `run()` no longer logs the raw watch error — it returns it and `main()` is the single reporting site (one `failed to watch scripts directory: <cause>` record). `TestRunWatchFatalMidRun` pins the invariant (zero `ERROR@` records from `run()` itself). Diagnostic mode was already single-logged; no README change (format unchanged, count only).

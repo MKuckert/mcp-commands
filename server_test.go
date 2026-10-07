@@ -412,8 +412,12 @@ func TestRunWatchSetupFailure(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("run did not return for a watch setup failure")
 	}
-	if !strings.Contains(stderr.String(), "inotify unavailable") {
-		t.Errorf("stderr = %q, want the visible failure", stderr.String())
+	// run() must not log the setup failure itself: main() is the single
+	// reporting site (a log here plus main's would double the record).
+	// The failure is still loud in production — main() logs every error
+	// run() returns.
+	if got := strings.Count(stderr.String(), "ERROR@"); got != 0 {
+		t.Errorf("run() logged %d ERROR record(s) for the watch setup failure, want 0:\n%s", got, stderr.String())
 	}
 }
 
@@ -505,6 +509,12 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), "failed to watch scripts directory") {
 					t.Fatalf("run error = %v, want the wrapped watch failure", err)
+				}
+				// run() must not log the watch failure itself: main() is the
+				// single reporting site, so the captured stderr holds no
+				// ERROR record from run() (it would have doubled the record).
+				if got := strings.Count(stderr.String(), "ERROR@"); got != 0 {
+					t.Fatalf("run() logged %d ERROR record(s) for the fatal watch termination, want 0:\n%s", got, stderr.String())
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("run did not return for a fatal watch termination")
