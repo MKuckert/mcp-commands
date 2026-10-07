@@ -54,7 +54,7 @@ docker run -p 8080:8080 -v ./my-scripts:/scripts \
   -e MCP_COMMANDS_API_KEY=... mcp-commands
 ```
 
-Configuration is via environment variables: `MCP_COMMANDS_HOST` (default `0.0.0.0`), `MCP_COMMANDS_PORT` (default `8080`), `MCP_COMMANDS_DIR` (default `/work`), `MCP_COMMANDS_SCRIPTS` (default `/scripts`), plus the binary's native `MCP_COMMANDS_API_KEY`, `MCP_COMMANDS_ALLOWED_ORIGINS` / `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (CORS), `MCP_COMMANDS_TIMEOUT`, `MCP_COMMANDS_WATCH`, and `LOG_LEVEL`. Pin a release with `--build-arg MCP_COMMANDS_VERSION=<version>` and a platform with `--platform linux/<amd64|arm64>`. Note the container only sees what you mount — for bridging the host toolchain into a sandbox, run the bare binary on the host over HTTP instead (see [Use Cases](#use-cases)).
+Configuration is via environment variables: `MCP_COMMANDS_HOST` (default `0.0.0.0`), `MCP_COMMANDS_PORT` (default `8080`), `MCP_COMMANDS_DIR` (default `/work`), `MCP_COMMANDS_SCRIPTS` (default `/scripts`), `MCP_COMMANDS_TIMEOUT`, `MCP_COMMANDS_WATCH` (`1`/`true`/`yes`), plus the binary's native `MCP_COMMANDS_API_KEY`, `MCP_COMMANDS_ALLOWED_ORIGINS` / `MCP_COMMANDS_ALLOW_ALL_ORIGINS` (CORS), and `LOG_LEVEL`. Pin a release with `--build-arg MCP_COMMANDS_VERSION=<version>` and a platform with `--platform linux/<amd64|arm64>`. Note the container only sees what you mount — for bridging the host toolchain into a sandbox, run the bare binary on the host over HTTP instead (see [Use Cases](#use-cases)).
 
 ## Usage
 
