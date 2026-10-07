@@ -104,17 +104,13 @@ Priority order:
 (CI `test (ubuntu-latest)` / `test (windows-latest)` from
 `.github/workflows/ci.yml`) must pass, which a direct push can never satisfy
 (the checks don't exist before the push). Don't retry, don't try to bypass —
-always go through a PR:
+always go through a PR.
 
-1. Push commits to a topic branch: `git push -u origin <branch>`
-2. Open the PR: `gh pr create --head <branch> --base main`
-3. Poll the PR's check runs until all complete (CI takes a few minutes; the
-   Windows test is the slowest — poll with `sleep 15` between API calls).
-4. Merge with `--rebase` and `--delete-branch`. **Squash merges are
-disallowed on this repo** (`gh pr merge --squash` → "Squash merges are not
-allowed"); `--merge` also works if a merge commit is acceptable.
-5. Re-sync locally: `git pull --rebase origin main` (the rebase merge rewrites
-   SHAs; the local main must follow origin).
+**Never merge a PR on your own judgment.** Push the branch and open the PR,
+then stop and hand it to the user; merging (and the local re-sync that
+follows) only happens on an explicit merge request. Squash merges are
+disallowed on this repo (`gh pr merge --squash` → "Squash merges are not
+allowed") — `--rebase` or `--merge` are the options when the user asks.
 
 Note: `GET /repos/…/rules/refs/heads/main` returns 404 for the app token —
 the protection can't be inspected via API, only learned from the push error.
