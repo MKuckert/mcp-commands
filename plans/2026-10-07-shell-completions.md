@@ -8,8 +8,8 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 ## Scope
 
 - [x] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
-- [/] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
-- [ ] U3: version bump 0.11.0 → 0.11.1 (main repo)
+- [x] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
+- [/] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [ ] U4: README — Shell completion section (main repo)
 - [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
 - [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
@@ -363,3 +363,56 @@ verified against the diff and the files:
 
 **Verdict: Approved** — all three round-2 findings (B-2, N-3, N-4) are resolved with no
 residual findings; U1 is ticked.
+
+### Review (round 4, U2)
+
+`541817e` ("ci: lint shell completion scripts and check flag drift") verified against
+`.github/workflows/ci.yml`, the three `completion/` scripts, `flags.go`, and `main.go`:
+
+**Plan compliance — no finding:**
+
+- **Lint step:** sits after Test, guarded `if: matrix.os == 'ubuntu-latest'`; runs
+  `shellcheck` (runner-preinstalled) + `zsh -n` (runner-preinstalled) +
+  `sudo apt-get update && sudo apt-get install -y fish && fish -n` (fish is not
+  preinstalled) — exactly U2 as amended by N-1; the Windows job steps are untouched. ✔
+- **Drift check:** matches Decision 4 — build → `--help` vs. the three flag blocks,
+  dash-normalized, fail on any divergence; per-script as the plan requires. The U2
+  table-test (synthetic flag → red, then restore) was run locally by the Builder and is
+  correctly **not** in the commit (the diff touches only `ci.yml` + the plan). ✔
+
+**Correctness of the drift-check shell logic — no finding:**
+
+- **`--help` contract:** `main.go:44-47` — `flag.ErrHelp` prints the captured usage to
+  **stdout** and exits **0**, so `help_flags=$(dist/mcp-commands --help | awk …)` is
+  well-defined under `set -e`/`pipefail`. ✔
+- **awk extraction:** stdlib `flag` `PrintDefaults` renders each flag as `  -name [type]`
+  and each description line as `    \t…` (4 spaces + tab) — the third character is a
+  space, never `-`, so `/^  -/` matches exactly the 21 flag lines and nothing else (not
+  the `Usage of` header, not descriptions, not wrapped usage lines); `print $1` yields
+  the `-name` token, `sed 's/^-//'` strips the single dash, `sort` canonicalizes the
+  registration order. ✔
+- **Per-script normalizations:** all three flag blocks are single anchored lines that the
+  respective `grep -E` patterns match uniquely (the zsh `log_levels=(` line does not
+  match `^flags=\(`; the fish file has no other `set -l` lines). `sed` prefix/suffix
+  strips (`flags="`/`"`, `flags=( `/` )`, `set -l flags `) leave the pure space-separated
+  list; `normalize` (`tr ' ' '\n'` + `sed 's/^--*//'` — one or more leading dashes — +
+  `grep -v '^$'` + `sort -u`) handles double vs. single dashes, blank tokens, and
+  ordering. Both sides of the `drift()` string compare are sorted, so the comparison is
+  valid. ✔
+- **`set -euo pipefail` semantics:** a missing flag block → `grep` empty → `normalize`'s
+  `grep -v` exits 1 with no output → the substitution's status is discarded in argument
+  context, so `drift()` receives `""` ≠ the 21-flag set → drift message + `exit 1`.
+  A block reformatted across lines is captured only partially → set mismatch → red. Both
+  failure modes fail loudly, never fake a match. `diff <(…) <(…) >&2 || true` correctly
+  prevents `set -e` from aborting on diff's exit-1 before the intended `exit 1`; process
+  substitution is fine because Actions `run:` uses bash. The lint step relies on the
+  runner's default `set -eo pipefail` (an `apt` failure aborts) — acceptable. ✔
+- **YAML:** both steps are `run: |` literal blocks; the `--` sequences inside sed/grep
+  patterns are inert in a block scalar, quoting is sound; the Builder's YAML-parse
+  check plus this reading is sufficient. ✔
+- **Builder validation:** green baseline, red on a synthetic flag injected into each of
+  the three scripts, green after restore — combined with the line-by-line reading above,
+  the evidence is sufficient. (Trivial, no action: the drift check's `go build -o
+  dist/mcp-commands .` creates a `dist/` dir in the CI workspace; harmless.)
+
+**Verdict: Approved** — no residual findings; U2 is ticked.

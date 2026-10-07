@@ -43,7 +43,7 @@ go install github.com/mkuckert/mcp-commands@latest
 **Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<version>_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
 
 ```bash
-tar -xzf mcp-commands_0.11.0_linux_amd64.tar.gz   # unzip on Windows
+tar -xzf mcp-commands_0.11.1_linux_amd64.tar.gz   # unzip on Windows
 ```
 
 **Container** — a `Containerfile` is included that wraps a prebuilt release binary (no Go toolchain needed). Build your own image and mount a self-contained scripts directory:
