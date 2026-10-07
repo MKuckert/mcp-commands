@@ -7,8 +7,8 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 
 ## Scope
 
-- [/] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
-- [ ] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
+- [x] U1: three static completion scripts (`completion/`) + GoReleaser `archives.files` (main repo)
+- [/] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
 - [ ] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [ ] U4: README — Shell completion section (main repo)
 - [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
@@ -271,3 +271,95 @@ holds the binary + LICENSE + README.md plus a `completion/` directory — still 
 Decision 3 and the Decision 5 formula install lines were amended in-place to reference the
 `completion/` prefix; the 6-file archive-count assertion is unchanged. No other consequence:
 brew `*_completion.install` accepts staging-relative paths, and the U5/U6 gates are unaffected.
+
+### Review (round 2, U1)
+
+**Verified against the code — no finding:**
+
+- **Flag inventory (Decision 2):** extracted the flag block from each script and diffed against
+  the 21 flags in `flags.go` `parseCLI` — all three lists are an exact 21/21 match (no missing,
+  extra, or misspelled flags). One dedicated parseable block per script (`flags="…"`,
+  `flags=( … )`, `set -l flags …`); value-class conditionals kept separate. ✔
+- **bash 3.2 floor:** no bash-4+ features (no `mapfile`, associative arrays, `${var,,}`,
+  extglob); the only construct of interest is process substitution (bash 2+) around
+  `compgen`; `shellcheck` exits clean. ✔
+- **Sourcing in plain shells:** all three source cleanly in `zsh -c` / `bash -c` / `fish -c`;
+  the zsh `compdef` guard (`$+functions[compdef] || $+builtins[compdef]`) correctly skips
+  registration in a plain `zsh -c`, so Decision 6's test-block sourcing holds. ✔
+- **fish `-a`/argv pattern:** `__mcp_commands_flag_candidates` receives the flag list as
+  `argv` and prints one per line via `printf '%s
+'` — correct; avoids `complete` misparsing
+  dash-prefixed positionals as its own options. `__fish_*` conditionals are stock fish.
+  Function name is namespaced, no collision. ✔
+- **zsh/guarded registration, bash `complete -F`:** names `_mcp-commands` / `_mcp-commands`
+  collide with nothing in scope. ✔
+- **`.goreleaser.yaml`:** `files:` = exactly the six default globs + the three scripts, with an
+  accurate comment explaining why the re-enumeration is required. ✔
+- **BF-1 amendment:** sound. GoReleaser v2 `archives.files` preserves project-root-relative
+  paths (no basename remap); the `completion/` prefix in the amended Decision 3 and the
+  Decision 5 install lines is consistent with brew's staging-relative `*_completion.install`,
+  and the 6-file archive count is unchanged. Accept as written. ✔
+
+**Findings:**
+
+B-2 (blocking): **zsh value completion is dead code.** `completion/mcp-commands.zsh:21`
+sets `prev="${words[1]}"` — in a zsh completion function `words[1]` is the **first** word of
+the command line (the command name `mcp-commands`), not the previous word. So every
+`case "$prev"` branch (`--log-level`, `--dir|--scripts`, `--api-key-file|--tls-cert|--tls-key`)
+is unreachable: values never complete; only the bare `-` flag list works. This defeats the
+value-class half of Decision 2's contract in zsh. Fix is one line: `prev="${words[CURRENT-1]}"`
+(or use the `$1` argument the completion system passes).
+
+N-3 (minor): **fish value entries complete nothing, and the comment says the opposite.** The
+two entries `… --dir --scripts … -f -d 'Directory'` and `… --api-key-file --tls-cert
+--tls-key … -f -d 'File'` use `-f` (no file completion) with no `-a`/`-F` candidates, so
+tabbing after `--dir`/`--api-key-file` yields zero candidates — while the comment above them
+claims "the directory flags complete directories, the file flags complete files". The comment
+is the inverse of the behavior. Fix: drop `-f` from those two entries (fish then falls back
+to file/dir completion) and correct the comment, or add an `-F` candidate function. Non-
+blocking: safe behavior, no contract violation, pure QoL.
+
+N-4 (minor): **zsh flag-list completion only fires on a bare `-`.** `[[ "${words[CURRENT]}"
+== - ]]` matches only the literal dash; `--d<Tab>` completes nothing (the bash script handles
+any `-*` prefix). One-character class of fix (`== -*`). Non-blocking QoL; also note neither
+bash nor zsh handles the `--flag=value` equals form — accepted as a known limitation, not
+required by the plan.
+
+(Trivia, no action: the zsh file assigns `flags`/`log_levels` at global scope when autoloaded;
+harmless but mildly generic names.
+
+**Verdict: Changes requested** — one blocking finding (B-2: zsh `prev` reads the command
+name, all value branches dead); two minor QoL findings (N-3 fish value entries + inverted
+comment; N-4 zsh bare-dash-only prefix match). The Builder should fix B-2 (and, while in the
+file, N-4) and resubmit; N-3 may ship as-is if explicitly accepted. U1 stays unticked.
+
+### Review (round 3, U1 correction)
+
+Correction `e2233f2` ("fix: zsh prev word index, dead value branches, fish value entries")
+verified against the diff and the files:
+
+- **B-2 — fixed.** `prev="${words[CURRENT-1]}"` is the canonical zsh completion idiom:
+  `CURRENT` is the 1-based index of the word being completed in `words`, so
+  `words[CURRENT-1]` is the previous word. `CURRENT` is always ≥ 2 inside a completion
+  function (word 1 is the command name and never triggers the function), so there is no
+  `words[0]` edge case. All three value branches (`--log-level`, `--dir|--scripts`,
+  `--api-key-file|--tls-cert|--tls-key`) are now reachable. ✔
+- **N-3 — resolved.** Both value entries dropped `-f` and keep `-d` documentation only. A
+  matching fish spec without `-f` leaves file completion enabled, and with no `-a`/`-F`
+  actions the candidate list stays empty, so the engine falls back to its default
+  file+directory completion — `--dir`/`--api-key-file` now complete paths. The rewritten
+  comment ("keep fish's default file+directory completion (the -d entries document the
+  value kind)") is accurate. The pragmatic fallback is accepted: dirs-only completion in
+  fish was never in the plan's contract, and default file+dir is the standard fish behavior
+  for path flags; the `-x`/`-F` restriction the Builder cites need not be re-verified
+  because the shipped code does not rely on it. ✔
+- **N-4 — fixed.** `[[ "${words[CURRENT]}" == -* ]]` matches any dash-prefixed partial
+  word, and `compadd` prefix-filters its candidates against the current word by default,
+  so `--d<Tab>` yields `--dir` and `--disable-localhost-protection` only. ✔
+- **No new bugs.** The diff is 6 lines across the two files; the zsh `case` structure (single
+  fall-through `return 0`), the fish condition shapes, the 21/21 flag inventories, and the
+  `#compdef`/guard registration are all untouched. `completion/mcp-commands.bash`,
+  `.goreleaser.yaml`, and `flags.go` are unchanged since `6058d7f` (round-2 accepted). ✔
+
+**Verdict: Approved** — all three round-2 findings (B-2, N-3, N-4) are resolved with no
+residual findings; U1 is ticked.
