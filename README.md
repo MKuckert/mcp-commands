@@ -58,7 +58,7 @@ Configuration is via environment variables: `MCP_COMMANDS_HOST` (default `0.0.0.
 
 ### Shell completion
 
-The Homebrew formula installs completion scripts for bash, zsh, and fish into the brew prefix. Activation per shell:
+The Homebrew formula installs completion scripts for bash, zsh, and fish into the brew prefix ([Homebrew shell completion docs](https://docs.brew.sh/Shell-Completion) for further documentation). Activation per shell:
 
 - **bash** — install `bash-completion` (works with the macOS stock bash 3.2) or `bash-completion@2` (plus `brew install bash` for bash 4+), then in `~/.bashrc`:
 
