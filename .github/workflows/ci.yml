@@ -71,8 +71,32 @@ jobs:
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
           excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
           gate=$(awk -v c="$excl" 'BEGIN { print (c < 95) ? "❌ below gate" : "✅ pass" }')
-          body="**Test coverage**: ${total}% of statements total · **${excl}%** excluding \`prod.go\` (uncoverable TTY/exit glue) · 95% gate: ${gate}"
-          gh pr comment "${{ github.event.pull_request.number }}" --body "$body"
+
+          # The marker (an HTML comment, invisible in the UI) lets re-runs
+          # update the existing summary in place instead of piling up one
+          # comment per push on a busy PR.
+          body_file=$(mktemp)
+          {
+            echo "<!-- mcp-commands-coverage -->"
+            echo "**Test coverage**: ${total}% of statements total · **${excl}%** excluding \`prod.go\` (uncoverable TTY/exit glue) · 95% gate: ${gate}"
+          } > "$body_file"
+
+          existing=""
+          for page in 1 2 3 4 5; do
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/${{ github.event.pull_request.number }}/comments?per_page=100&page=$page" \
+              --jq '[.[] | select(.body | contains("<!-- mcp-commands-coverage -->")) | .id] | first // empty' || true)
+            [ -n "$existing" ] && break
+          done
+
+          if [ -n "$existing" ]; then
+            # Update in place; if that fails (e.g. token scope), fall back
+            # to a new comment so the summary is still posted — loud, not silent.
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/${{ github.event.pull_request.number }}/comments/$existing" -F body=@"$body_file" \
+              || gh pr comment "${{ github.event.pull_request.number }}" --body-file "$body_file"
+          else
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file "$body_file"
+          fi
+          rm -f "$body_file"
 
       - name: Upload coverage report
         # !cancelled(): upload the report even when the gate step failed —
