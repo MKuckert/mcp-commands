@@ -44,14 +44,15 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: go test ./... -run TestWindowsExeSmoke -v
 
-      # shellcheck and zsh are preinstalled on ubuntu-latest; fish is not.
+      # The ubuntu runner image does not ship zsh (and fish); install the
+      # linters explicitly so the step does not depend on image contents.
       - name: Lint shell completion scripts
         if: matrix.os == 'ubuntu-latest'
         run: |
+          sudo apt-get update
+          sudo apt-get install -y fish shellcheck zsh
           shellcheck completion/mcp-commands.bash
           zsh -n completion/mcp-commands.zsh
-          sudo apt-get update
-          sudo apt-get install -y fish
           fish -n completion/mcp-commands.fish
 
       # Fail the build if a completion script's flag block diverges from the

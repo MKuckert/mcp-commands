@@ -499,3 +499,11 @@ Decision 9, the BF-1 amendment, and the three `completion/` script headers:
   more helpful for `tar`/`unzip` users; basenames alone are unambiguous in practice.)
 
 **Verdict: Approved** — all four checks pass with no residual findings; U4 is ticked.
+
+### CI-1 (2026-10-07, post-push): ubuntu runner image has no zsh
+
+The round-1 claim that `shellcheck` and `zsh` are preinstalled on `ubuntu-latest` was wrong
+for the current image — the lint step failed on `zsh: command not found`. U2's lint step now
+apt-installs `fish shellcheck zsh` up front, removing all image-content assumptions. U2's
+verification criterion ("shellcheck / `zsh -n` / `fish -n` green") is unchanged; the
+round-4 approval carries over to this correction (no drift-check impact).
