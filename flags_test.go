@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -497,5 +498,21 @@ func TestUsageLineListsRegisteredFlags(t *testing.T) {
 		if !strings.Contains(usageLine, "--"+name) {
 			t.Errorf("usageLine is missing --%s:\n%s", name, usageLine)
 		}
+	}
+}
+
+func TestFlagParseErrorUnwrap(t *testing.T) {
+	t.Parallel()
+	inner := errors.New("inner failure")
+	err := &flagParseError{err: inner, usage: "usage text"}
+	var parseErr *flagParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatal("errors.As did not match *flagParseError")
+	}
+	if !errors.Is(err, inner) {
+		t.Error("errors.Is did not reach the wrapped error via Unwrap")
+	}
+	if got := err.Error(); got != "inner failure" {
+		t.Errorf("Error() = %q, want %q", got, "inner failure")
 	}
 }
