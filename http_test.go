@@ -887,18 +887,19 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 func TestAPIKeySourceString(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
+		name string
 		src  apiKeySource
 		want string
 	}{
-		{src: apiKeySourceNone, want: "none"},
-		{src: apiKeySourceFlag, want: "flag"},
-		{src: apiKeySourceFile, want: "file"},
-		{src: apiKeySourceEnv, want: "env"},
+		{name: "none", src: apiKeySourceNone, want: "none"},
+		{name: "flag", src: apiKeySourceFlag, want: "flag"},
+		{name: "file", src: apiKeySourceFile, want: "file"},
+		{name: "env", src: apiKeySourceEnv, want: "env"},
 		// Unknown values fail closed to "none", never to a source name.
-		{src: apiKeySource(99), want: "none"},
+		{name: "unknown", src: apiKeySource(99), want: "none"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.src.String(); got != tt.want {
 				t.Errorf("String() = %q, want %q", got, tt.want)
 			}

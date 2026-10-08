@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -504,15 +505,17 @@ func TestUsageLineListsRegisteredFlags(t *testing.T) {
 func TestFlagParseErrorUnwrap(t *testing.T) {
 	t.Parallel()
 	inner := errors.New("inner failure")
-	err := &flagParseError{err: inner, usage: "usage text"}
+	// Wrap in an outer %w chain so errors.As/Is must traverse it:
+	// matching the way main() receives the parse error.
+	err := fmt.Errorf("parse: %w", &flagParseError{err: inner, usage: "usage text"})
 	var parseErr *flagParseError
 	if !errors.As(err, &parseErr) {
-		t.Fatal("errors.As did not match *flagParseError")
+		t.Fatal("errors.As did not match *flagParseError through the wrap chain")
 	}
 	if !errors.Is(err, inner) {
 		t.Error("errors.Is did not reach the wrapped error via Unwrap")
 	}
-	if got := err.Error(); got != "inner failure" {
-		t.Errorf("Error() = %q, want %q", got, "inner failure")
+	if !strings.Contains(err.Error(), "inner failure") {
+		t.Errorf("Error() = %q, want it to contain %q", err.Error(), "inner failure")
 	}
 }
