@@ -43,3 +43,41 @@ jobs:
       - name: Test (Windows smoke)
         if: matrix.os == 'windows-latest'
         run: go test ./... -run TestWindowsExeSmoke -v
+
+      # The ubuntu runner image does not ship zsh (and fish); install the
+      # linters explicitly so the step does not depend on image contents.
+      - name: Lint shell completion scripts
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish shellcheck zsh
+          shellcheck completion/mcp-commands.bash
+          zsh -n completion/mcp-commands.zsh
+          fish -n completion/mcp-commands.fish
+
+      # Fail the build if a completion script's flag block diverges from the
+      # binary's actual flag set ("forgot to update completions" = red CI).
+      - name: Check completion flag drift
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          go build -o dist/mcp-commands .
+          help_flags=$(dist/mcp-commands --help | awk '/^  -/{print $1}' | sed 's/^-//' | sort)
+          # The flag package accepts --help/-h even though PrintDefaults never
+          # lists it; the scripts complete it, so count it in the binary set.
+          help_flags=$(printf 'help\n%s\n' "$help_flags" | sort -u)
+          normalize() {
+            tr ' ' '\n' | sed 's/^--*//' | grep -v '^$' | sort -u
+          }
+          drift() {
+            # $1 = script path, $2 = its flag set
+            if [ "$help_flags" != "$2" ]; then
+              echo "flag drift in $1 (binary vs completion script):" >&2
+              diff <(printf '%s\n' "$help_flags") <(printf '%s\n' "$2") >&2 || true
+              exit 1
+            fi
+            echo "$1: flag set matches mcp-commands --help"
+          }
+          drift completion/mcp-commands.bash  "$(grep -E '^_mcp_commands_flags="' completion/mcp-commands.bash  | sed -e 's/^_mcp_commands_flags="//' -e 's/"$//' | normalize)"
+          drift completion/mcp-commands.zsh   "$(grep -E '^_mcp_commands_flags=\(' completion/mcp-commands.zsh | sed -e 's/^_mcp_commands_flags=( //' -e 's/ )$//' | normalize)"
+          drift completion/mcp-commands.fish  "$(grep -E '^set -l _mcp_commands_flags ' completion/mcp-commands.fish | sed 's/^set -l _mcp_commands_flags //' | normalize)"
