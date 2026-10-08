@@ -1,9 +1,6 @@
 package main
 
 import (
-	"golang.org/x/term"
-	"io"
-	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -14,26 +11,6 @@ const (
 	listIndent    = "     " // included in the wrap width budget
 
 )
-
-// prodResolveWrapWidth returns the wrap width for --list-tools output: the
-// terminal window width (in runes) when stdout is a TTY (re-queried at every
-// print so window resizes are honored), falling back to listWrapWidth when
-// stdout is not a *os.File, not a terminal, or the query fails.
-func prodResolveWrapWidth(stdout io.Writer) int {
-	file, ok := stdout.(*os.File)
-	if !ok {
-		return listWrapWidth
-	}
-	fd := int(file.Fd())
-	if !term.IsTerminal(fd) {
-		return listWrapWidth
-	}
-	width, _, err := term.GetSize(fd)
-	if err != nil || width <= 0 {
-		return listWrapWidth
-	}
-	return width
-}
 
 // listParamDecl renders one parameter for a tool signature: key:shorttype if
 // required, [key:shorttype] if optional. Short types: string→str,

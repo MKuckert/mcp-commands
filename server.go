@@ -15,20 +15,9 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"golang.org/x/term"
 )
 
 const serverName = "mcp-commands"
-
-// prodClearScreen clears the terminal (ANSI erase-screen + cursor-home). It
-// is a no-op when stdout is not a TTY, so piped output simply accumulates.
-func prodClearScreen(stdout io.Writer) {
-	file, ok := stdout.(*os.File)
-	if !ok || !term.IsTerminal(int(file.Fd())) {
-		return
-	}
-	_, _ = stdout.Write([]byte("\x1b[2J\x1b[H"))
-}
 
 // prodNotifySignals wraps signal.NotifyContext (SIGINT/SIGTERM cancel the
 // context).
