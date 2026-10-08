@@ -546,3 +546,10 @@ function* — the `#compdef` + function-definition pattern is exactly how every 
 completion file works; the first Tab invokes the body. Demonstrated in-sandbox: with the file
 installed as `_mcp-commands` on `fpath`, `autoload -U _mcp_commands; _mcp_commands` executes
 the body (the `compadd` call fires). No code change warranted.
+
+All 8 threads were answered on the PR (7 accepted + the objection above). Note: two earlier
+reply attempts posted literal `@…` placeholder bodies (the app token's `gh -f body=@file`
+expansion misbehaved in this shell); the token can create but not delete PR review comments
+(DELETE → 404), so the 16 junk replies still sit in the threads alongside the 8 correct ones
+— the user should delete them from the web UI (they are easily spotted: bodies reading
+`@[4215…]` or `@b_*.txt`).
