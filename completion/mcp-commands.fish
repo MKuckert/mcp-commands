@@ -17,7 +17,7 @@ end
 # no subcommands, so it would stay true for every later argument.
 function __mcp_commands_prev_is_flag
   test (count $commandline_tokens) -ge 2
-  and string match -q -- "$argv" "$commandline_tokens[(count $commandline_tokens)-1]"
+  and string match -q -- $argv "$commandline_tokens[-2]"
 end
 
 # Candidate values must arrive via -a (command output): fish would parse a
