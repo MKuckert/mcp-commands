@@ -67,13 +67,14 @@ The Homebrew formula installs completion scripts for bash, zsh, and fish into th
   ```
 
   (Both v1 and `@2` source `$(brew --prefix)/etc/bash_completion.d`, where the formula places `mcp-commands`.)
-- **zsh** — in `~/.zshrc`:
+- **zsh** — in `~/.zshrc` (the `fpath` line must come **before** your `compinit` call):
 
   ```bash
   fpath=($(brew --prefix)/share/zsh/site-functions $fpath)
+  autoload -Uz compinit && compinit
   ```
 
-  (Homebrew's own `zsh` picks this up automatically.)
+  Add the `compinit` line only if your `~/.zshrc` does not already run it — without `compinit`, stock zsh never loads completions at all. (Homebrew's own `zsh` picks up the fpath entry automatically.)
 - **fish** — automatic once the brew prefix is on fish's path; the formula places `mcp-commands.fish` in `$(brew --prefix)/share/fish/vendor_completions.d`.
 
 On Linuxbrew, the distro's bash-completion reads `/usr/share/bash-completion/completions`, not the brew prefix — brew's `bash-completion@2` is required for the brew file to load.

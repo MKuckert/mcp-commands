@@ -35,10 +35,14 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
      to `complete`/`compgen`, plain arrays, `[[ ]]` — no bash-4+ features. zsh/fish scripts have
      no such floor.
    - **Parseable flag block (Decision 4 dependency):** each script carries its full flag list in
-     exactly one dedicated block — bash: a single `flags="..."` assignment line; zsh: a single
-     `flags=( ... )` array line; fish: a single `set -l flags ...` line. The drift check
+     exactly one dedicated block — bash: a single `_mcp_commands_flags="..."` assignment line;
+     zsh: a single `_mcp_commands_flags=( ... )` array line; fish: a single
+     `set -l _mcp_commands_flags ...` line (namespaced per the Copilot review, CR-1 — the
+     names must not collide with user variables in the sourced shell). The drift check
      (Decision 4) extracts from that one block per script. The Builder keeps the value-class
-     `case`/`-n` conditionals separate from the list block.
+     `case`/`-n` conditionals separate from the list block. All three blocks also carry
+     `--help` (CR-2): the stdlib `flag` package accepts it even though `PrintDefaults`
+     never lists it, so the drift check adds `help` to the binary-side set.
 3. **Archive layout.** `.goreleaser.yaml` `archives.files` lists the three scripts
    (`completion/mcp-commands.{bash,zsh,fish}`). **Amended by Builder (see Review Log, BF-1):**
    GoReleaser v2 archives listed files with their project-root-relative path — a snapshot
@@ -103,8 +107,10 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
      (+ `brew install bash` for 4+); then in `~/.bashrc`:
      `[[ -r "$(brew --prefix)/etc/profile.d/bash_completion.sh" ]] && . "$(brew --prefix)/etc/profile.d/bash_completion.sh"`
      (both v1 and `@2` source `#{prefix}/etc/bash_completion.d` — one file serves both)
-   - zsh: in `~/.zshrc`: `fpath=($(brew --prefix)/share/zsh/site-functions $fpath)`
-     (Homebrew's own zsh picks it up automatically)
+   - zsh: in `~/.zshrc`: `fpath=($(brew --prefix)/share/zsh/site-functions $fpath)` **before**
+     the `compinit` call, plus `autoload -Uz compinit && compinit` if the user's `~/.zshrc`
+     does not already run it (CR-4: without `compinit`, stock zsh never loads completions)
+     (Homebrew's own zsh picks up the fpath entry automatically)
    - fish: automatic once brew's prefix is on fish's path; note the vendor dir location
    - One line for non-brew users: the scripts ship in every release archive
      (extract `mcp-commands.{bash,zsh,fish}` and drop them in your shell's completion dir);
@@ -120,9 +126,9 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 - `completion/mcp-commands.fish` — `complete -c mcp-commands` entries
 - `.goreleaser.yaml`: `archives.files` = six re-enumerated default globs + three script sources
 - Verification: `goreleaser release --snapshot --clean` (or `goreleaser check` + local build)
-  → `tar -tzf`/`unzip -l` shows exactly 6 files at root: the binary, the 3 scripts,
-  `LICENSE`, `README.md` (the v0.11.0 baseline {LICENSE, README.md} + the 3 scripts;
-  no `CHANGELOG.md` exists, so the changelog globs contribute nothing)
+  → `tar -tzf`/`unzip -l` shows exactly 6 files: the binary, `LICENSE`, `README.md` at root
+  plus the 3 scripts under `completion/` (BF-1; the v0.11.0 baseline {LICENSE, README.md} +
+  the 3 scripts; no `CHANGELOG.md` exists, so the changelog globs contribute nothing)
 
 **U2 — CI lint + drift check** (main repo)
 - `ci.yml` `test` job: new step after Test, **carrying `if: matrix.os == 'ubuntu-latest'`**
@@ -154,8 +160,8 @@ scripts; "v0.11.1 published" alone is not enough — per Decision 8)
 - The tap's `bump-formula` audit gate runs on the next dispatch; run `brew audit` locally as well
 
 **U6 — release + end-to-end verification**
-- Tag `v0.11.1` → release workflow green (6 files per archive: binary, 3 scripts, LICENSE,
-  README.md) → dispatch → `bump-formula` commits `mcp-commands 0.11.1`
+- Tag `v0.11.1` → release workflow green (6 files per archive: binary, LICENSE, README.md at
+  root + 3 scripts under `completion/`, BF-1) → dispatch → `bump-formula` commits `mcp-commands 0.11.1`
 - Push U5 → `brew audit --formula mcp-commands` clean in tap CI
 - Real machine (macOS): `brew trust --formula … && brew install … && brew test mcp-commands`
   (the three sourcing checks run), then a live tab test:
@@ -507,3 +513,36 @@ for the current image — the lint step failed on `zsh: command not found`. U2's
 apt-installs `fish shellcheck zsh` up front, removing all image-content assumptions. U2's
 verification criterion ("shellcheck / `zsh -n` / `fish -n` green") is unchanged; the
 round-4 approval carries over to this correction (no drift-check impact).
+
+### Copilot review (2026-10-08, PR #32) — 7 accepted, 1 objected
+
+**Accepted and fixed** (one commit):
+- **CR-1** bash/zsh: the generic global names `flags`/`log_levels` are sourced into the user's
+  interactive shell and could clobber same-named user variables → namespaced to
+  `_mcp_commands_flags`/`_mcp_commands_log_levels` in both scripts (fish's `set -l` renamed
+  for consistency). The drift-check `grep`/`sed` anchors follow the renamed blocks (Decision 2
+  amended).
+- **CR-2** `--help` gap: the stdlib `flag` package accepts `--help`/`-h` (main.go handles
+  `flag.ErrHelp`) but `PrintDefaults` never lists it, so none of the three scripts completed a
+  supported option → `--help` added to all three flag blocks; the drift check adds `help` to
+  the normalized binary set to keep the contract consistent.
+- **CR-3** bash: path candidates now go through `complete -F … -o filenames` so readline
+  applies filename quoting / directory-suffix handling (3.2-compatible).
+- **CR-4** fish: `__fish_use_subcommand`/`__fish_seen_subcommand_from` are subcommand-oriented
+  and misbehave on a flag-only CLI (flag candidates vanish after a positional; value
+  completion sticks to every later token) → replaced with two namespaced condition functions:
+  `__mcp_commands_token_is_flag` (current token is dash-prefixed) and
+  `__mcp_commands_prev_is_flag` (immediately preceding token is one of the given flags).
+- **CR-5** README zsh: extending `fpath` alone does not activate completions → the snippet now
+  includes `autoload -Uz compinit && compinit` (with the "only if not already run" and
+  ordering notes); Decision 9 amended.
+- **CR-6** plan U1 verification still claimed all six files at the archive root, contradicting
+  BF-1 → reworded to the actual layout (3 at root + `completion/` dir); U6 likewise.
+
+**Objected (no change):** the zsh comment claiming the autoloaded body "never executes the
+`case`/`compadd` logic, so the first Tab produces no candidates" is a misreading of zsh
+autoload semantics. An autoload stub loads the file *and then calls the newly defined
+function* — the `#compdef` + function-definition pattern is exactly how every stock zsh
+completion file works; the first Tab invokes the body. Demonstrated in-sandbox: with the file
+installed as `_mcp-commands` on `fpath`, `autoload -U _mcp_commands; _mcp_commands` executes
+the body (the `compadd` call fires). No code change warranted.

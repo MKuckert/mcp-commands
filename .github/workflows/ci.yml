@@ -63,6 +63,9 @@ jobs:
           set -euo pipefail
           go build -o dist/mcp-commands .
           help_flags=$(dist/mcp-commands --help | awk '/^  -/{print $1}' | sed 's/^-//' | sort)
+          # The flag package accepts --help/-h even though PrintDefaults never
+          # lists it; the scripts complete it, so count it in the binary set.
+          help_flags=$(printf 'help\n%s\n' "$help_flags" | sort -u)
           normalize() {
             tr ' ' '\n' | sed 's/^--*//' | grep -v '^$' | sort -u
           }
@@ -75,6 +78,6 @@ jobs:
             fi
             echo "$1: flag set matches mcp-commands --help"
           }
-          drift completion/mcp-commands.bash  "$(grep -E '^flags="' completion/mcp-commands.bash  | sed -e 's/^flags="//' -e 's/"$//' | normalize)"
-          drift completion/mcp-commands.zsh   "$(grep -E '^flags=\(' completion/mcp-commands.zsh | sed -e 's/^flags=( //' -e 's/ )$//' | normalize)"
-          drift completion/mcp-commands.fish  "$(grep -E '^set -l flags ' completion/mcp-commands.fish | sed 's/^set -l flags //' | normalize)"
+          drift completion/mcp-commands.bash  "$(grep -E '^_mcp_commands_flags="' completion/mcp-commands.bash  | sed -e 's/^_mcp_commands_flags="//' -e 's/"$//' | normalize)"
+          drift completion/mcp-commands.zsh   "$(grep -E '^_mcp_commands_flags=\(' completion/mcp-commands.zsh | sed -e 's/^_mcp_commands_flags=( //' -e 's/ )$//' | normalize)"
+          drift completion/mcp-commands.fish  "$(grep -E '^set -l _mcp_commands_flags ' completion/mcp-commands.fish | sed 's/^set -l _mcp_commands_flags //' | normalize)"

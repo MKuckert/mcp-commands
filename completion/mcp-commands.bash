@@ -6,10 +6,10 @@
 #
 # Single source of truth: keep the flag set in sync with flags.go.
 # The CI drift check extracts exactly this line.
-flags="--dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params"
+_mcp_commands_flags="--dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help"
 
 # --log-level accepts only these values (logLevels in flags.go).
-log_levels="debug info warn error"
+_mcp_commands_log_levels="debug info warn error"
 
 # Populate COMPREPLY from compgen output, one candidate per array element.
 _mcp-commands-fill() {
@@ -27,23 +27,23 @@ _mcp-commands() {
 
   case "$prev" in
   --log-level)
-    _mcp-commands-fill -W "$log_levels" -- "$cur"
+    _mcp-commands-fill -W "$_mcp_commands_log_levels" -- "$cur"
     return 0
     ;;
   --dir | --scripts)
-    _mcp-commands-fill -d -- "$cur"
+    _mcp-commands-fill -d -o filenames -- "$cur"
     return 0
     ;;
   --api-key-file | --tls-cert | --tls-key)
-    _mcp-commands-fill -f -- "$cur"
+    _mcp-commands-fill -f -o filenames -- "$cur"
     return 0
     ;;
   esac
 
   if [[ "$cur" == -* ]]; then
-    _mcp-commands-fill -W "$flags" -- "$cur"
+    _mcp-commands-fill -W "$_mcp_commands_flags" -- "$cur"
   fi
   return 0
 }
 
-complete -F _mcp-commands mcp-commands
+complete -F _mcp-commands -o filenames mcp-commands
