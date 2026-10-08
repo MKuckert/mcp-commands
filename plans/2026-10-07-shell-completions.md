@@ -109,7 +109,7 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
      (both v1 and `@2` source `#{prefix}/etc/bash_completion.d` — one file serves both)
    - zsh: in `~/.zshrc`: `fpath=($(brew --prefix)/share/zsh/site-functions $fpath)` **before**
      the `compinit` call, plus `autoload -Uz compinit && compinit` if the user's `~/.zshrc`
-     does not already run it (CR-4: without `compinit`, stock zsh never loads completions)
+     does not already run it (CR-5: without `compinit`, stock zsh never loads completions)
      (Homebrew's own zsh picks up the fpath entry automatically)
    - fish: automatic once brew's prefix is on fish's path; note the vendor dir location
    - One line for non-brew users: the scripts ship in every release archive
@@ -530,9 +530,19 @@ round-4 approval carries over to this correction (no drift-check impact).
   applies filename quoting / directory-suffix handling (3.2-compatible).
 - **CR-4** fish: `__fish_use_subcommand`/`__fish_seen_subcommand_from` are subcommand-oriented
   and misbehave on a flag-only CLI (flag candidates vanish after a positional; value
-  completion sticks to every later token) → replaced with two namespaced condition functions:
-  `__mcp_commands_token_is_flag` (current token is dash-prefixed) and
-  `__mcp_commands_prev_is_flag` (immediately preceding token is one of the given flags).
+  completion sticks to every later token) → replaced with two namespaced condition functions
+  (later re-based onto `commandline` per CR-7).
+- **CR-7** (Copilot round 2, 2026-10-08) fish: the CR-4 condition functions read
+  `$commandline_tokens`, which **does not exist in fish 3.6** (our floor; zero mentions in the
+  3.6.0 language docs — the variable is newer), so the conditions silently never fired. fish's
+  own bundled completions use the `commandline` builtin in conditions → both functions now use
+  `commandline -ct` (current token, for the flag test) and `commandline -poc` (completed tokens
+  before the cursor, last one = the preceding token). Re-verified via `fish 3.6.0 -c 'complete
+  -C …'` (which *does* populate the transient `commandline`): `--` → all flags; `--watch --d` →
+  filtered flags (no longer swallowed by a positional); `--dir ␣`/`--api-key-file ␣` →
+  default file+dir; `--log-level d` → `debug` only; empty token → no flags, files only. The
+  `complete -C` *variable* gap (fish issue #11993, fixed in 4.3) never affected this design.
+  The earlier simulation-based verification (round 1) is superseded by this direct test.
 - **CR-5** README zsh: extending `fpath` alone does not activate completions → the snippet now
   includes `autoload -Uz compinit && compinit` (with the "only if not already run" and
   ordering notes); Decision 9 amended.
@@ -547,7 +557,12 @@ completion file works; the first Tab invokes the body. Demonstrated in-sandbox: 
 installed as `_mcp-commands` on `fpath`, `autoload -U _mcp_commands; _mcp_commands` executes
 the body (the `compadd` call fires). No code change warranted.
 
-All 8 threads were answered on the PR (7 accepted + the objection above). Note: two earlier
+All 8 threads were answered on the PR (7 accepted + the objection above).
+
+**Copilot round 2 (2026-10-08).** One new comment (fish:13, the `commandline_tokens`
+claim) — accepted and fixed as CR-7; the two other new comments concerned PR metadata / the
+plan file and are out of Builder scope per the user. PR metadata comment 4216606659 and
+plan comment 4216606661 were left for the user. The junk-reply caveat above still stands. Note: two earlier
 reply attempts posted literal `@…` placeholder bodies (the app token's `gh -f body=@file`
 expansion misbehaved in this shell); the token can create but not delete PR review comments
 (DELETE → 404), so the 16 junk replies still sit in the threads alongside the 8 correct ones

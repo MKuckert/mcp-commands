@@ -7,17 +7,22 @@
 # The CI drift check extracts exactly this line.
 set -l _mcp_commands_flags --dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help
 
+# The conditions query the completion buffer via `commandline`: fish 3.6
+# (our floor) provides no $commandline_tokens variable, and
+# __fish_seen_subcommand_from is subcommand-oriented — this CLI has no
+# subcommands, so it would stay true for every later argument.
+#
 # Flag candidates are offered while the current token looks like a flag.
 function __mcp_commands_token_is_flag
-  string match -q -- '-*' "$commandline_tokens[-1]"
+  string match -q -- '-*' (commandline -ct)
 end
 
-# Value completion keys off the immediately preceding token only. The
-# standard __fish_seen_subcommand_from is subcommand-oriented: this CLI has
-# no subcommands, so it would stay true for every later argument.
+# Value completion keys off the immediately preceding (completed) token only.
 function __mcp_commands_prev_is_flag
-  test (count $commandline_tokens) -ge 2
-  and string match -q -- $argv "$commandline_tokens[-2]"
+  set -l cmd (commandline -poc)
+  set -e cmd[1]
+  test (count $cmd) -ge 1
+  and string match -q -- $argv $cmd[-1]
 end
 
 # Candidate values must arrive via -a (command output): fish would parse a
