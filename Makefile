@@ -1,4 +1,4 @@
-.PHONY: all build test bench clean lint cross buildall
+.PHONY: all build test bench coverage clean lint cross buildall
 
 BINARY_NAME := mcp-commands
 VERSION ?= 0.11.1
@@ -13,6 +13,11 @@ build:
 test:
 	@echo "Running tests..."
 	go test -v
+
+coverage:
+	@echo "Measuring coverage..."
+	go test ./... -coverprofile=coverage.out
+	go tool cover -func=coverage.out
 
 bench:
 	@echo "Running benchmarks..."

@@ -38,7 +38,30 @@ jobs:
       # a genuine PE binary.
       - name: Test
         if: matrix.os == 'ubuntu-latest'
-        run: go test ./...
+        run: go test ./... -coverprofile=coverage.out
+
+      - name: Coverage report and gate
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          go tool cover -func=coverage.out
+          go tool cover -html=coverage.out -o coverage.html
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          # prod.go is the documented, structurally-uncoverable remainder
+          # (real TTY, os.Exit); the gate measures the rest of the package.
+          excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
+          echo "coverage: ${total}% total, ${excl}% excluding prod.go (gate: 95%)"
+          awk -v c="$excl" 'BEGIN { exit (c < 95) }'
+
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.html
+          if-no-files-found: warn
 
       - name: Test (Windows smoke)
         if: matrix.os == 'windows-latest'
