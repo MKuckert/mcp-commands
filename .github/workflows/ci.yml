@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -22,6 +23,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
+        with:
+          # PR head commit (not the merge commit) so coverage line numbers
+          # map correctly to the diff (GitHub code-coverage docs).
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v6.5.0
@@ -52,6 +57,22 @@ jobs:
           excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
           echo "coverage: ${total}% total, ${excl}% excluding prod.go (gate: 95%)"
           awk -v c="$excl" 'BEGIN { exit (c < 95) }'
+
+      # Free-plan replacement for the GitHub Code Quality bot (that feature
+      # requires a paid Team/Enterprise plan): post the coverage totals as a
+      # PR comment. Fork PRs get a read-only token, so skip those;
+      # !cancelled() keeps the (failing) summary posted on gate failure.
+      - name: Post coverage summary to PR
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
+          gate=$(awk -v c="$excl" 'BEGIN { print (c < 95) ? "❌ below gate" : "✅ pass" }')
+          body="**Test coverage**: ${total}% of statements total · **${excl}%** excluding \`prod.go\` (uncoverable TTY/exit glue) · 95% gate: ${gate}"
+          gh pr comment "${{ github.event.pull_request.number }}" --body "$body"
 
       - name: Upload coverage report
         # !cancelled(): upload the report even when the gate step failed —
