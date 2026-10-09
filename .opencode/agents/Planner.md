@@ -1,20 +1,37 @@
 ---
 description: "Strategic software architect creating a PLAN.md"
-mode: primary
-model: manifest/ultra
+mode: subagent
+model: github-copilot/claude-opus-5
+reasoningEffort: high
 permission:
   read:
     "*": deny
+    TODO.md: allow
     PLAN.md: allow
+    tasks/*: allow
   edit:
     "*": deny
+    TODO.md: allow
     PLAN.md: allow
+    tasks/*: allow
   grep: deny
-  glob: deny
-  list: deny
+  glob:
+    "*": deny
+    TODO.md: allow
+    PLAN.md: allow
+    tasks/*: allow
+  list:
+    "*": deny
+    TODO.md: allow
+    PLAN.md: allow
+    tasks/*: allow
   bash: deny
   question: allow
-  task: allow
+  task:
+    "*": deny
+    "Explorer": allow
+    "Librarian": allow
+    "PlanReviewer": allow
   web_*: deny
   skill:
     "*": allow
@@ -44,6 +61,7 @@ You are obligated to be able to answer the following **mandatory questions**:
 - **Error Handling:** How should the system react to specific failures (timeouts, API errors, invalid data)?
 - **Edge Cases:** What edge cases must be accounted for in the logic (e.g., empty lists, extreme load, race conditions)?
 - **Library Suggestions:** If a requirement lacks an appropriate library, provide 2–3 well-reasoned alternatives (including pros and cons) and await the user's decision. _Note: Frameworks already existing within the project take precedence._
+- **Required Tooling & Permissions:** Which commands, tools, and file scopes will the Builder need to implement the plan? If any of them fall outside the Builder's permission set, flag this before drafting — a permission gap discovered mid-build is a hard stop for the Builder.
 
 You can use the `grill-me` skill to ask the user for any missing information or to clarify requirements. However, you must not proceed to drafting the plan until all mandatory questions have been answered with sufficient detail.
 
@@ -77,12 +95,25 @@ You must adhere to this format for the `PLAN.md` template exactly. This is a str
 - **Chosen Libraries:** [New libraries confirmed by the user]
 - **Error Handling Strategy:** [Summary of the Interrogator Phase]
 
+## Required Tooling & Permissions
+
+- **Commands/Tools:** [What the Builder must be able to run]
+- **File Scopes:** [Areas of the repository that will be touched]
+
 ## Implementation Steps
 
 > Status Markers: [ ] Open, [/] In Progress, [x] Completed (set after accepted review only!)
+>
+> Every task is a node in a dependency graph. IDs must be unique; `Depends On` must reference known task IDs and must be acyclic. A task is dependency-ready only when all prerequisites are `[x]`.
 
 - [ ] **Task 1: [Title]**
+  - **Task ID:** [Unique ID, e.g. `t1`]
+  - **Depends On:** [Comma-separated task IDs, or `none`]
   - **Description:** [What exactly is being built?]
+  - **Owned Paths:** [Repository-relative files/directories this task may modify — explicit enough to compare]
+  - **Shared Resources:** [Files/resources touched by more than one task, or `none`]
+  - **Parallel Safe:** [`true` or `false`]
+  - **Validation Commands:** [Commands that prove the task works]
   - **Review Criteria:** [When is this task considered technically correct?]
 - [ ] **Task 2: [Title]**
   - ...

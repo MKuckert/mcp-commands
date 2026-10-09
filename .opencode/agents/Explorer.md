@@ -1,7 +1,8 @@
 ---
 description: "Provides read access to the local code"
 mode: subagent
-model: manifest/medium
+model: github-copilot/claude-sonnet-5
+reasoningEffort: low
 permission:
   read: allow
   edit:
