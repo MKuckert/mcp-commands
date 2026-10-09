@@ -8,4 +8,4 @@
 
 ## Reporting a Vulnerability
 
-Report a vulnerability using a github issue.
+Report a vulnerability using the GitHub private vulnerability reporting
