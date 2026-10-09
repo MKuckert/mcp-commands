@@ -643,11 +643,9 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 }
 
 // TestBuildHTTPHandlerMethodAllowlist: the streamable HTTP transport answers
-// GET (SSE) and other non-POST methods with 405 (the README's documented
-// behavior). The SDK validates the Accept header before the method, so a
-// stream Accept header is set; DELETE is session-scoped and in stateless
-// mode fails its session precondition (400) instead, so it is checked
-// separately.
+// GET (SSE) and all other non-POST methods (including DELETE) with 405 (the
+// README's documented behavior). The SDK validates the Accept header before
+// the method, so a stream Accept header is set.
 func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
@@ -668,7 +666,10 @@ func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 		return resp.StatusCode, resp.Header.Get("Allow")
 	}
 
-	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch} {
+	// go-sdk v1.8.0 checks the method allowlist before the session
+	// precondition, so a DELETE without a session ID gets the 405 like the
+	// other non-POST methods (v1.6.1 answered it with 400).
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		status, allow := do(method)
 		if status != http.StatusMethodNotAllowed {
 			t.Errorf("%s: status = %d, want 405", method, status)
@@ -676,12 +677,6 @@ func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 		if allow != "POST" {
 			t.Errorf("%s: Allow = %q, want POST", method, allow)
 		}
-	}
-
-	// DELETE without a session ID fails the session precondition, not the
-	// method allowlist (stateless mode accepts a session ID and 204s).
-	if status, _ := do(http.MethodDelete); status != http.StatusBadRequest {
-		t.Errorf("DELETE: status = %d, want 400 (missing Mcp-Session-Id)", status)
 	}
 }
 
