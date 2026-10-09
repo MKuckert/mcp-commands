@@ -342,11 +342,22 @@ const (
 
 var corsAllowedMethods = []string{http.MethodPost, http.MethodOptions}
 
-func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
+func newCORSHandler(next http.Handler, log *slog.Logger, cfg corsConfig) http.Handler {
 	allowed := cfg.originSet()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		isPreflight := r.Method == http.MethodOptions
 		if origin == "" || (!cfg.allowAll && !allowed[canonicalOrigin(origin)]) {
+			// A preflight whose origin was rejected fails closed in the
+			// browser (no CORS headers are echoed); the WARN shows the
+			// operator which origin was blocked and why (N8).
+			if isPreflight && origin != "" {
+				reason := "not-in-allowlist"
+				if canonicalOrigin(origin) == "" {
+					reason = "non-canonical"
+				}
+				log.Warn("CORS preflight rejected", "origin", origin, "reason", reason)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -354,7 +365,13 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 		h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
 		h.Add("Vary", "Origin")
 		h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
-		if r.Method == http.MethodOptions { // preflight
+		if isPreflight { // preflight
+			// An allowed preflight is a routine record at DEBUG (N7).
+			args := []any{"origin", canonicalOrigin(origin), "maxAge", corsAllowMaxAge}
+			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
+				args = append(args, "requestHeaders", achr)
+			}
+			log.Debug("CORS preflight allowed", args...)
 			h.Set("Access-Control-Allow-Methods", strings.Join(corsAllowedMethods, ", "))
 			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
 				h.Set("Access-Control-Allow-Headers", achr)
@@ -532,7 +549,7 @@ func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors c
 		h = newBearerAuthHandler(h, token)
 	}
 	if cors.enabled() {
-		h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
+		h = newCORSHandler(h, log, cors) // outermost: preflight unauthenticated, 401s carry CORS
 	}
 	return h
 }

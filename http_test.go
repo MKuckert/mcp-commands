@@ -506,7 +506,7 @@ func TestCORSHandlerPreflight(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			newCORSHandler(next, cfg).ServeHTTP(rec, req)
+			newCORSHandler(next, testDiscardLogger, cfg).ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusNoContent {
 				t.Errorf("status = %d, want 204", rec.Code)
@@ -646,7 +646,7 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			newCORSHandler(next, tt.cfg).ServeHTTP(rec, req)
+			newCORSHandler(next, testDiscardLogger, tt.cfg).ServeHTTP(rec, req)
 
 			if reached != tt.wantReached {
 				t.Fatalf("downstream reached = %v, want %v", reached, tt.wantReached)
@@ -748,7 +748,7 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 	req.Header.Set("Origin", "https://evil.example")
 	rec := httptest.NewRecorder()
 
-	newCORSHandler(next, cfg).ServeHTTP(rec, req)
+	newCORSHandler(next, testDiscardLogger, cfg).ServeHTTP(rec, req)
 
 	if !reached {
 		t.Error("preflight from a disallowed origin must be forwarded to next, not answered by the CORS layer")
@@ -1044,4 +1044,92 @@ func TestCORSConfigSummary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCORSHandlerPreflightLogging pins N7 (allowed preflight → DEBUG with
+// origin, requestHeaders, maxAge) and N8 (rejected preflight origin → WARN
+// with the reason; no record for origin-less requests).
+func TestCORSHandlerPreflightLogging(t *testing.T) {
+	t.Parallel()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("next"))
+	})
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	h := newCORSHandler(next, log, corsConfig{origins: []string{"https://app.example"}})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	do := func(t *testing.T, headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodOptions, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp
+	}
+
+	t.Run("allowed", func(t *testing.T) {
+		resp := do(t, map[string]string{
+			"Origin":                         "https://app.example",
+			"Access-Control-Request-Method":  http.MethodPost,
+			"Access-Control-Request-Headers": "x-api-key",
+		})
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", resp.StatusCode)
+		}
+		out := logBuf.String()
+		for _, want := range []string{"CORS preflight allowed", "origin=https://app.example", `requestHeaders=x-api-key`, "maxAge=900"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("log = %q, want it to contain %s", out, want)
+			}
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("rejected-not-in-allowlist", func(t *testing.T) {
+		resp := do(t, map[string]string{
+			"Origin":                        "https://evil.example",
+			"Access-Control-Request-Method": http.MethodPost,
+		})
+		// Rejected preflight falls through to next: no CORS headers.
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200 (fell through to next)", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Allow-Origin = %q, want empty", got)
+		}
+		out := logBuf.String()
+		if !strings.Contains(out, "CORS preflight rejected") || !strings.Contains(out, `origin=https://evil.example`) || !strings.Contains(out, "reason=not-in-allowlist") {
+			t.Errorf("log = %q, want a rejection WARN with origin and reason", out)
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("rejected-non-canonical", func(t *testing.T) {
+		do(t, map[string]string{
+			"Origin":                        "null",
+			"Access-Control-Request-Method": http.MethodPost,
+		})
+		out := logBuf.String()
+		if !strings.Contains(out, "CORS preflight rejected") || !strings.Contains(out, `origin=null`) || !strings.Contains(out, "reason=non-canonical") {
+			t.Errorf("log = %q, want a non-canonical rejection WARN", out)
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("no-origin-no-record", func(t *testing.T) {
+		do(t, map[string]string{"Access-Control-Request-Method": http.MethodPost})
+		if got := logBuf.String(); got != "" {
+			t.Errorf("log = %q, want nothing for an origin-less preflight", got)
+		}
+	})
 }
