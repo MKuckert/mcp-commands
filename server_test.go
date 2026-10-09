@@ -669,6 +669,7 @@ func TestRunStdioClientIdentity(t *testing.T) {
 func TestStdinIdentityTee(t *testing.T) {
 	t.Parallel()
 	initLine := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}` + "\n"
+	discLine := `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}` + "\n"
 	listLine := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
 
 	r, w, err := os.Pipe()
@@ -684,7 +685,7 @@ func TestStdinIdentityTee(t *testing.T) {
 	// Write in fragments that split the lines mid-JSON to exercise the
 	// partial-line buffer.
 	go func() {
-		for _, chunk := range []string{initLine[:10], initLine[10:25], initLine[25:], listLine[:5], listLine[5:]} {
+		for _, chunk := range []string{initLine[:10], initLine[10:25], initLine[25:], discLine[:12], discLine[12:], listLine[:5], listLine[5:]} {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}
@@ -696,7 +697,7 @@ func TestStdinIdentityTee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if string(got) != initLine+listLine {
+	if string(got) != initLine+discLine+listLine {
 		t.Fatalf("passthrough = %q, want the exact input bytes (no reordering, no loss)", got)
 	}
 
@@ -704,8 +705,11 @@ func TestStdinIdentityTee(t *testing.T) {
 	if !strings.Contains(out, "client connected") || !strings.Contains(out, "clientName=cursor") || !strings.Contains(out, "clientVersion=1.2.3") {
 		t.Errorf("log = %q, want one identity record for the initialize line", out)
 	}
-	if n := strings.Count(out, "client connected"); n != 1 {
-		t.Errorf("identity records = %d, want 1 (tools/list must not log); log: %q", n, out)
+	if !strings.Contains(out, "clientName=claude-code") || !strings.Contains(out, "clientVersion=1.0.6") {
+		t.Errorf("log = %q, want one identity record for the server/discover line", out)
+	}
+	if n := strings.Count(out, "client connected"); n != 2 {
+		t.Errorf("identity records = %d, want 2 (tools/list must not log); log: %q", n, out)
 	}
 
 	// Close is a no-op and safe to call twice.

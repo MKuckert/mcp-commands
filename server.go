@@ -200,7 +200,8 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	env.log.Info("Starting stdio server")
 	serveDone := make(chan error, 1)
 	go func() {
-		// Stdio: client name and version come from the initialize request, which
+		// Stdio: client name and version come from the handshake request
+		// (initialize, or server/discover for the 2026-07-28 protocol), which
 		// the SDK's transport API never exposes to the app; the stdin tee
 		// captures it (the HTTP side uses newClientIdentityPeekHandler).
 		serveDone <- server.Run(sigCtx, &mcp.IOTransport{
@@ -242,8 +243,9 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 }
 
 // stdinIdentityTee is a pure byte passthrough over os.Stdin that inspects each
-// complete newline-delimited line for an initialize request and logs the MCP
-// client identity at INFO (N1, stdio side). It buffers at most the current
+// complete newline-delimited line for a handshake request (initialize, or
+// server/discover for the 2026-07-28 protocol) and logs the MCP client
+// identity at INFO (N1, stdio side). It buffers at most the current
 // line — the protocol's own newline framing — and the inspection is
 // synchronous (a single slog Write per line), so the read path is never
 // blocked on anything external. Close is a no-op: os.Stdin must not be closed
@@ -281,7 +283,7 @@ func (t *stdinIdentityTee) Read(p []byte) (int, error) {
 func (t *stdinIdentityTee) Close() error { return nil }
 
 // inspect appends p to the partial-line buffer and, for every complete line
-// it yields, logs the client identity of an initialize request.
+// it yields, logs the client identity of a handshake request.
 func (t *stdinIdentityTee) inspect(p []byte) {
 	t.partial = append(t.partial, p...)
 	for {

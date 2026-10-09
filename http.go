@@ -385,9 +385,9 @@ func newCORSHandler(next http.Handler, log *slog.Logger, cfg corsConfig) http.Ha
 }
 
 // bodyReadDeadline bounds how long the total body read may take (see
-// httpBodyReadTimeout). It complements MaxBytesReader, which caps size but
-// not time: a client that dribbles a partial body must not be able to pin
-// a connection and its handler indefinitely.
+// httpBodyReadTimeout). The SDK's MaxRequestBodyBytes caps size but not
+// time, so this is the slow-drip defense: a client that dribbles a partial
+// body must not be able to pin a connection and its handler indefinitely.
 //
 // The mechanism is the socket read deadline, armed once for the whole
 // remaining window via ResponseController.SetReadDeadline and *not* cleared
@@ -434,7 +434,8 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 
 // newClientIdentityPeekHandler wraps next with a body peek that logs the MCP
 // client identity at INFO when the request batch contains a JSON-RPC
-// initialize request (clientInfo is only carried by that request; the SDK's
+// handshake request (initialize, or server/discover for the 2026-07-28
+// protocol — clientInfo is only carried by the handshake; the SDK's
 // stateless session synthesis drops it for every other request, so the
 // transport boundary is the only reliable capture point).
 //
@@ -465,8 +466,8 @@ func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Hand
 
 // clientInfoFromBody inspects a JSON-RPC body — a single message, a batch
 // array, or newline-delimited messages — and returns the client name/version
-// of the first initialize request it finds. The bool result is false when the
-// body carries no initialize request (or is unparseable).
+// of the first handshake request it finds. The bool result is false when the
+// body carries no handshake request (or is unparseable).
 func clientInfoFromBody(body []byte) (name, version string, ok bool) {
 	var batch []json.RawMessage
 	if err := json.Unmarshal(body, &batch); err == nil {
@@ -490,35 +491,64 @@ func clientInfoFromBody(body []byte) (name, version string, ok bool) {
 }
 
 // clientInfoFromMessage inspects one raw JSON-RPC message and reports the
-// client identity of an initialize request: the clientInfo name/version, with
-// absent or empty fields rendered as "unknown". Every other method, and
-// unparseable input, reports !ok.
+// client identity of a handshake request, with absent or empty fields rendered
+// as "unknown". Every other method, and unparseable input, reports !ok. The
+// two handshakes: legacy `initialize` (clientInfo in params) and the
+// 2026-07-28 `server/discover` (clientInfo in params._meta) that modern
+// clients send in its place.
 func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
 	var env struct {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil || env.Method != "initialize" {
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return "", "", false
 	}
-	name, version = "unknown", "unknown"
-	var params mcp.InitializeParams
-	if err := json.Unmarshal(env.Params, &params); err == nil && params.ClientInfo != nil {
-		if params.ClientInfo.Name != "" {
-			name = params.ClientInfo.Name
+	switch env.Method {
+	case "initialize":
+		name, version = "unknown", "unknown"
+		var params mcp.InitializeParams
+		if err := json.Unmarshal(env.Params, &params); err == nil && params.ClientInfo != nil {
+			if params.ClientInfo.Name != "" {
+				name = params.ClientInfo.Name
+			}
+			if params.ClientInfo.Version != "" {
+				version = params.ClientInfo.Version
+			}
 		}
-		if params.ClientInfo.Version != "" {
-			version = params.ClientInfo.Version
+		return name, version, true
+	case "server/discover":
+		name, version = "unknown", "unknown"
+		var params struct {
+			Meta map[string]json.RawMessage `json:"_meta"`
 		}
+		if err := json.Unmarshal(env.Params, &params); err == nil {
+			if raw, found := params.Meta[mcp.MetaKeyClientInfo]; found {
+				var info struct {
+					Name    string `json:"name"`
+					Version string `json:"version"`
+				}
+				if json.Unmarshal(raw, &info) == nil {
+					if info.Name != "" {
+						name = info.Name
+					}
+					if info.Version != "" {
+						version = info.Version
+					}
+				}
+			}
+		}
+		return name, version, true
 	}
-	return name, version, true
+	return "", "", false
 }
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
-// vestigial). It is wrapped (innermost) in a request-body size limit
-// (maxHTTPBodyBytes) and a total body-read deadline (httpBodyReadTimeout);
-// when token is non-empty it is wrapped in bearer-token auth middleware;
+// vestigial). The body size cap (maxHTTPBodyBytes) is enforced by the SDK
+// (MaxRequestBodyBytes); the handler is wrapped (innermost) in a total
+// body-read deadline (httpBodyReadTimeout); when token is non-empty it is
+// wrapped in bearer-token auth middleware;
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
 func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors corsConfig) http.Handler {
@@ -529,14 +559,21 @@ func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors c
 		// sessions are vestigial.
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
+		// go-sdk v1.8.0's internal body cap defaults to 4 MiB; raise it to
+		// the app's documented 10 MiB so 4–10 MiB bodies keep working.
+		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
 	// The client-identity peek runs *through* the size cap and read deadline
 	// applied below (wrap order: peek first, then the cap), so its ReadAll is
-	// bounded exactly like the SDK's own stateless peek.
+	// bounded in size and time exactly like the SDK's own stateless peek.
+	// The cap is applied twice on purpose: it bounds the peek's ReadAll here,
+	// and the SDK's MaxRequestBodyBytes (same 10 MiB) bounds the handler
+	// path after the peek resets the body — an over-cap body 413s in the
+	// SDK, and the peek simply skips its record.
 	var next http.Handler = h
 	h = newClientIdentityPeekHandler(next, log)
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
-	// chunked body must not be read into memory, and a body that dribbles
+	// chunked body must not be read into memory by the peek, and a body that dribbles
 	// must not pin the handler past the total read deadline.
 	next = h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

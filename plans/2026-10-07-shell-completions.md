@@ -3,7 +3,7 @@
 **Branch:** `feat/shell-completions` (from `main` @ `7c4122f`, worktree `/workspace/mcp-commands-shell-completions`)
 **Target version:** v0.11.1
 **Repos touched:** `MKuckert/mcp-commands` (main) + `MKuckert/homebrew-tap` (formula, manual PR)
-Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
+Status: Approved — Plan Reviewer, round 1 (2026-10-07); **complete 2026-10-09** — all units U1–U6 done (see Review Log)
 
 ## Scope
 
@@ -11,8 +11,8 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 - [x] U2: CI lint (shellcheck / `zsh -n` / `fish -n`) + flag-drift check (main repo)
 - [x] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [x] U4: README — Shell completion section (main repo)
-- [ ] U5: tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
-- [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
+- [x] **U5:** tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
+- [x] **U6:** cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
 
 ## Design decisions
 
@@ -568,3 +568,111 @@ expansion misbehaved in this shell); the token can create but not delete PR revi
 (DELETE → 404), so the 16 junk replies still sit in the threads alongside the 8 correct ones
 — the user should delete them from the web UI (they are easily spotted: bodies reading
 `@[4215…]` or `@b_*.txt`).
+### Review (round 7, U5)
+
+**Scope:** tap commit `6b80656` vs `325e443` — single file `Formula/mcp-commands.rb`
+(+10 lines). The `brew` tool is not available in this sandbox, so `brew audit --strict`
+and `brew test` **could not be run here** (the Builder's commit message says the same;
+they remain U6 gates on a real machine). `ruby -c` passes.
+
+**Verified good:**
+
+- **Install directives.** `bash_completion.install` / `zsh_completion.install` /
+  `fish_completion.install` are valid install methods inside `def install`. Sources and
+  destinations match Decision 5/BF-1 exactly: `completion/mcp-commands.bash` →
+  `mcp-commands`, `completion/mcp-commands.zsh` → `_mcp-commands`,
+  `completion/mcp-commands.fish` (name unchanged). ✔
+- **Test target paths** are the canonical Homebrew locations for the three directives:
+  `etc/"bash_completion.d/mcp-commands"`, `share/"zsh/site-functions/_mcp-commands"`,
+  `share/"fish/vendor_completions.d/mcp-commands.fish"`. The zsh `_mcp-commands` autoload
+  name and the fish filename-matches-command-name rule are both correct. `assert_path_exists`
+  is a valid test-block helper. ✔
+- **Style/shape.** 2-space indent, no trailing whitespace, field order untouched, no
+  `link_overwrite`/framework-dep needs (homebrew-core convention, Decision 5). The
+  commit message is accurate. ✔
+
+**N-3 (non-blocking): the install lines sit *outside* the per-stage branches.**
+Decision 5 prescribed the three lines inside **each** of the three stage branches, on the
+grounds that "`*.install` reads from the active staging dir, so the installs must live in
+the same `stage` blocks as `bin.install`". That "must" is a false necessity: outside a
+`resource(…).stage { }` block the `*.install` calls resolve against the **main** (darwin_arm64)
+staging dir, and all three v0.11.1 archives contain identical, platform-independent
+`completion/` scripts (BF-1), so the files resolve on every stage. The Builder's placement
+is 3 lines instead of 9 and matches the common homebrew-core multi-URL pattern. Accepted
+as-is; **Decision 5's placement clause is to be read as amended** by this log (the
+three lines live once, after the if/else branch, in `def install`).
+
+**B-1 (blocking): the test block dropped the functional sourcing checks and the `:test`
+deps.** U5's unit text requires "Three install lines … + test block + `:test` deps
+(Decision 5/6)". Decision 6 prescribes sourcing the **installed** scripts
+(`system "bash", "-c", ". …"`, `system "zsh", "-c", ". …"`,
+`system "fish", "-c", "source …"`) plus `depends_on "zsh" => :test` /
+`depends_on "fish" => :test`, and states why: "Sourcing is a real functional check …
+so the test is deterministic on both macOS and Linuxbrew". The delivered block is
+`assert_path_exists` × 3 only: it proves placement, not loadability, and omits both
+`:test` deps. (A sourcing check without the deps would fail on any Linuxbrew host lacking
+system zsh/fish — the deps are what make it deterministic, so they are required together
+with it.) The scripts are source-safe: the zsh file guards its `compdef` registration with
+`$+functions[compdef]` / `$+builtins[compdef]`, and bash `complete` / fish `complete` are
+builtins in non-interactive `-c` invocations (verified round 1; re-checked against the
+current script contents, including the CR-1/CR-7 renames) — the fix is low-risk.
+
+**Required fix (one follow-up commit on the tap):** add `depends_on "zsh" => :test` and
+`depends_on "fish" => :test` to the formula and add the three Decision 6 `system` sourcing
+lines to the `test do` block. The `assert_path_exists` lines may stay (harmless
+belt-and-braces) but the sourcing lines are mandatory. `bash` needs no dep (always on the
+test PATH).
+
+**Verdict: Changes requested** — 1 issue (B-1). N-3 recorded for the record, no action.
+U5 stays unticked until B-1 is fixed and this review is re-run.
+
+### Review (round 8, U5 — re-review after B-1 fix)
+
+**Scope:** tap commit `153821f` on top of `6b80656` — single file
+`Formula/mcp-commands.rb` (+9 lines). Diff inspected in full; the commit touches
+nothing else.
+
+**B-1 closure — verified:**
+
+- **`:test` deps.** `depends_on "zsh" => :test` and `depends_on "fish" => :test` added,
+  placed idiomatically after `license` and before `livecheck` (homebrew-core field
+  order). `bash` correctly un-depended (always on the test PATH, per Decision 6 and the
+  round-7 note). ✔
+- **Sourcing lines.** The three `system` invocations match Decision 6 exactly in shape —
+  `system "bash", "-c", ". #{etc}/…"`, `system "zsh", "-c", ". #{share}/…"`,
+  `system "fish", "-c", "source #{share}/…"` — multi-arg `system` form (no shell
+  re-parse of the path) and string interpolation of the Gritti::Pathname `etc`/`share`
+  helpers (Pathname#to_s yields the plain path). They source the **installed** files,
+  consistent with the round-7-approved `assert_path_exists` lines and with Decision 6's
+  intent (the plan snippet's `bash_completion`/`zsh_completion` names are shorthand;
+  `etc`/`share` are the test-block-accessible canonical locations). ✔
+- **Source-safety re-checked against the shipped scripts:** zsh — the file's
+  `compdef` registration is wrapped in `if (( $+functions[compdef] || $+builtins[compdef] ))`,
+  which is false in a plain `zsh -c` without compinit, so sourcing only defines the
+  `_mcp-commands` function; the `#compdef` first line is a comment. bash — non-interactive
+  `bash -c` has the `complete`/`compgen` builtins; the script only defines functions and
+  runs one `complete -F`. fish — `complete` is a builtin in non-interactive `fish -c`;
+  the `__mcp_commands_*` helpers reference `commandline` only at call time, never at
+  source time; the `vendor_completions.d` path has no spaces. The explanatory comment
+  in the test block is accurate. ✔
+- **No regressions / new issues:** the `assert_path_exists` lines, install block, and
+  everything else are untouched; `ruby -c` → `Syntax OK`; commit message is accurate.
+
+**Gates unchanged:** `brew audit --strict` / `brew test` still cannot run in this
+sandbox (no `brew`) — U6 remains the gate; not re-flagged.
+
+**Verdict: Approved** — B-1 closed as prescribed by Decision 6; no new issues. N-3
+remains a recorded non-blocker (amended Decision 5 placement, accepted round 7). `brew`
+gates are U6's. All U5 criteria are now satisfied by this verdict; per the
+orchestrator's instruction the `- [ ]` box is left unticked in this re-review.
+
+### Completion (U6, 2026-10-09)
+
+U6 verified by the user on a real macOS machine: `brew audit --formula
+mcp-commands` clean (after the one style fix `26a8324` — current Homebrew
+wants `livecheck` before `depends_on` and `:test` deps alphabetized) and
+`brew test` green (exercises the new source-checks). Release chain complete:
+PR #32 merged → `v0.11.1` tag → GoReleaser release (6 assets incl.
+`completion/` scripts) → tap bump `325e443` → U5 (`6b80656`, `153821f`) →
+style (`26a8324`). Bump idempotency proven locally (awk re-run over the U5
+formula is a byte-identical no-op). **All units U1–U6 complete.**

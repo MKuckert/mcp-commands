@@ -219,7 +219,7 @@ The server runs at most `--max-concurrent` tool subprocesses at once (default **
 
 Every HTTP request body is bounded on **size** and on **time**.
 
-- **Size:** a body larger than **10 MiB** is rejected with `400`, and the connection is closed once the response is sent (Go's `MaxBytesReader` flags the request as too large, which forces the connection shut). The body is never buffered past the cap, so a client cannot use an oversized body to exhaust server memory.
+- **Size:** a body larger than **10 MiB** is rejected with `413`, and the connection is closed once the response is sent (Go's `MaxBytesReader` flags the request as too large, which forces the connection shut). The body is never buffered past the cap, so a client cannot use an oversized body to exhaust server memory.
 - **Time:** a body that takes more than **30 s** in total to arrive is rejected with `400`. This stops a client that opens a POST and then dribbles a few bytes at a time from pinning a connection and its handler slot indefinitely — the size cap alone would not catch that, since a slow drip never grows large.
 
 Both limits are fixed (not flags); they are generous for the real workload (small JSON tool calls) and exist to bound resource use, not to shape traffic.
@@ -242,7 +242,8 @@ Configuration (each flag wins over its env var):
 
 Notes:
 - **Security:** this server executes local scripts, so CORS is **not** a security boundary — it only gates which page's JavaScript can *read* responses. Use the explicit `--allowed-origins` list in production; never `--allow-all-origins` on a public, unauthenticated server. `--allow-all-origins` combined with **no** `--api-key` prints a loud startup warning: any web page opened in a browser can then invoke tools against the server and read their output.
-- **Behavior change in 0.5.0 — the HTTP transport is always stateless:** each request stands on its own. go-sdk v1.6.1 still issues a vestigial `Mcp-Session-Id` header on `initialize` but ignores it on later requests, so clients that stored and resend a session ID keep working. A request missing the `Mcp-Protocol-Version` header defaults to `2025-03-26` (the oldest supported version). `GET` (SSE stream) returns 405.
+- **Behavior change in 0.5.0 — the HTTP transport is always stateless:** each request stands on its own. go-sdk v1.8.0 neither issues nor reads a `Mcp-Session-Id` header in stateless mode, so clients that stored and resend a session ID keep working (the SDK ignores it). A request missing the `Mcp-Protocol-Version` header defaults to `2025-03-26` (the oldest supported version). Non-`POST` methods (including the `GET` SSE stream) return 405.
+- **Protocol `2026-07-28` is negotiated with modern clients** (go-sdk ≥ v1.7.0): current-generation clients (new MCP TypeScript SDK, GitHub MCP) skip the `initialize` handshake and send the protocol version per request via `_meta`. Tool calls behave identically to the legacy protocol, and older clients (`2025-03-26` / `2025-11-25`) are unaffected — the SDK negotiates the highest mutually supported version.
 - **Use a fetch-based client**, e.g. the official MCP TypeScript SDK — raw `EventSource` cannot work in any mode. Send an explicit `Accept: application/json, text/event-stream` header on POST — that is the documented contract (the TS SDK sends both `Accept` values automatically); some clients that send only `*/*` happen to work, but do not rely on it.
 - **Do not set `MCPGODEBUG=enableoriginverification=1`** to "fix" CORS failures: it makes the SDK 403 *all* cross-origin requests inside the handler, where the CORS middleware cannot recover.
 - **Production requires TLS:** the server is cleartext HTTP by default; put a TLS-terminating proxy (Caddy/nginx) in front for browser use — the proxy can also add CORS as an alternative to these flags — or serve HTTPS directly with `--tls-cert`/`--tls-key` (see [TLS](#tls)).
@@ -296,8 +297,8 @@ stdout is reserved for program output only: in stdio mode it carries the MCP pro
 
 What each level adds, from the default up:
 
-- **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
-- **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`file`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
+- **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request, or `server/discover` on the 2026-07-28 protocol), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
+- **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`path`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
 - **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim. Note a *failed* call writes that output in two records (the `WARN` and its `TRACE` pair), so expect up to ~4 MiB of log per failed call at this level.
 
 A sample `trace` record for a failing call:
