@@ -222,9 +222,12 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 
 // TestBuildHTTPHandlerRejectsOversizedBody covers the maxHTTPBodyBytes cap
 // end-to-end: a chunked request whose body exceeds the 10 MiB limit must be
-// rejected (400) without being read into memory. Chunked (ContentLength -1)
+// rejected (413) without being read into memory. Chunked (ContentLength -1)
 // so the SDK's io.ReadAll hits the MaxBytesReader limit mid-stream, exactly
 // the multi-GB-chunked-body exhaustion vector from the review.
+//
+// The Accept header must be valid: the SDK validates it *before* reading the
+// body, so without it the 400 from Accept validation would mask the size cap.
 func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
@@ -244,6 +247,7 @@ func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	}
 	req.ContentLength = -1 // chunked transfer encoding
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -251,11 +255,45 @@ func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized body: status = %d, want 400", res.StatusCode)
+	// The SDK's MaxBytesReader path answers 413 (go-sdk >= 1.8.0).
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: status = %d, want 413", res.StatusCode)
 	}
 	if res.ContentLength >= maxHTTPBodyBytes {
 		t.Fatalf("handler appeared to buffer the whole body (resp Content-Length = %d)", res.ContentLength)
+	}
+}
+
+// TestBuildHTTPHandlerAcceptsBodyBelowCap is the regression guard for
+// go-sdk v1.8.0's MaxRequestBodyBytes option, whose zero value defaults to a
+// 4 MiB internal cap: a 5 MiB body (above that default, below the app's
+// 10 MiB limit) must be served, not rejected.
+func TestBuildHTTPHandlerAcceptsBodyBelowCap(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	defer httpServer.Close()
+
+	// Valid JSON whose clientInfo name carries ~5 MiB of padding.
+	payload := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"` + strings.Repeat("a", 5<<20) + `","version":"1"}}}`
+	body := io.NopCloser(strings.NewReader(payload))
+
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL, body)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = -1 // chunked transfer encoding
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("5 MiB body: status = %d, want 200 (SDK internal cap must be the app's 10 MiB)", res.StatusCode)
 	}
 }
 
@@ -643,11 +681,9 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 }
 
 // TestBuildHTTPHandlerMethodAllowlist: the streamable HTTP transport answers
-// GET (SSE) and other non-POST methods with 405 (the README's documented
-// behavior). The SDK validates the Accept header before the method, so a
-// stream Accept header is set; DELETE is session-scoped and in stateless
-// mode fails its session precondition (400) instead, so it is checked
-// separately.
+// GET (SSE) and all other non-POST methods (including DELETE) with 405 (the
+// README's documented behavior). The SDK validates the Accept header before
+// the method, so a stream Accept header is set.
 func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
@@ -668,7 +704,10 @@ func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 		return resp.StatusCode, resp.Header.Get("Allow")
 	}
 
-	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch} {
+	// go-sdk v1.8.0 checks the method allowlist before the session
+	// precondition, so a DELETE without a session ID gets the 405 like the
+	// other non-POST methods (v1.6.1 answered it with 400).
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		status, allow := do(method)
 		if status != http.StatusMethodNotAllowed {
 			t.Errorf("%s: status = %d, want 405", method, status)
@@ -676,12 +715,6 @@ func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 		if allow != "POST" {
 			t.Errorf("%s: Allow = %q, want POST", method, allow)
 		}
-	}
-
-	// DELETE without a session ID fails the session precondition, not the
-	// method allowlist (stateless mode accepts a session ID and 204s).
-	if status, _ := do(http.MethodDelete); status != http.StatusBadRequest {
-		t.Errorf("DELETE: status = %d, want 400 (missing Mcp-Session-Id)", status)
 	}
 }
 
