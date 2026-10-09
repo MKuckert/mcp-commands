@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -412,6 +415,88 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 
 func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 
+// newClientIdentityPeekHandler wraps next with a body peek that logs the MCP
+// client identity at INFO when the request batch contains a JSON-RPC
+// initialize request (clientInfo is only carried by that request; the SDK's
+// stateless session synthesis drops it for every other request, so the
+// transport boundary is the only reliable capture point).
+//
+// Placement: buildHTTPHandler inserts it *inside* the size/deadline wrapper
+// (the peek is applied to the streamable handler first, then the cap), so the
+// peek's ReadAll runs through the maxHTTPBodyBytes cap and the body-read
+// deadline — exactly where the SDK's own stateless peek runs. A failed read
+// (over cap, deadline) skips the record and passes the request through
+// unchanged: the SDK handler then applies its own limits and answers.
+// Only POST bodies are inspected (GETs and SSE streams carry none); a
+// successfully read body is reset via io.NopCloser(bytes.NewBuffer(...)) like
+// the SDK does.
+func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Body != nil {
+			body, err := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if err == nil {
+				if name, version, ok := clientInfoFromBody(body); ok {
+					log.Info("client connected", "clientName", name, "clientVersion", version)
+				}
+				r.Body = io.NopCloser(bytes.NewBuffer(body))
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientInfoFromBody inspects a JSON-RPC body — a single message, a batch
+// array, or newline-delimited messages — and returns the client name/version
+// of the first initialize request it finds. The bool result is false when the
+// body carries no initialize request (or is unparseable).
+func clientInfoFromBody(body []byte) (name, version string, ok bool) {
+	var batch []json.RawMessage
+	if err := json.Unmarshal(body, &batch); err == nil {
+		for _, raw := range batch {
+			if n, v, found := clientInfoFromMessage(raw); found {
+				return n, v, true
+			}
+		}
+		return "", "", false
+	}
+	// A single message; newline-delimited bodies carry one per line.
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if line == "" {
+			continue
+		}
+		if n, v, found := clientInfoFromMessage([]byte(line)); found {
+			return n, v, true
+		}
+	}
+	return "", "", false
+}
+
+// clientInfoFromMessage inspects one raw JSON-RPC message and reports the
+// client identity of an initialize request: the clientInfo name/version, with
+// absent or empty fields rendered as "unknown". Every other method, and
+// unparseable input, reports !ok.
+func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
+	var env struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Method != "initialize" {
+		return "", "", false
+	}
+	name, version = "unknown", "unknown"
+	var params mcp.InitializeParams
+	if err := json.Unmarshal(env.Params, &params); err == nil && params.ClientInfo != nil {
+		if params.ClientInfo.Name != "" {
+			name = params.ClientInfo.Name
+		}
+		if params.ClientInfo.Version != "" {
+			version = params.ClientInfo.Version
+		}
+	}
+	return name, version, true
+}
+
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
 // vestigial). It is wrapped (innermost) in a request-body size limit
@@ -419,7 +504,7 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 // when token is non-empty it is wrapped in bearer-token auth middleware;
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
-func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
+func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors corsConfig) http.Handler {
 	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
@@ -428,10 +513,15 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
 	})
+	// The client-identity peek runs *through* the size cap and read deadline
+	// applied below (wrap order: peek first, then the cap), so its ReadAll is
+	// bounded exactly like the SDK's own stateless peek.
+	var next http.Handler = h
+	h = newClientIdentityPeekHandler(next, log)
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
 	// chunked body must not be read into memory, and a body that dribbles
 	// must not pin the handler past the total read deadline.
-	next := h
+	next = h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)

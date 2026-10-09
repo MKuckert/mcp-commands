@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -196,7 +198,7 @@ func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
 func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusOK {
@@ -204,10 +206,127 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	}
 }
 
+// TestBuildHTTPHandlerClientIdentityPeek covers N1 on the HTTP side: the body
+// peek logs the client identity from an initialize request at INFO
+// (unknown/unknown when clientInfo is absent), logs at most one record per
+// initialize even in a batch, stays silent for every other request, and
+// resets the body so the SDK handler still serves the request.
+func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		body   string
+		want   []string
+		unwant []string
+	}{
+		{
+			name:   "with clientInfo",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}`,
+			want:   []string{"client connected", "clientName=cursor", "clientVersion=1.2.3"},
+			unwant: []string{"unknown"},
+		},
+		{
+			name:   "without clientInfo",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}`,
+			want:   []string{"client connected", "clientName=unknown", "clientVersion=unknown"},
+			unwant: nil,
+		},
+		{
+			name:   "batch with initialize",
+			body:   `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"vscode","version":"2.0"}}}]`,
+			want:   []string{"client connected", "clientName=vscode", "clientVersion=2.0"},
+			unwant: nil,
+		},
+		{
+			name:   "non-initialize",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+			want:   nil,
+			unwant: []string{"client connected"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestMCPServer(t)
+			var logBuf bytes.Buffer
+			log := slog.New(newLogHandler(&logBuf, levelTrace))
+			httpServer := httptest.NewServer(buildHTTPHandler(server, log, "", corsConfig{}))
+			defer httpServer.Close()
+
+			req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("failed to build request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST failed: %v", err)
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (the peek must not break the request)", resp.StatusCode)
+			}
+
+			out := logBuf.String()
+			for _, s := range tc.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to contain %s", out, s)
+				}
+			}
+			for _, s := range tc.unwant {
+				if strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to NOT contain %s", out, s)
+				}
+			}
+			// At most one identity record per request.
+			if n := strings.Count(out, "client connected"); n > 1 {
+				t.Errorf("client-identity records = %d, want at most 1; log: %q", n, out)
+			}
+		})
+	}
+}
+
+// TestBuildHTTPHandlerClientIdentityPeekBoundedByCap pins the locked peek
+// placement (inside the size/deadline wrapper): an over-cap initialize body
+// is rejected (400) by the MaxBytesReader and produces NO identity record —
+// the peek's ReadAll runs through the cap, not around it.
+func TestBuildHTTPHandlerClientIdentityPeekBoundedByCap(t *testing.T) {
+	t.Parallel()
+	server := newTestMCPServer(t)
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, log, "", corsConfig{}))
+	defer httpServer.Close()
+
+	prefix := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	body := io.NopCloser(io.MultiReader(
+		strings.NewReader(prefix),
+		strings.NewReader(strings.Repeat("a", maxHTTPBodyBytes+1<<10)),
+	))
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", body)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if got := logBuf.String(); strings.Contains(got, "client connected") {
+		t.Errorf("over-cap body produced an identity record, want none; log: %q", got)
+	}
+}
+
 func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", corsConfig{}))
 	defer httpServer.Close()
 
 	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusUnauthorized {
@@ -228,7 +347,7 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	// Valid JSON-RPC initialize prefix, then enough padding to cross the cap.
@@ -557,7 +676,7 @@ func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	req, err := http.NewRequest(http.MethodOptions, httpServer.URL+"/", nil)
@@ -584,7 +703,7 @@ func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(`{}`))
@@ -651,7 +770,7 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	do := func(method string) (int, string) {
@@ -689,7 +808,7 @@ func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	resp := doInitialize(t, httpServer.URL, "Bearer s3cret", "https://app.example.com")
@@ -735,7 +854,7 @@ func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
 func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	resp := doInitialize(t, httpServer.URL, "", "")
@@ -792,7 +911,7 @@ func TestHTTPBodyReadDeadline(t *testing.T) {
 	t.Cleanup(func() { httpBodyReadTimeout = old })
 
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	body := &stallingBody{released: make(chan struct{})}

@@ -593,3 +593,126 @@ func TestRunStdioWatchServes(t *testing.T) {
 		t.Fatal("run did not stop after cancel")
 	}
 }
+
+// TestRunStdioClientIdentity covers N1 on the stdio side end-to-end: the
+// stdin tee (the SDK's transport API never exposes clientInfo to the app)
+// must log the client name and version at INFO from the initialize request
+// while the server keeps serving.
+func TestRunStdioClientIdentity(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+
+	var stderr strings.Builder
+	env := liveEnvFor(t, io.Discard, &stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "stdio-e2e", Version: "9.9.9"}, &mcp.ClientOptions{
+		Capabilities: &mcp.ClientCapabilities{},
+	})
+	session, err := client.Connect(ctx, &mcp.IOTransport{Reader: outR, Writer: inW}, nil)
+	if err != nil {
+		t.Fatalf("client connect over stdio pipe: %v", err)
+	}
+	defer session.Close()
+
+	if _, err := session.ListTools(ctx, nil); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v after cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after cancel")
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"client connected", "clientName=stdio-e2e", "clientVersion=9.9.9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr log = %q, want it to contain %s", out, want)
+		}
+	}
+}
+
+// TestStdinIdentityTee pins the tee contract: pure byte passthrough (no
+// reordering, no buffering past the protocol's newline framing, including
+// line fragments split across reads) and one identity record per initialize
+// line — silent for every other line.
+func TestStdinIdentityTee(t *testing.T) {
+	t.Parallel()
+	initLine := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}` + "\n"
+	listLine := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	var logBuf bytes.Buffer
+	tee := &stdinIdentityTee{in: r, log: slog.New(newLogHandler(&logBuf, levelTrace))}
+
+	// Write in fragments that split the lines mid-JSON to exercise the
+	// partial-line buffer.
+	go func() {
+		for _, chunk := range []string{initLine[:10], initLine[10:25], initLine[25:], listLine[:5], listLine[5:]} {
+			if _, err := w.Write([]byte(chunk)); err != nil {
+				return
+			}
+		}
+		w.Close()
+	}()
+
+	got, err := io.ReadAll(tee)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != initLine+listLine {
+		t.Fatalf("passthrough = %q, want the exact input bytes (no reordering, no loss)", got)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "client connected") || !strings.Contains(out, "clientName=cursor") || !strings.Contains(out, "clientVersion=1.2.3") {
+		t.Errorf("log = %q, want one identity record for the initialize line", out)
+	}
+	if n := strings.Count(out, "client connected"); n != 1 {
+		t.Errorf("identity records = %d, want 1 (tools/list must not log); log: %q", n, out)
+	}
+
+	// Close is a no-op and safe to call twice.
+	if err := tee.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if err := tee.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+}

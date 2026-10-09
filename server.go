@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -108,7 +109,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			env.log.Warn(w)
 		}
 
-		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)
+		handler := buildHTTPHandler(server, env.log, cfg.apiKey.Token, cfg.cors)
 		serverHTTP := &http.Server{
 			Addr:    addr,
 			Handler: handler,
@@ -186,7 +187,15 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 	env.log.Info("Starting stdio server")
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Run(sigCtx, &mcp.StdioTransport{}) }()
+	go func() {
+		// Stdio: client name and version come from the initialize request, which
+		// the SDK's transport API never exposes to the app; the stdin tee
+		// captures it (the HTTP side uses newClientIdentityPeekHandler).
+		serveDone <- server.Run(sigCtx, &mcp.IOTransport{
+			Reader: newStdinIdentityTee(env.log),
+			Writer: os.Stdout,
+		})
+	}()
 	select {
 	case <-sigCtx.Done():
 	case err := <-watchDone:
@@ -211,4 +220,50 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		return fmt.Errorf("stdio server stopped: %w", serveErr)
 	}
 	return nil
+}
+
+// stdinIdentityTee is a pure byte passthrough over os.Stdin that inspects each
+// complete newline-delimited line for an initialize request and logs the MCP
+// client identity at INFO (N1, stdio side). It buffers at most the current
+// line — the protocol's own newline framing — and the inspection is
+// synchronous (a single slog Write per line), so the read path is never
+// blocked on anything external. Close is a no-op: os.Stdin must not be closed
+// from here.
+type stdinIdentityTee struct {
+	in      io.Reader
+	partial []byte
+	log     *slog.Logger
+}
+
+func newStdinIdentityTee(log *slog.Logger) *stdinIdentityTee {
+	return &stdinIdentityTee{in: os.Stdin, log: log}
+}
+
+// Read implements io.Reader: every byte is passed through verbatim.
+func (t *stdinIdentityTee) Read(p []byte) (int, error) {
+	n, err := t.in.Read(p)
+	if n > 0 {
+		t.inspect(p[:n])
+	}
+	return n, err
+}
+
+// Close implements io.Closer as a no-op (the process owns os.Stdin).
+func (t *stdinIdentityTee) Close() error { return nil }
+
+// inspect appends p to the partial-line buffer and, for every complete line
+// it yields, logs the client identity of an initialize request.
+func (t *stdinIdentityTee) inspect(p []byte) {
+	t.partial = append(t.partial, p...)
+	for {
+		i := bytes.IndexByte(t.partial, '\n')
+		if i < 0 {
+			return
+		}
+		line := t.partial[:i]
+		t.partial = t.partial[i+1:]
+		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(line, "\r")); ok {
+			t.log.Info("client connected", "clientName", name, "clientVersion", version)
+		}
+	}
 }
