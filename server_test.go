@@ -292,24 +292,30 @@ func TestLogLevelFiltering(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		level     slog.Level
+		wantTrace bool
 		wantDebug bool
 		wantInfo  bool
 		wantWarn  bool
 		wantError bool
 	}{
-		{"debug", slog.LevelDebug, true, true, true, true},
-		{"info", slog.LevelInfo, false, true, true, true},
-		{"warn", slog.LevelWarn, false, false, true, true},
-		{"error", slog.LevelError, false, false, false, true},
+		{"trace", levelTrace, true, true, true, true, true},
+		{"debug", slog.LevelDebug, false, true, true, true, true},
+		{"info", slog.LevelInfo, false, false, true, true, true},
+		{"warn", slog.LevelWarn, false, false, false, true, true},
+		{"error", slog.LevelError, false, false, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			log := slog.New(newLogHandler(&buf, tc.level))
+			log.Log(context.Background(), levelTrace, "trace record")
 			log.Debug("debug record")
 			log.Info("info record")
 			log.Warn("warn record")
 			log.Error("error record")
 			out := buf.String()
+			if got := strings.Contains(out, "trace record"); got != tc.wantTrace {
+				t.Errorf("trace record captured = %v, want %v; output: %q", got, tc.wantTrace, out)
+			}
 			if got := strings.Contains(out, "debug record"); got != tc.wantDebug {
 				t.Errorf("debug record captured = %v, want %v; output: %q", got, tc.wantDebug, out)
 			}

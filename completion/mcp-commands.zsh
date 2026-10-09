@@ -11,7 +11,7 @@
 _mcp_commands_flags=( --dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help )
 
 # --log-level accepts only these values (logLevels in flags.go).
-_mcp_commands_log_levels=( debug info warn error )
+_mcp_commands_log_levels=( trace debug info warn error )
 
 # The body only runs under the completion system (compinit), where the
 # _files helper is available; the guarded registration below keeps the file

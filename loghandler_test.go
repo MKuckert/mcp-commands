@@ -11,13 +11,14 @@ import (
 	"time"
 )
 
-// TestLogHandlerLevels pins the four standard levels and the one-line,
-// newline-terminated record shape.
+// TestLogHandlerLevels pins the five app levels (trace, debug, info, warn,
+// error) and the one-line, newline-terminated record shape.
 func TestLogHandlerLevels(t *testing.T) {
 	for _, tc := range []struct {
 		level slog.Level
 		want  string
 	}{
+		{levelTrace, "TRACE@"},
 		{slog.LevelDebug, "DEBUG@"},
 		{slog.LevelInfo, "INFO@"},
 		{slog.LevelWarn, "WARN@"},
