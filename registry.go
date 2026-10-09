@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"sync"
@@ -27,16 +28,18 @@ type toolRegistry struct {
 	dirAbs        string
 	globalTimeout time.Duration // applied to tools without a per-tool Timeout:
 	slot          *execSlot     // bounds concurrent tool executions
+	log           *slog.Logger
 	mu            sync.Mutex
 	current       []discoveredTool // last registered set (for the change-diff in replaceIfChanged)
 }
 
-func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration, maxConcurrent int) *toolRegistry {
+func newToolRegistry(server *mcp.Server, dir string, globalTimeout time.Duration, maxConcurrent int, log *slog.Logger) *toolRegistry {
 	return &toolRegistry{
 		server:        server,
 		dirAbs:        dir,
 		globalTimeout: globalTimeout,
 		slot:          newExecSlot(maxConcurrent),
+		log:           log,
 	}
 }
 
@@ -148,7 +151,9 @@ func (r *toolRegistry) addToolLocked(tool discoveredTool) {
 			return textResult(msg, true), nil
 		}
 		defer r.slot.release()
-		return executeTool(ctx, tool.Path, parsedArgs, toolTimeout, r.dirAbs)
+		// req.Params.Arguments is the client's exact arguments JSON as
+		// received on the wire (json.RawMessage) — logged verbatim.
+		return executeTool(ctx, r.log, tool.Name, tool.Path, parsedArgs, string(req.Params.Arguments), toolTimeout, r.dirAbs)
 	})
 
 	r.server.AddTool(&mcp.Tool{

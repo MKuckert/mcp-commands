@@ -101,7 +101,7 @@ func runCallTool(env liveEnv, scriptsAbs, dirAbs string, globalTimeout time.Dura
 		return 1, nil
 	}
 
-	result, err := executeTool(context.Background(), tool.Path, args, resolveToolTimeout(tool, globalTimeout), dirAbs)
+	result, err := executeTool(context.Background(), env.log, name, tool.Path, args, paramsRaw, resolveToolTimeout(tool, globalTimeout), dirAbs)
 	if err != nil {
 		return 1, fmt.Errorf("failed to run tool %q: %w", name, err)
 	}

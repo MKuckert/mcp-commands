@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +158,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 	scriptPath := filepath.Join(scriptDir, "noop.sh")
 	writeScript(t, scriptPath, "#!/bin/bash\necho noop\n")
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{"1flag": "value"}, "", 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, scriptPath, map[string]any{}, 5*time.Second, workDir)
+	result, err := executeTool(ctx, testDiscardLogger, "tool", scriptPath, map[string]any{}, "", 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -433,7 +435,7 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 30*time.Second, tmpDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{}, "", 30*time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -452,5 +454,168 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 	}
 	if !utf8.ValidString(text.Text) {
 		t.Fatal("result text is not valid UTF-8")
+	}
+}
+
+// TestExecuteToolOutcomeLogging pins the N2–N4 record contract: one record
+// per outcome class at the correct level (success → DEBUG; timeout,
+// nonzero-exit, canceled, start-failed → WARN, each with its reason), the
+// raw request params rendered verbatim, the raw output present at TRACE, and
+// no TRACE record at the debug minimum level.
+func TestExecuteToolOutcomeLogging(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+	writeScript(t, filepath.Join(tmpDir, "slow.sh"), "#!/bin/bash\nsleep 5\n")
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+	writeScript(t, filepath.Join(tmpDir, "loud.sh"), "#!/bin/bash\nhead -c 2000000 /dev/zero | tr '\\0' 'a'\n")
+
+	rawArgs := `{"a":1,"b":["x y","z\"q"]}`
+
+	for _, tc := range []struct {
+		name      string
+		script    string
+		timeout   time.Duration
+		cancelCtx bool
+		wantLevel string // the outcome record's level prefix
+		wantMsg   string
+		wantTrace bool // a TRACE record is emitted for every outcome that ran
+		want      []string
+		unwant    []string
+	}{
+		{
+			name:      "success",
+			script:    "ok.sh",
+			timeout:   5 * time.Second,
+			wantLevel: "DEBUG",
+			wantMsg:   "tool call completed",
+			wantTrace: true,
+			want: []string{
+				"tool=ok.sh", "path=", `command=`, "params=",
+				"exitCode=0", "stdoutBytes=6", "stderrBytes=0",
+				"duration=", "truncated=false",
+			},
+		},
+		{
+			name:      "timeout",
+			script:    "slow.sh",
+			timeout:   200 * time.Millisecond,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			want:      []string{`reason=timeout`, "timeout="},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "nonzero-exit",
+			script:    "fail.sh",
+			timeout:   5 * time.Second,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			want:      []string{`reason=nonzero-exit`, "exitCode=3"},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "canceled",
+			script:    "slow.sh",
+			timeout:   0, // no deadline: only a client abort can end it
+			cancelCtx: true,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			want:      []string{`reason=canceled`, "exitCode=-1"},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "start-failed",
+			script:    "missing.sh", // never written: the script does not exist
+			timeout:   5 * time.Second,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: false, // nothing ran, so there is no output to trace
+			want:      []string{`reason=start-failed`},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "truncated-output",
+			script:    "loud.sh",
+			timeout:   10 * time.Second,
+			wantLevel: "DEBUG",
+			wantMsg:   "tool call completed",
+			wantTrace: true,
+			want:      []string{"truncated=true"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			log := slog.New(newLogHandler(&logBuf, levelTrace))
+
+			ctx := context.Background()
+			var cancel context.CancelFunc
+			if tc.cancelCtx {
+				ctx, cancel = context.WithCancel(ctx)
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					cancel()
+				}()
+			}
+
+			path := filepath.Join(tmpDir, tc.script)
+			_, _ = executeTool(ctx, log, tc.script, path, map[string]any{}, rawArgs, tc.timeout, tmpDir)
+			out := logBuf.String()
+
+			// One record per outcome class at the correct level.
+			found := false
+			for _, line := range strings.Split(out, "\n") {
+				if strings.HasPrefix(line, tc.wantLevel+"@") && strings.Contains(line, tc.wantMsg) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("log lacks a %s %q record:\n%s", tc.wantLevel, tc.wantMsg, out)
+			}
+			for _, s := range tc.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to contain %s", out, s)
+				}
+			}
+			for _, s := range tc.unwant {
+				if strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to NOT contain %s", out, s)
+				}
+			}
+			// The raw request params render verbatim (whitespace-quoted, no
+			// re-marshaling of the client's JSON).
+			if !strings.Contains(out, `params=`+strconv.Quote(rawArgs)) {
+				t.Errorf("log = %q, want the raw params verbatim: %s", out, strconv.Quote(rawArgs))
+			}
+			// TRACE carries the raw output on every outcome that ran.
+			if tc.wantTrace && !strings.Contains(out, "TRACE@") {
+				t.Errorf("log lacks a TRACE %q record:\n%s", tc.wantMsg, out)
+			}
+		})
+	}
+}
+
+// TestExecuteToolNoTraceAtDebugLevel pins the level gating: at the debug
+// minimum the TRACE record is dropped while the DEBUG/WARN records remain.
+func TestExecuteToolNoTraceAtDebugLevel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, slog.LevelDebug))
+	_, _ = executeTool(context.Background(), log, "ok.sh", filepath.Join(tmpDir, "ok.sh"), map[string]any{}, "", 5*time.Second, tmpDir)
+	out := logBuf.String()
+
+	if !strings.Contains(out, "DEBUG@") || !strings.Contains(out, "tool call completed") {
+		t.Errorf("log = %q, want the DEBUG record at the debug minimum", out)
+	}
+	if strings.Contains(out, "TRACE@") {
+		t.Errorf("log = %q, want no TRACE record at the debug minimum", out)
 	}
 }

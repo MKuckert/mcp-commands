@@ -79,7 +79,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		Version: serverVersion,
 	}
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent)
+	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent, env.log)
 	registry.replace(tools)
 
 	// --watch is an explicit request: a setup failure, or a fatal mid-run

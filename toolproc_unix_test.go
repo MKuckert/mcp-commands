@@ -74,7 +74,7 @@ func TestExecuteToolKillsProcessGroup(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 2*time.Second, tmpDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{}, "", 2*time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}

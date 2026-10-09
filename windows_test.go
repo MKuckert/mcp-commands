@@ -58,7 +58,7 @@ func TestWindowsExeSmoke(t *testing.T) {
 	}
 
 	// Invocation through the real exec path.
-	res, err := executeTool(context.Background(), exe, map[string]any{}, 30*time.Second, dir)
+	res, err := executeTool(context.Background(), testDiscardLogger, "tool", exe, map[string]any{}, "", 30*time.Second, dir)
 	if err != nil {
 		t.Fatalf("executeTool: %v", err)
 	}

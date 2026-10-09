@@ -23,7 +23,7 @@ func TestWatchTools(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -99,7 +99,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -176,7 +176,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	initial, err := discoverTools(tmpDir, testDiscardLogger)
 	if err != nil {
 		t.Fatalf("discoverTools failed: %v", err)
@@ -269,7 +269,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 2*time.Second, 16)
+	registry := newToolRegistry(server, "", 2*time.Second, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -430,7 +430,7 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 
 	stderr, err := os.CreateTemp(t.TempDir(), "watch-stderr-")
 	if err != nil {
@@ -619,7 +619,7 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 	writeScript(t, betaPath, "#!/bin/bash\necho beta\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{
 		{Name: "alpha", Path: alphaPath, Description: "alpha", Params: []paramSpec{}},
 		{Name: "beta", Path: betaPath, Description: "beta", Params: []paramSpec{}},
@@ -825,7 +825,7 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 func newTestRegistryClient(t *testing.T) (*toolRegistry, *mcp.ClientSession) {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 2*time.Second, 16)
+	registry := newToolRegistry(server, "", 2*time.Second, 16, testDiscardLogger)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	serverSession, err := server.Connect(ctx, serverTransport, nil)
