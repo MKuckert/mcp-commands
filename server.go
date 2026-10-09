@@ -79,6 +79,10 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		Name:    serverName,
 		Version: serverVersion,
 	}
+	// The SDK's internal logger is intentionally nil: the SDK's own records
+	// (session lifecycle, protocol errors) would duplicate the app-level
+	// records this binary emits, and the SDK exposes no level or handler
+	// control beyond that pointer.
 	server := mcp.NewServer(impl, nil)
 	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent, env.log)
 	registry.replace(tools)

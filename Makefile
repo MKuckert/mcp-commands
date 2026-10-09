@@ -1,7 +1,7 @@
 .PHONY: all build test bench coverage clean lint cross buildall
 
 BINARY_NAME := mcp-commands
-VERSION ?= 0.11.1
+VERSION ?= 0.12.0
 LDFLAGS := -X main.serverVersion=$(VERSION)
 
 all: test lint build
