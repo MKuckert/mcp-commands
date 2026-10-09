@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -1004,9 +1003,11 @@ func TestWatchToolsSymlinkTargetEditNotWatched(t *testing.T) {
 func TestWatchPerEventLogs(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	var logBuf bytes.Buffer
+	// captureWriter (mutex-guarded): the handler writes from the watchChanges
+	// goroutine while the test goroutine polls String().
+	logBuf := &captureWriter{}
 	env := liveEnv{
-		log:           slog.New(newLogHandler(&logBuf, levelTrace)),
+		log:           slog.New(newLogHandler(logBuf, levelTrace)),
 		notifySignals: prodNotifySignals,
 		newWatcher:    prodNewWatcher,
 		watcherErrors: prodWatcherErrors,
@@ -1038,7 +1039,8 @@ func TestWatchPerEventLogs(t *testing.T) {
 	if !ready {
 		t.Fatal("watcher never reported the sentinel create event")
 	}
-	logBuf.Reset()
+	// No reset: the sentinel's record stays in the capture; every assertion
+	// below is file-specific, so it is harmless.
 
 	shPath := filepath.Join(tmpDir, "a.sh")
 	if err := os.WriteFile(shPath, []byte("#!/bin/bash\necho a\n"), 0o755); err != nil {

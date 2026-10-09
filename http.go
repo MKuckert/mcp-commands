@@ -478,7 +478,13 @@ func clientInfoFromBody(body []byte) (name, version string, ok bool) {
 		}
 		return "", "", false
 	}
-	// A single message; newline-delimited bodies carry one per line.
+	// A single message, pretty-printed across lines: the batch unmarshal above
+	// fails on a lone object, so try the whole body before falling back to
+	// line-by-line NDJSON.
+	if n, v, found := clientInfoFromMessage(body); found {
+		return n, v, true
+	}
+	// Newline-delimited bodies carry one compact message per line.
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		if line == "" {
 			continue

@@ -281,7 +281,9 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 			failAttrs = append(failAttrs, "timeout", timeout)
 		}
 		log.Warn("tool call failed", failAttrs...)
-		log.Log(ctx, levelTrace, "tool call failed", append(append(attrs, "reason", reason), outputAttrs...)...)
+		// The TRACE record is the WARN record plus the raw output — the same
+		// complete attribute set, so the two never diverge.
+		log.Log(ctx, levelTrace, "tool call failed", failAttrs...)
 
 		if reason == "timeout" {
 			message := fmt.Sprintf("tool timed out after %s", timeout)

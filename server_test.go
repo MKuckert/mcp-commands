@@ -774,3 +774,126 @@ func TestRunLifecycleLogs(t *testing.T) {
 		}
 	}
 }
+
+// TestRunStdioLifecycleLogs pins the stdio side of the N9/N10 lifecycle pair:
+// a signal produces BOTH records, in order.
+func TestRunStdioLifecycleLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+
+	// Not parallel: swaps the process stdin/stdout globals for pipes.
+	// stdin is the READ end (no client writes frames in this test); stdout
+	// is a drained pipe.
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdin, os.Stdout = stdinR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+		stdinR.Close()
+		stdinW.Close()
+		outR.Close()
+		outW.Close()
+	}()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	var logBuf bytes.Buffer
+	var testCancel context.CancelFunc
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			testCancel = c
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir})
+	}()
+
+	// The banner proves the serve goroutine is running before the "signal".
+	buf := logBuf.String()
+	for !strings.Contains(buf, "Starting stdio server") {
+		time.Sleep(10 * time.Millisecond)
+		buf = logBuf.String()
+	}
+	testCancel()
+	// No stdin close: the cancelled context ends the session (the SDK's
+	// conn close unblocks the read); a close here would race the read and
+	// surface as a spurious EBADF.
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{"shutting down", "reason=signal", "server stopped", `mode=stdio`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want it to contain %s", out, want)
+		}
+	}
+	if i, j := strings.Index(out, "shutting down"), strings.Index(out, "server stopped"); i < 0 || j < 0 || i > j {
+		t.Errorf("want \"shutting down\" before \"server stopped\", got:\n%s", out)
+	}
+}
+
+// TestRunWatchErrorShutdownReason pins the shutdown record's reason on a
+// non-signal exit: a fatal watch error must not log reason=signal.
+func TestRunWatchErrorShutdownReason(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+	port := freePort(t)
+
+	var logBuf bytes.Buffer
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			return context.WithCancel(ctx)
+		},
+		newWatcher:    func() (*fsnotify.Watcher, error) { return nil, errors.New("watcher exploded") },
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, host: "127.0.0.1", port: port, watch: true})
+	}()
+
+	// No waitForHTTP: a watcher that fails at setup ends run() within
+	// milliseconds — the HTTP server may never bind. run() must simply
+	// return the watch error.
+	err := <-done
+	if err == nil {
+		t.Fatal("run succeeded, want the watch error")
+	}
+	if !strings.Contains(err.Error(), "watcher exploded") {
+		t.Fatalf("run error = %q, want the watch failure", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "shutting down") {
+		t.Errorf("log = %q, want a shutdown record", out)
+	}
+	if !strings.Contains(out, "reason=watch-error") {
+		t.Errorf("log = %q, want reason=watch-error", out)
+	}
+	if strings.Contains(out, "reason=signal") {
+		t.Errorf("log = %q, must NOT claim a signal fired", out)
+	}
+}

@@ -301,10 +301,11 @@ What each level adds, from the default up:
 - **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`path`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
 - **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim. Note a *failed* call writes that output in two records (the `WARN` and its `TRACE` pair), so expect up to ~4 MiB of log per failed call at this level.
 
-A sample `trace` record for a failing call:
+The record pair for a failing call (`WARN` at the default level, `TRACE` at `trace`) — the `TRACE` record is the `WARN` record's complete set:
 
 ```
 WARN@18:02:11 tool call failed | tool=render path=/scripts/render.sh command="/scripts/render.sh" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=5 duration=1.2s truncated=false reason=nonzero-exit stdout= stderr="boom\n"
+TRACE@18:02:11 tool call failed | tool=render path=/scripts/render.sh command="/scripts/render.sh" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=5 duration=1.2s truncated=false reason=nonzero-exit stdout= stderr="boom\n"
 ```
 
 Failed calls carry a `reason` from a fixed taxonomy: `timeout` (the script outlived its deadline), `nonzero-exit`, `canceled` (the client aborted the request), or `start-failed` (the process never started, e.g. the script is missing).

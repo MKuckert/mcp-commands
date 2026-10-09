@@ -474,15 +474,16 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 	rawArgs := `{"a":1,"b":["x y","z\"q"]}`
 
 	for _, tc := range []struct {
-		name      string
-		script    string
-		timeout   time.Duration
-		cancelCtx bool
-		wantLevel string // the outcome record's level prefix
-		wantMsg   string
-		wantTrace bool // a TRACE record is emitted for every outcome that ran
-		want      []string
-		unwant    []string
+		name           string
+		script         string
+		timeout        time.Duration
+		cancelCtx      bool
+		wantLevel      string // the outcome record's level prefix
+		wantMsg        string
+		wantTrace      bool     // a TRACE record is emitted for every outcome that ran
+		wantTraceField []string // fields the TRACE record must carry (WARN's full set)
+		want           []string
+		unwant         []string
 	}{
 		{
 			name:      "success",
@@ -504,8 +505,11 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			wantLevel: "WARN",
 			wantMsg:   "tool call failed",
 			wantTrace: true,
-			want:      []string{`reason=timeout`, "timeout="},
-			unwant:    []string{"tool call completed"},
+			// The paired TRACE record is the WARN record's complete set —
+			// including the effective timeout.
+			wantTraceField: []string{`reason=timeout`, "timeout="},
+			want:           []string{`reason=timeout`, "timeout="},
+			unwant:         []string{"tool call completed"},
 		},
 		{
 			name:      "nonzero-exit",
@@ -592,9 +596,25 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			if !strings.Contains(out, `params=`+strconv.Quote(rawArgs)) {
 				t.Errorf("log = %q, want the raw params verbatim: %s", out, strconv.Quote(rawArgs))
 			}
-			// TRACE carries the raw output on every outcome that ran.
-			if tc.wantTrace && !strings.Contains(out, "TRACE@") {
-				t.Errorf("log lacks a TRACE %q record:\n%s", tc.wantMsg, out)
+			// TRACE carries the raw output on every outcome that ran, with the
+			// WARN record's complete attribute set (the two must not diverge).
+			if tc.wantTrace {
+				found := false
+				for _, line := range strings.Split(out, "\n") {
+					if !strings.HasPrefix(line, "TRACE@") || !strings.Contains(line, tc.wantMsg) {
+						continue
+					}
+					found = true
+					for _, f := range tc.wantTraceField {
+						if !strings.Contains(line, f) {
+							t.Errorf("TRACE %q record lacks %s:\n%s", tc.wantMsg, f, out)
+						}
+					}
+					break
+				}
+				if !found {
+					t.Errorf("log lacks a TRACE %q record:\n%s", tc.wantMsg, out)
+				}
 			}
 		})
 	}

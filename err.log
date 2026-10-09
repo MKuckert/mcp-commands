@@ -1,3 +1,0 @@
-DEBUG@15:12:11 discovered tools | count=1 scriptsDir=/workspace/.goenv/spot/scripts
-WARN@15:12:11 tool call failed | tool=render path=/workspace/.goenv/spot/scripts/render.sh command="\"/workspace/.goenv/spot/scripts/render.sh\" \"--size\" \"large\"" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=5 duration=4.29205ms truncated=false reason=nonzero-exit stdout= stderr="boom\n"
-TRACE@15:12:11 tool call failed | tool=render path=/workspace/.goenv/spot/scripts/render.sh command="\"/workspace/.goenv/spot/scripts/render.sh\" \"--size\" \"large\"" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=5 duration=4.29205ms truncated=false reason=nonzero-exit stdout= stderr="boom\n"

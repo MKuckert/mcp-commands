@@ -253,6 +253,14 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 			want:   []string{"client connected", "clientName=claude-code", "clientVersion=1.0.6"},
 			unwant: []string{"unknown"},
 		},
+		{
+			// Pretty-printed: a single JSON object across lines is neither a
+			// batch nor NDJSON — the whole body must parse as one message.
+			name:   "pretty-printed initialize",
+			body:   "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {\"clientInfo\": {\"name\": \"pretty\", \"version\": \"2.0\"}}\n}",
+			want:   []string{"client connected", "clientName=pretty", "clientVersion=2.0"},
+			unwant: []string{"unknown"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newTestMCPServer(t)

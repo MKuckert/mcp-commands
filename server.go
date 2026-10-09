@@ -116,6 +116,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		}
 
 		handler := buildHTTPHandler(server, env.log, cfg.apiKey.Token, cfg.cors)
+		stopReason := make(chan string, 1)
 		serverHTTP := &http.Server{
 			Addr:    addr,
 			Handler: handler,
@@ -128,11 +129,20 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 		go func() {
 			<-sigCtx.Done()
-			// No signal name: liveEnv.notifySignals wraps signal.NotifyContext,
-			// which does not expose which signal fired; widening the seam
-			// (channel + manual cancel, plus every test fake) is not justified
-			// for one field.
-			env.log.Info("shutting down", "reason", "signal")
+			// The goroutine fires on ANY cancellation of sigCtx — a signal, or
+			// a cancel() from the watch-error and bind-failure paths below — so
+			// non-signal exits queue their reason first (buffered, so it is
+			// already there by the time cancel() runs) and the record carries
+			// the truth, never a fake reason=signal.
+			// (No signal name: liveEnv.notifySignals wraps signal.NotifyContext,
+			// which does not expose which signal fired.)
+			reason := "signal"
+			select {
+			case r := <-stopReason:
+				reason = r
+			default:
+			}
+			env.log.Info("shutting down", "reason", reason)
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 			_ = serverHTTP.Shutdown(shutdownCtx)
@@ -173,7 +183,9 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		case err := <-watchDone:
 			if err != nil && !errors.Is(err, context.Canceled) {
 				// Not logged here: run() returns it and main() is the single
-				// reporting site (a log here would double the record).
+				// reporting site (a log here would double the record). The
+				// shutdown record must not claim a signal fired.
+				stopReason <- "watch-error"
 				cancel()
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
@@ -185,6 +197,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			// immediately: without this case the process would idle forever
 			// behind a "Starting" banner with no listener.
 			serveErr = err
+		}
+		// A bind/startup failure cancelled the run without a signal: tell the
+		// shutdown record so.
+		if serveErr != nil {
+			stopReason <- "serve-failure"
 		}
 		cancel()
 		if serveErr == nil {
@@ -216,6 +233,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	}
 	select {
 	case <-sigCtx.Done():
+		env.log.Info("shutting down", "reason", "signal")
 	case err := <-watchDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
 			// Not logged here: run() returns it and main() is the single
