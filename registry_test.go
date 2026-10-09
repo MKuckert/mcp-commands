@@ -690,7 +690,7 @@ func TestRegistryCallRejectedLogs(t *testing.T) {
 	}
 }
 
-// TestRegistryAtCapacityLogs pins N5: a call that hits the concurrency cap
+// TestRegistryAtCapacityLogs pins N6: a call that hits the concurrency cap
 // logs one DEBUG record with the tool and the limit.
 func TestRegistryAtCapacityLogs(t *testing.T) {
 	t.Parallel()

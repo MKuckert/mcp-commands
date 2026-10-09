@@ -619,3 +619,51 @@ func TestExecuteToolNoTraceAtDebugLevel(t *testing.T) {
 		t.Errorf("log = %q, want no TRACE record at the debug minimum", out)
 	}
 }
+
+// TestExecuteToolWarnAtWarnLevel pins the upper half of the N3/N4 contract:
+// at the warn minimum, a failed call produces exactly one record — the WARN
+// — with no DEBUG or TRACE companion.
+func TestExecuteToolWarnAtWarnLevel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, slog.LevelWarn))
+	_, _ = executeTool(context.Background(), log, "fail.sh", filepath.Join(tmpDir, "fail.sh"), map[string]any{}, `{"a":1}`, 5*time.Second, tmpDir)
+	out := logBuf.String()
+
+	if !strings.Contains(out, "WARN@") || !strings.Contains(out, "tool call failed") || !strings.Contains(out, `reason=nonzero-exit`) {
+		t.Errorf("log = %q, want the WARN record at the warn minimum", out)
+	}
+	if strings.Contains(out, "DEBUG@") || strings.Contains(out, "TRACE@") {
+		t.Errorf("log = %q, want no DEBUG/TRACE record at the warn minimum", out)
+	}
+}
+
+// TestExecuteToolOutputStaysOneLine pins the single-physical-line contract
+// for tool output: a multi-line script's stdout renders as one record line
+// with \n-escaped newlines, never as a record that splits across lines.
+func TestExecuteToolOutputStaysOneLine(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "multi.sh"), "#!/bin/bash\necho line1\necho line2\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	_, _ = executeTool(context.Background(), log, "multi.sh", filepath.Join(tmpDir, "multi.sh"), map[string]any{}, "", 5*time.Second, tmpDir)
+
+	lines := strings.Split(logBuf.String(), "\n")
+	carriers := 0
+	for _, line := range lines {
+		if strings.Contains(line, "line1") && strings.Contains(line, "line2") {
+			carriers++
+		}
+	}
+	if carriers != 1 {
+		t.Errorf("want exactly one record line carrying both output lines, got %d:\n%s", carriers, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), `line1\nline2`) {
+		t.Errorf("log = %q, want the newlines \n-escaped inside the value", logBuf.String())
+	}
+}

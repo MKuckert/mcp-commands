@@ -759,8 +759,9 @@ func TestRunLifecycleLogs(t *testing.T) {
 	out := logBuf.String()
 	for _, want := range []string{
 		"shutting down",
+		"reason=signal",
 		"server stopped",
-		"transport=http",
+		"mode=http",
 		fmt.Sprintf("port=%d", port),
 		"duration=",
 	} {

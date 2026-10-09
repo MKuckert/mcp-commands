@@ -79,10 +79,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		Name:    serverName,
 		Version: serverVersion,
 	}
-	// The SDK's internal logger is intentionally nil: the SDK's own records
-	// (session lifecycle, protocol errors) would duplicate the app-level
-	// records this binary emits, and the SDK exposes no level or handler
-	// control beyond that pointer.
+	// The SDK's internal logger is intentionally nil (resolves to a discard
+	// handler): the SDK logs `server connecting` at INFO on *every* connect,
+	// and stateless HTTP mode connects per request, so a wired-up SDK logger
+	// would flood the operator log with per-request noise the app's own
+	// records already cover.
 	server := mcp.NewServer(impl, nil)
 	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent, env.log)
 	registry.replace(tools)
@@ -127,9 +128,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 		go func() {
 			<-sigCtx.Done()
-			// No signal name in the record: it would leak the calling
-			// process (the signal's sender) into the log.
-			env.log.Info("shutting down")
+			// No signal name: liveEnv.notifySignals wraps signal.NotifyContext,
+			// which does not expose which signal fired; widening the seam
+			// (channel + manual cancel, plus every test fake) is not justified
+			// for one field.
+			env.log.Info("shutting down", "reason", "signal")
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 			_ = serverHTTP.Shutdown(shutdownCtx)
@@ -190,7 +193,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", serveErr)
 		}
-		env.log.Info("server stopped", "transport", "http", "port", cfg.port, "duration", time.Since(started).Round(time.Millisecond))
+		env.log.Info("server stopped", "mode", "http", "port", cfg.port, "duration", time.Since(started).Round(time.Millisecond))
 		return nil
 	}
 
@@ -208,7 +211,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	// One record per clean stop; both exit paths (client disconnect and
 	// signal) funnel through it.
 	stopped := func() {
-		env.log.Info("server stopped", "transport", "stdio", "duration", time.Since(started).Round(time.Millisecond))
+		env.log.Info("server stopped", "mode", "stdio", "duration", time.Since(started).Round(time.Millisecond))
 	}
 	select {
 	case <-sigCtx.Done():

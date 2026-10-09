@@ -1029,7 +1029,7 @@ func TestWatchPerEventLogs(t *testing.T) {
 		if err := os.WriteFile(sentinel, []byte("done"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(logBuf.String(), "file=ready.txt") {
+		if strings.Contains(logBuf.String(), "ready.txt") {
 			ready = true
 			break
 		}
@@ -1053,18 +1053,20 @@ func TestWatchPerEventLogs(t *testing.T) {
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		out := logBuf.String()
-		if strings.Contains(out, "file=a.sh") && strings.Contains(out, "valid=true") &&
-			strings.Contains(out, "file=note.txt") && strings.Contains(out, "valid=false") {
+		if strings.Contains(out, "a.sh") && strings.Contains(out, "note.txt") {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	out := logBuf.String()
-	if !strings.Contains(out, "watch event") || !strings.Contains(out, "file=a.sh") || !strings.Contains(out, "valid=true") {
-		t.Errorf("log = %q, want a valid a.sh event", out)
+	if !strings.Contains(out, "watch event") || !strings.Contains(out, "a.sh") {
+		t.Errorf("log = %q, want a watch event for a.sh", out)
 	}
-	if !strings.Contains(out, "file=note.txt") || !strings.Contains(out, "valid=false") {
-		t.Errorf("log = %q, want an invalid note.txt event", out)
+	if !strings.Contains(out, "note.txt") {
+		t.Errorf("log = %q, want a watch event for note.txt", out)
+	}
+	if !strings.Contains(out, "valid=true") {
+		t.Errorf("log = %q, want the create/write events marked valid", out)
 	}
 	cancel()
 	<-done

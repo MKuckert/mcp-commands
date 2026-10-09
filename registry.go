@@ -127,7 +127,7 @@ func (r *toolRegistry) replaceLocked(tools []discoveredTool) {
 	}
 	sort.Strings(added)
 	sort.Strings(changed)
-	// One DEBUG record for a replace that changed anything (N6); an
+	// One DEBUG record for a replace that changed anything (N12); an
 	// unchanged replace is a no-op and logs nothing (replaceIfChanged skips
 	// it before the lock; this guards direct replace calls).
 	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {

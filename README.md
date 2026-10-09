@@ -43,7 +43,7 @@ go install github.com/mkuckert/mcp-commands@latest
 **Installing a release** — prefer a prebuilt binary? Each GitHub release ships `mcp-commands_<version>_<os>_<arch>` archives for linux/darwin/windows × amd64/arm64 (tar.gz, zip for Windows) plus a `checksums.txt`. Download the asset for your platform from [the releases page](https://github.com/mkuckert/mcp-commands/releases), extract it, and place the `mcp-commands` binary on your `PATH`:
 
 ```bash
-tar -xzf mcp-commands_0.11.1_linux_amd64.tar.gz   # unzip on Windows
+tar -xzf mcp-commands_0.12.0_linux_amd64.tar.gz   # unzip on Windows
 ```
 
 **Container** — a `Containerfile` is included that wraps a prebuilt release binary (no Go toolchain needed). Build your own image and mount a self-contained scripts directory:
@@ -298,12 +298,12 @@ What each level adds, from the default up:
 
 - **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
 - **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`file`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
-- **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim.
+- **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim. Note a *failed* call writes that output in two records (the `WARN` and its `TRACE` pair), so expect up to ~4 MiB of log per failed call at this level.
 
 A sample `trace` record for a failing call:
 
 ```
-WARN@18:02:11 tool call failed | tool=render path=/scripts/render.sh command="/scripts/render.sh" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=7 duration=1.2s truncated=false reason=nonzero-exit stdout= stderr="boom\n"
+WARN@18:02:11 tool call failed | tool=render path=/scripts/render.sh command="/scripts/render.sh" params={"size":"large"} exitCode=1 stdoutBytes=0 stderrBytes=5 duration=1.2s truncated=false reason=nonzero-exit stdout= stderr="boom\n"
 ```
 
 Failed calls carry a `reason` from a fixed taxonomy: `timeout` (the script outlived its deadline), `nonzero-exit`, `canceled` (the client aborted the request), or `start-failed` (the process never started, e.g. the script is missing).
