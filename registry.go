@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,11 +110,28 @@ func (r *toolRegistry) replaceLocked(tools []discoveredTool) {
 		r.server.RemoveTools(removed...)
 	}
 
+	// The add loop doubles as the diff bookkeeping: names that are new are
+	// "added"; names on both sides that are not toolEqual are "changed".
+	var added, changed []string
 	for _, tool := range tools {
-		if prev, existed := previous[tool.Name]; existed && toolEqual(prev, tool) {
+		prev, existed := previous[tool.Name]
+		if existed && toolEqual(prev, tool) {
 			continue
 		}
+		if existed {
+			changed = append(changed, tool.Name)
+		} else {
+			added = append(added, tool.Name)
+		}
 		r.addToolLocked(tool)
+	}
+	sort.Strings(added)
+	sort.Strings(changed)
+	// One DEBUG record for a replace that changed anything (N6); an
+	// unchanged replace is a no-op and logs nothing (replaceIfChanged skips
+	// it before the lock; this guards direct replace calls).
+	if len(added) > 0 || len(removed) > 0 || len(changed) > 0 {
+		r.log.Debug("tools replaced", "added", strings.Join(added, ", "), "removed", strings.Join(removed, ", "), "changed", strings.Join(changed, ", "))
 	}
 	// Copy: the registry keeps this as its diff baseline and must not alias
 	// the caller's slice.
@@ -138,15 +156,20 @@ func (r *toolRegistry) addToolLocked(tool discoveredTool) {
 	handlerFunc := mcp.ToolHandler(func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		parsedArgs, err := parseToolArguments(req.Params.Arguments)
 		if err != nil {
+			// Malformed arguments JSON: the SDK also reports it as a
+			// protocol error; the app-side WARN keeps it greppable.
+			r.log.Warn("tool call rejected", "tool", tool.Name, "params", string(req.Params.Arguments), "error", err)
 			return nil, err
 		}
 		if err := validateToolArguments(parsedArgs, validator); err != nil {
+			r.log.Warn("tool call rejected", "tool", tool.Name, "params", string(req.Params.Arguments), "error", err)
 			return textResult(err.Error(), true), nil
 		}
 		// Capacity check after validation: malformed calls must not
 		// consume a slot. At capacity, fail cleanly so clients retry
 		// rather than piling up pinned subprocesses.
 		if !r.slot.tryAcquire() {
+			r.log.Debug("tool call at capacity", "tool", tool.Name, "limit", r.slot.limit)
 			msg := fmt.Sprintf("mcp-commands is at capacity (%d concurrent tool executions); please retry shortly", r.slot.limit)
 			return textResult(msg, true), nil
 		}
