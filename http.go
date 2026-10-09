@@ -365,9 +365,9 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 }
 
 // bodyReadDeadline bounds how long the total body read may take (see
-// httpBodyReadTimeout). It complements MaxBytesReader, which caps size but
-// not time: a client that dribbles a partial body must not be able to pin
-// a connection and its handler indefinitely.
+// httpBodyReadTimeout). The SDK's MaxRequestBodyBytes caps size but not
+// time, so this is the slow-drip defense: a client that dribbles a partial
+// body must not be able to pin a connection and its handler indefinitely.
 //
 // The mechanism is the socket read deadline, armed once for the whole
 // remaining window via ResponseController.SetReadDeadline and *not* cleared
@@ -414,9 +414,10 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
-// vestigial). It is wrapped (innermost) in a request-body size limit
-// (maxHTTPBodyBytes) and a total body-read deadline (httpBodyReadTimeout);
-// when token is non-empty it is wrapped in bearer-token auth middleware;
+// vestigial). The body size cap (maxHTTPBodyBytes) is enforced by the SDK
+// (MaxRequestBodyBytes); the handler is wrapped (innermost) in a total
+// body-read deadline (httpBodyReadTimeout); when token is non-empty it is
+// wrapped in bearer-token auth middleware;
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
 func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
@@ -427,18 +428,18 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		// sessions are vestigial.
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
-		// go-sdk v1.8.0 added an internal body cap that defaults to 4 MiB;
-		// raise it to the app's documented 10 MiB so 4–10 MiB bodies keep
-		// working (the outer MaxBytesReader below enforces the same limit).
+		// go-sdk v1.8.0's internal body cap defaults to 4 MiB; raise it to
+		// the app's documented 10 MiB so 4–10 MiB bodies keep working.
 		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
-	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
-	// chunked body must not be read into memory, and a body that dribbles
-	// must not pin the handler past the total read deadline.
+	// Bound the total body-read time (innermost: below auth and CORS) — a
+	// body that dribbles must not pin the handler past the read deadline.
+	// The size cap lives in the SDK (MaxRequestBodyBytes), so no
+	// MaxBytesReader of our own is needed here.
 	next := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)
+			r.Body = &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}
 		}
 		next.ServeHTTP(w, r)
 	})
