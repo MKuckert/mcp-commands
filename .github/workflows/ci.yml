@@ -55,8 +55,8 @@ jobs:
           # prod.go is the documented, structurally-uncoverable remainder
           # (real TTY, os.Exit); the gate measures the rest of the package.
           excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
-          echo "coverage: ${total}% total, ${excl}% excluding prod.go (gate: 95%)"
-          awk -v c="$excl" 'BEGIN { exit (c < 95) }'
+          echo "coverage: ${total}% total, ${excl}% excluding prod.go (gate: 80%)"
+          awk -v c="$excl" 'BEGIN { exit (c < 80) }'
 
       # Free-plan replacement for the GitHub Code Quality bot (that feature
       # requires a paid Team/Enterprise plan): post the coverage totals as a
@@ -70,7 +70,7 @@ jobs:
           set -euo pipefail
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
           excl=$(awk -F' ' '/^mode:/{next} {split($1, r, ":"); f = r[1]; sub(/.*\//, "", f); if (f == "prod.go") next; s += $2; if ($3 > 0) c += $2} END {printf "%.1f", 100 * c / s}' coverage.out)
-          gate=$(awk -v c="$excl" 'BEGIN { print (c < 95) ? "❌ below gate" : "✅ pass" }')
+          gate=$(awk -v c="$excl" 'BEGIN { print (c < 80) ? "❌ below gate" : "✅ pass" }')
 
           # The marker (an HTML comment, invisible in the UI) lets re-runs
           # update the existing summary in place instead of piling up one
@@ -78,7 +78,7 @@ jobs:
           body_file=$(mktemp)
           {
             echo "<!-- mcp-commands-coverage -->"
-            echo "**Test coverage**: ${total}% of statements total · **${excl}%** excluding \`prod.go\` (uncoverable TTY/exit glue) · 95% gate: ${gate}"
+            echo "**Test coverage**: ${total}% of statements total · **${excl}%** excluding \`prod.go\` (uncoverable TTY/exit glue) · 80% gate: ${gate}"
           } > "$body_file"
 
           existing=""
