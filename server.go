@@ -202,7 +202,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		// captures it (the HTTP side uses newClientIdentityPeekHandler).
 		serveDone <- server.Run(sigCtx, &mcp.IOTransport{
 			Reader: newStdinIdentityTee(env.log),
-			Writer: os.Stdout,
+			Writer: nopStdoutCloser{Writer: os.Stdout},
 		})
 	}()
 	// One record per clean stop; both exit paths (client disconnect and
@@ -250,6 +250,16 @@ type stdinIdentityTee struct {
 	partial []byte
 	log     *slog.Logger
 }
+
+// nopStdoutCloser is an io.WriteCloser whose Close is a no-op — the same
+// wrapper the SDK's StdioTransport uses for os.Stdout. The process owns the
+// descriptor: a session end must not close it, which would turn every later
+// write to fd 1 (test output, coverage reports) into "file already closed".
+type nopStdoutCloser struct {
+	io.Writer
+}
+
+func (nopStdoutCloser) Close() error { return nil }
 
 func newStdinIdentityTee(log *slog.Logger) *stdinIdentityTee {
 	return &stdinIdentityTee{in: os.Stdin, log: log}

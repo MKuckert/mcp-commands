@@ -599,7 +599,7 @@ func TestRunStdioWatchServes(t *testing.T) {
 // must log the client name and version at INFO from the initialize request
 // while the server keeps serving.
 func TestRunStdioClientIdentity(t *testing.T) {
-	t.Parallel()
+	// Not parallel: swaps the process stdin/stdout globals for pipes.
 	tmpDir := t.TempDir()
 	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
 
