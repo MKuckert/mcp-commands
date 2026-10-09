@@ -522,6 +522,11 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 				if got := strings.Count(stderr.String(), "ERROR@"); got != 0 {
 					t.Fatalf("run() logged %d ERROR record(s) for the fatal watch termination, want 0:\n%s", got, stderr.String())
 				}
+				// The shutdown record must land with the true reason before
+				// run() returns (the process exits right after).
+				if got := stderr.String(); !strings.Contains(got, "shutting down") || !strings.Contains(got, "reason=watch-error") {
+					t.Fatalf("run() log = %q, want the shutdown record with reason=watch-error", got)
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("run did not return for a fatal watch termination")
 			}
@@ -655,7 +660,7 @@ func TestRunStdioClientIdentity(t *testing.T) {
 	}
 
 	out := stderr.String()
-	for _, want := range []string{"client connected", "clientName=stdio-e2e", "clientVersion=9.9.9"} {
+	for _, want := range []string{"client connected", "transport=stdio", "clientName=stdio-e2e", "clientVersion=9.9.9"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stderr log = %q, want it to contain %s", out, want)
 		}
@@ -668,9 +673,6 @@ func TestRunStdioClientIdentity(t *testing.T) {
 // line — silent for every other line.
 func TestStdinIdentityTee(t *testing.T) {
 	t.Parallel()
-	initLine := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}` + "\n"
-	discLine := `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}` + "\n"
-	listLine := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
 
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -682,10 +684,19 @@ func TestStdinIdentityTee(t *testing.T) {
 	var logBuf bytes.Buffer
 	tee := &stdinIdentityTee{in: r, log: slog.New(newLogHandler(&logBuf, levelTrace))}
 
+	// An over-long line (far past maxIdentityLineBytes, and not a
+	// handshake): it must produce no record and must not grow the
+	// partial-line buffer without bound, while passing through verbatim.
+	bigLine := strings.Repeat("a", maxIdentityLineBytes+5) + "\n"
+	initLine := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}` + "\n"
+	discLine := `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}` + "\n"
+	listLine := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
+
 	// Write in fragments that split the lines mid-JSON to exercise the
-	// partial-line buffer.
+	// partial-line buffer; the over-long line is split mid-line so the
+	// cap triggers before its newline arrives.
 	go func() {
-		for _, chunk := range []string{initLine[:10], initLine[10:25], initLine[25:], discLine[:12], discLine[12:], listLine[:5], listLine[5:]} {
+		for _, chunk := range []string{bigLine[:10], bigLine[10 : maxIdentityLineBytes+3], bigLine[maxIdentityLineBytes+3:], initLine[:10], initLine[10:25], initLine[25:], discLine[:12], discLine[12:], listLine[:5], listLine[5:]} {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}
@@ -697,19 +708,19 @@ func TestStdinIdentityTee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if string(got) != initLine+discLine+listLine {
-		t.Fatalf("passthrough = %q, want the exact input bytes (no reordering, no loss)", got)
+	if len(got) != len(bigLine)+len(initLine)+len(discLine)+len(listLine) || string(got) != bigLine+initLine+discLine+listLine {
+		t.Fatalf("passthrough = %d bytes, want %d (no reordering, no loss)", len(got), len(bigLine)+len(initLine)+len(discLine)+len(listLine))
 	}
 
 	out := logBuf.String()
-	if !strings.Contains(out, "client connected") || !strings.Contains(out, "clientName=cursor") || !strings.Contains(out, "clientVersion=1.2.3") {
+	if !strings.Contains(out, "client connected") || !strings.Contains(out, "transport=stdio") || !strings.Contains(out, "clientName=cursor") || !strings.Contains(out, "clientVersion=1.2.3") {
 		t.Errorf("log = %q, want one identity record for the initialize line", out)
 	}
 	if !strings.Contains(out, "clientName=claude-code") || !strings.Contains(out, "clientVersion=1.0.6") {
 		t.Errorf("log = %q, want one identity record for the server/discover line", out)
 	}
 	if n := strings.Count(out, "client connected"); n != 2 {
-		t.Errorf("identity records = %d, want 2 (tools/list must not log); log: %q", n, out)
+		t.Errorf("identity records = %d, want 2 (the over-long line and tools/list must not log); log: %q", n, out)
 	}
 
 	// Close is a no-op and safe to call twice.
@@ -731,11 +742,14 @@ func TestRunLifecycleLogs(t *testing.T) {
 	writeScript(t, path, "#!/bin/bash\necho ok\n")
 	port := freePort(t)
 
-	var logBuf bytes.Buffer
+	// captureWriter (mutex-guarded): run() writes from its goroutines;
+	// the read below happens after run() returns, but the locked writer
+	// keeps the capture race-free under -race as well.
+	logBuf := &captureWriter{}
 	var testCancel context.CancelFunc
 	env := liveEnv{
 		stdout:           io.Discard,
-		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
@@ -803,11 +817,14 @@ func TestRunStdioLifecycleLogs(t *testing.T) {
 	}()
 	go func() { _, _ = io.Copy(io.Discard, outR) }()
 
-	var logBuf bytes.Buffer
+	// captureWriter (mutex-guarded): run() writes from its goroutines while
+	// the polling loop below calls String() concurrently — a plain
+	// bytes.Buffer would race.
+	logBuf := &captureWriter{}
 	var testCancel context.CancelFunc
 	env := liveEnv{
 		stdout:           io.Discard,
-		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
 		resolveWrapWidth: prodResolveWrapWidth,
 		clearScreen:      prodClearScreen,
 		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
@@ -846,6 +863,76 @@ func TestRunStdioLifecycleLogs(t *testing.T) {
 	}
 	if i, j := strings.Index(out, "shutting down"), strings.Index(out, "server stopped"); i < 0 || j < 0 || i > j {
 		t.Errorf("want \"shutting down\" before \"server stopped\", got:\n%s", out)
+	}
+}
+
+// TestRunStdioShutdownRecordArmRace pins the stdio shutdown record against
+// the select arm race: a fired signal cancels the signal context and the
+// watcher (whose context is that same context) at the same moment, so
+// sigCtx.Done(), watchDone, and serveDone can all be ready together and the
+// select may pick any arm. The "shutting down" record must land exactly once
+// no matter which arm wins.
+// Not parallel: swaps the process stdin/stdout globals for pipes.
+func TestRunStdioShutdownRecordArmRace(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	logBuf := &captureWriter{}
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		// Cancel immediately: sigCtx.Done() is ready from t0, so the
+		// watcher's clean stop and the serve exit race it in the select.
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			c()
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return")
+	}
+
+	out := logBuf.String()
+	if n := strings.Count(out, "shutting down"); n != 1 {
+		t.Fatalf("shutdown records = %d, want exactly 1 (whichever select arm wins);\n%s", n, out)
+	}
+	if !strings.Contains(out, "reason=signal") {
+		t.Errorf("log = %q, want reason=signal (the cancellation came from the signal)", out)
+	}
+	if !strings.Contains(out, "server stopped") {
+		t.Errorf("log = %q, want the server stopped record", out)
 	}
 }
 

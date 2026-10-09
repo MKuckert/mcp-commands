@@ -297,7 +297,7 @@ stdout is reserved for program output only: in stdio mode it carries the MCP pro
 
 What each level adds, from the default up:
 
-- **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request, or `server/discover` on the 2026-07-28 protocol), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
+- **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request, or `server/discover` on the 2026-07-28 protocol; a `transport` field distinguishes the `http` and `stdio` captures), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
 - **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`path`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
 - **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim. Note a *failed* call writes that output in two records (the `WARN` and its `TRACE` pair), so expect up to ~4 MiB of log per failed call at this level.
 

@@ -9,8 +9,8 @@
 1. **TRACE severity.** The stdlib `slog` defines no TRACE constant (only `LevelDebug`/`LevelInfo`/`LevelWarn`/`LevelError`), so the app names one: `const levelTrace = slog.Level(-8)` in `loghandler.go` (`Level(-8).String()` would render `DEBUG-4`; the handler's `levelName` renders it `TRACE`). No new dependency. `flags.go` `logLevels` gains `"trace": levelTrace` (lowest), `resolveLogLevel`'s error text becomes `…one of trace, debug, info, warn, or error…`, the flag help text gains `trace` (`usageLine` renders only `--log-level <level>` with no level list — unchanged). The shipped completion scripts (`completion/mcp-commands.{bash,zsh,fish}`) hard-code the level list and gain `trace` there too. The handler renders levels via `levelName` (the five app levels map to their names; `levelTrace` renders `TRACE`). Precedence (`--log-level` > `LOG_LEVEL` > `info`) and default unchanged.
 2. **Client identity (INFO "client connected").** The MCP `initialize` request carries `clientInfo` (name/version, e.g. Claude Code). Captured at the transport boundary, because the SDK synthesizes session state in our stateless HTTP mode (a bare `notifications/initialized` request gets a fabricated `InitializeParams` without `clientInfo`, so `ServerOptions.InitializedHandler` alone is unreliable):
    - **HTTP:** a middleware in `buildHTTPHandler` peeks POST bodies and, when the batch contains a JSON-RPC `initialize` request, logs the `clientInfo` name/version. **Placement (B1):** inserted *between* the streamable handler and the `MaxBytesReader`+`bodyReadDeadline` wrapper — i.e. wrap the streamable handler with the peek *first*, then apply the size/deadline cap — so the peek's `ReadAll` runs *through* the 10 MiB cap and the 30 s read deadline (exactly where the SDK's own stateless peek runs). Placed outside the cap, the peek would buffer unbounded bodies into memory and read without a time bound. The peek inspects **POST only** (GETs/SSE have no body); a failed or over-cap read **skips the record and passes the request through unchanged** (the SDK's handler then applies its own limits); the body is reset via `io.NopCloser(bytes.NewBuffer(…))` like the SDK.
-   - **stdio:** switch `server.Run(sigCtx, &mcp.StdioTransport{})` to `&mcp.IOTransport{Reader: <tee>, Writer: <no-op-closer over os.Stdout>}` (the SDK's `rwc.Close` closes both ends — a raw `os.Stdout` would close fd 1 at session end); the tee reader inspects the newline-delimited `initialize` line the same way. The tee implements `io.ReadCloser` with a no-op `Close` (wraps `os.Stdin`), is a pure byte passthrough (no reordering, no buffering past the protocol's newline framing), and its inspection is synchronous (one slog emit, a single `Write`) — no channel hand-off that could stall the read path.
-   - Fields: `clientName`, `clientVersion` (absent/empty → `unknown`). One record per `initialize`, at INFO, in both transports.
+   - **stdio:** switch `server.Run(sigCtx, &mcp.StdioTransport{})` to `&mcp.IOTransport{Reader: <tee>, Writer: <no-op-closer over os.Stdout>}` (the SDK's `rwc.Close` closes both ends — a raw `os.Stdout` would close fd 1 at session end); the tee reader inspects the newline-delimited `initialize` line the same way. The tee implements `io.ReadCloser` with a no-op `Close` (wraps `os.Stdin`), is a pure byte passthrough (no reordering, no buffering past the protocol's newline framing — the partial-line buffer is capped at 64 KiB and an over-long line is discarded until its newline, so a malformed frame cannot grow it without bound), and its inspection is synchronous (one slog emit, a single `Write`) — no channel hand-off that could stall the read path.
+   - Fields: `transport` (`http`/`stdio`), `clientName`, `clientVersion` (absent/empty → `unknown`). One record per `initialize`, at INFO, in both transports.
 3. **Tool-call logging, centralized in `executeTool`** (`execute.go`) so the MCP handler and the `--call-tool` diagnostic share it:
    - **DEBUG** on every completed call: tool name+path, raw command line (argv as one quoted string), request parameters (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated` (bounded-capture overflow flag).
    - **TRACE** — the same record plus the **full raw output** (`stdout`, `stderr` attribute values). Multi-line values stay on one physical line: `renderString`/`strconv.Quote` escapes `\n`/`\r`. Size is bounded — `boundedWriter` caps each stream at `maxToolOutputBytes` (1 MiB), so a TRACE record is at most ~2 MiB.
@@ -64,7 +64,7 @@ Target sites are where the record will be emitted after the change.
 
 | # | Site (planned) | Event | Severity | Fields |
 |---|----------------|-------|----------|--------|
-| N1 | `http.go` body-peek middleware / `server.go` stdio stdin tee | client connected (initialize request) | INFO | `clientName`, `clientVersion` |
+| N1 | `http.go` body-peek middleware / `server.go` stdio stdin tee | client connected (initialize request) | INFO | `transport`, `clientName`, `clientVersion` |
 | N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated` |
 | N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each) |
 | N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout |
@@ -80,7 +80,7 @@ Target sites are where the record will be emitted after the change.
 
 ## Tasks
 
-- [ ] **T1 — TRACE level.** `flags.go`: add `"trace"` to `logLevels`, update `resolveLogLevel` error text and flag help (`usageLine` unchanged — it carries no level list). `completion/mcp-commands.{bash,zsh,fish}`: add `trace` to the hard-coded `--log-level` lists (they track `logLevels`). `flags_test.go`: table case for `trace` (resolves to `slog.LevelTrace`), invalid-value text, precedence test extended; verify a TRACE record is captured at `trace` and dropped at `debug` (`server_test.go` filtering test gains a trace column).
+- [ ] **T1 — TRACE level.** `flags.go`: add `"trace"` to `logLevels`, update `resolveLogLevel` error text and flag help (`usageLine` unchanged — it carries no level list). `completion/mcp-commands.{bash,zsh,fish}`: add `trace` to the hard-coded `--log-level` lists (they track `logLevels`). `flags_test.go`: table case for `trace` (resolves to `levelTrace`), invalid-value text, precedence test extended; verify a TRACE record is captured at `trace` and dropped at `debug` (`server_test.go` filtering test gains a trace column).
 - [ ] **T2 — Client identity (N1).** HTTP body-peek middleware in `buildHTTPHandler` per Design decision 2: placed between the streamable handler and the size/deadline wrapper (B1), POST only, initialize detection across batched JSON-RPC messages, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; logs `clientName`/`clientVersion`. Stdio: switch `&mcp.StdioTransport{}` → `&mcp.IOTransport{Reader: tee, Writer: os.Stdout}` with the same inspection; the tee is a no-op-`Close` `io.ReadCloser` wrapping `os.Stdin`, synchronous non-blocking inspection. Tests: HTTP initialize with/without `clientInfo`, batched initialize+other messages, non-initialize POST untouched, over-cap body passes through with no record, peek sits inside the cap (a >10 MiB initialize-shaped body is rejected by `MaxBytesReader`, not buffered unbounded); stdio via `IOTransport` pair.
 - [ ] **T3 — Tool-call records (N2–N4).** `execute.go`: `executeTool` gains two parameters — a `*slog.Logger` (no package global) and the **raw arguments string** (handler: `req.Params.Arguments`; diagnostic: `--params` JSON; never re-marshaled); capture `start` time, argv (`cmd.Args`), exit code (`cmd.ProcessState`), stream sizes, truncation, duration; log `params` from that raw string; emit DEBUG on completion, TRACE with raw output, WARN with raw output + `reason` over the pinned four classes (`timeout` / `nonzero-exit` / `canceled` / `start-failed`). Update the `registry.go` handler and the `runCallTool` call site (`diagnostic.go`) accordingly. `execute_test.go`: one record per outcome class at the right level (incl. a `canceled` case), `params` renders the raw string verbatim (incl. unsorted key order); TRACE absent at `debug`; WARN present at `warn`; output values stay one physical line (newline in output → `\n`-escaped).
 - [ ] **T4 — Registry records (N5–N6, N12).** `toolRegistry` gains a `log *slog.Logger` field (populated from `env.log` at the `server.go` `newToolRegistry` call site; no package global); the handler passes it to `executeTool`. Validation-failure WARN, at-capacity DEBUG, `replaceLocked` diff DEBUG (skip when empty). `registry_test.go` accordingly (logger over a `bytes.Buffer`).
@@ -110,7 +110,7 @@ User directive: Design decision 3 must not re-marshal to JSON when another forma
 **What is right** (all verified against the code and the go-sdk v1.6.1 source, not taken on trust):
 
 - **Catalogue is exact and complete.** All 24 entries checked: file:line, severity, and fields all match (`prod.go:52`, `server.go:73/108/155/187`, `discover.go:77/91/172/193/206`, `diagnostic.go:27/35/40/45/140/146/153/172/187`, `watch.go:119/121/174/178/206`). A grep of all non-test, non-dist Go source found no other production log emission; the only raw-stderr writes are the pre-logger ones in `prod.go`.
-- **TRACE mechanism is sound.** `slog.LevelTrace` (−8) renders as `TRACE` via `Level.String()`; `logHandler.Enabled` is `level >= minLevel` and the rendering is level-agnostic, so no handler change is needed. The `flags.go` changes described (map entry, `resolveLogLevel` text, flag help) are all real seams.
+- **TRACE mechanism is sound.** `levelTrace` (`slog.Level(-8)`) renders as `TRACE` via the handler's `levelName` (raw `Level(-8).String()` would read `DEBUG-4`); `logHandler.Enabled` is `level >= minLevel` and the rendering is level-agnostic, so no handler change is needed. The `flags.go` changes described (map entry, `resolveLogLevel` text, flag help) are all real seams.
 - **Stateless synthesis claim is true.** `streamable.go:422–470`: in stateless mode the SDK peeks the body, and when the batch lacks `initialize` it fabricates `InitializeParams{ProtocolVersion: …}` with **no clientInfo**; `InitializedHandler` (`server.go:1068`) then fires against that fabricated state. A transport-boundary peek is the correct capture point for N1.
 - **Stdio switch is a drop-in.** `StdioTransport.Connect` ≡ `newIOConn(rwc{os.Stdin, nopCloserWriter{os.Stdout}})`; `IOTransport.Connect` ≡ `newIOConn(rwc{t.Reader, t.Writer})` (`transport.go:104–127`). The SDK reads via `json.NewDecoder` in a goroutine, so a byte-passthrough tee is timing-safe.
 - **Tool-call fields are producible** in `executeTool`: `cmd.Args`, `cmd.ProcessState.ExitCode()`, `boundedWriter` sizes + `Truncated()`, duration. The one-line invariant holds: `renderString` routes whitespace-bearing values through `strconv.Quote`, which escapes `\n`/`\r`. The `--call-tool` path calls the same `executeTool`, so centralization works. The existing timeout classification (deadline checked first) matches the plan's `reason` taxonomy precedence.
@@ -154,3 +154,33 @@ Verified the revision diff and re-checked every claim it made against the source
 **New findings.** None blocking. One cosmetic note (non-blocking, no change required): the decision-5 heading still reads "(proposed, each cheap and diagnostic)" while its last bullet is a rejected item — the bullet's own "rejected (review ruling)" label makes the state unambiguous, so leave it.
 
 **Verdict: APPROVED** — no blocking findings; the plan is ready for the Builder. T9's "plan reviewed and updated" obligation is satisfied by this entry.
+
+### Builder — 2026-10-09 (Copilot PR review, round 2)
+
+Fixed the open Copilot findings on PR #38 (the first round was already
+addressed in `66059b7`):
+
+- **Stdio tee line cap.** `stdinIdentityTee.partial` was unbounded until a
+  newline; a malformed over-long frame could grow it without bound. Now capped
+  at 64 KiB (`maxIdentityLineBytes`) with a discard-until-newline state; the
+  byte passthrough is unaffected (the inspector reads a copy).
+- **`transport` field on N1.** Both client-identity records (HTTP peek, stdio
+  tee) now carry `transport=http` / `transport=stdio` so the two
+  transport-boundary captures are distinguishable.
+- **Shutdown-record determinism (HTTP).** The shutdown goroutine now closes an
+  ack channel after the record + `Shutdown`; `run()` waits for it before
+  returning on the serve-failure and watch-error paths (and before `server
+  stopped` on the clean path), so the process can no longer exit before the
+  record lands.
+- **Shutdown-record determinism (stdio).** The `shutting down` record is now
+  emitted after *either* cancellation arm (the clean-watch-stop arm checks
+  `sigCtx.Err()`, the serve-exit arm likewise), and a fatal watch error logs
+  `reason=watch-error` synchronously from `run()` before returning — the
+  record can no longer be skipped by a select arm race.
+- **Test races.** `TestRunStdioLifecycleLogs` (and the HTTP lifecycle test)
+  now use the mutex-guarded `captureWriter` instead of a polled
+  `bytes.Buffer`.
+- **Plan drift.** The two `slog.LevelTrace` references (T1, review log) are
+  corrected to `levelTrace` (`slog.Level(-8)`) — the stdlib defines no such
+  constant; the N1 row and design decision 2 carry the new `transport` field
+  and the tee cap.

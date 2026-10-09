@@ -455,7 +455,7 @@ func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Hand
 			_ = r.Body.Close()
 			if err == nil {
 				if name, version, ok := clientInfoFromBody(body); ok {
-					log.Info("client connected", "clientName", name, "clientVersion", version)
+					log.Info("client connected", "transport", "http", "clientName", name, "clientVersion", version)
 				}
 				r.Body = io.NopCloser(bytes.NewBuffer(body))
 			}

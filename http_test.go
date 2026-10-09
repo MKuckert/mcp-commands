@@ -224,19 +224,19 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 		{
 			name:   "with clientInfo",
 			body:   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}`,
-			want:   []string{"client connected", "clientName=cursor", "clientVersion=1.2.3"},
+			want:   []string{"client connected", "transport=http", "clientName=cursor", "clientVersion=1.2.3"},
 			unwant: []string{"unknown"},
 		},
 		{
 			name:   "without clientInfo",
 			body:   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}`,
-			want:   []string{"client connected", "clientName=unknown", "clientVersion=unknown"},
+			want:   []string{"client connected", "transport=http", "clientName=unknown", "clientVersion=unknown"},
 			unwant: nil,
 		},
 		{
 			name:   "batch with initialize",
 			body:   `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"vscode","version":"2.0"}}}]`,
-			want:   []string{"client connected", "clientName=vscode", "clientVersion=2.0"},
+			want:   []string{"client connected", "transport=http", "clientName=vscode", "clientVersion=2.0"},
 			unwant: nil,
 		},
 		{
@@ -250,7 +250,7 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 			body:   `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`,
 			header: "2026-07-28",
 			method: "server/discover",
-			want:   []string{"client connected", "clientName=claude-code", "clientVersion=1.0.6"},
+			want:   []string{"client connected", "transport=http", "clientName=claude-code", "clientVersion=1.0.6"},
 			unwant: []string{"unknown"},
 		},
 		{
@@ -258,7 +258,7 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 			// batch nor NDJSON — the whole body must parse as one message.
 			name:   "pretty-printed initialize",
 			body:   "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {\"clientInfo\": {\"name\": \"pretty\", \"version\": \"2.0\"}}\n}",
-			want:   []string{"client connected", "clientName=pretty", "clientVersion=2.0"},
+			want:   []string{"client connected", "transport=http", "clientName=pretty", "clientVersion=2.0"},
 			unwant: []string{"unknown"},
 		},
 	} {

@@ -117,6 +117,10 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 		handler := buildHTTPHandler(server, env.log, cfg.apiKey.Token, cfg.cors)
 		stopReason := make(chan string, 1)
+		// Ack from the shutdown goroutine: closed after the shutdown record
+		// and Shutdown, so run() can wait for the record to land before
+		// returning — the process must not exit first.
+		shutdownDone := make(chan struct{})
 		serverHTTP := &http.Server{
 			Addr:    addr,
 			Handler: handler,
@@ -146,6 +150,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 			_ = serverHTTP.Shutdown(shutdownCtx)
+			close(shutdownDone)
 		}()
 
 		serve := serverHTTP.ListenAndServe
@@ -187,6 +192,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 				// shutdown record must not claim a signal fired.
 				stopReason <- "watch-error"
 				cancel()
+				<-shutdownDone
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
 			}
@@ -204,6 +210,10 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			stopReason <- "serve-failure"
 		}
 		cancel()
+		// Settle the shutdown record before proceeding: without this wait,
+		// a serve-failure return could race the goroutine and the process
+		// would exit before the "shutting down" line landed in the log.
+		<-shutdownDone
 		if serveErr == nil {
 			serveErr = <-serveDone
 		}
@@ -236,14 +246,28 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		env.log.Info("shutting down", "reason", "signal")
 	case err := <-watchDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			// Not logged here: run() returns it and main() is the single
-			// reporting site (a log here would double the record).
+			// A fatal watch error ends the process: write the shutdown record
+			// synchronously from run() (no goroutine to race the exit) and
+			// return; main() is the single reporting site for the error itself.
+			env.log.Info("shutting down", "reason", "watch-error")
 			cancel()
 			return fmt.Errorf("failed to watch scripts directory: %w", err)
 		}
+		// A clean watch stop (the watcher's context is the signal context, so
+		// a Canceled result means a signal fired) can win the select over
+		// sigCtx.Done(): emit the record here so it is never skipped.
+		if sigCtx.Err() != nil {
+			env.log.Info("shutting down", "reason", "signal")
+		}
+		// Falls through: the serve outcome must still be reported.
 	case serveErr := <-serveDone:
-		// The client side ended the session (e.g. stdin closed): stop the
-		// watcher and surface the serve result.
+		// The client side ended the session (e.g. stdin closed). If a
+		// signal fired at the same moment (sigCtx done), record it — the
+		// arm that wins the select must not swallow the record.
+		if sigCtx.Err() != nil {
+			env.log.Info("shutting down", "reason", "signal")
+		}
+		// Stop the watcher and surface the serve result.
 		cancel()
 		if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 			return fmt.Errorf("stdio server stopped: %w", serveErr)
@@ -260,17 +284,26 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	return nil
 }
 
+// maxIdentityLineBytes caps the stdin tee's partial-line buffer. A
+// handshake frame (initialize / server/discover) is a few hundred bytes at
+// most; a line longer than this is malformed input, and the bytes up to its
+// newline are discarded so a pathological frame cannot grow the buffer
+// without bound. The passthrough is unaffected: inspect only ever reads a
+// copy of the bytes, never the protocol stream.
+const maxIdentityLineBytes = 64 << 10
+
 // stdinIdentityTee is a pure byte passthrough over os.Stdin that inspects each
 // complete newline-delimited line for a handshake request (initialize, or
 // server/discover for the 2026-07-28 protocol) and logs the MCP client
-// identity at INFO (N1, stdio side). It buffers at most the current
-// line — the protocol's own newline framing — and the inspection is
-// synchronous (a single slog Write per line), so the read path is never
-// blocked on anything external. Close is a no-op: os.Stdin must not be closed
-// from here.
+// identity at INFO (N1, stdio side). It buffers at most the current line —
+// the protocol's own newline framing, capped at maxIdentityLineBytes — and the
+// inspection is synchronous (a single slog Write per line), so the read path
+// is never blocked on anything external. Close is a no-op: os.Stdin must not
+// be closed from here.
 type stdinIdentityTee struct {
 	in      io.Reader
 	partial []byte
+	discard bool // the current line exceeded the cap; drop bytes until its newline
 	log     *slog.Logger
 }
 
@@ -303,16 +336,37 @@ func (t *stdinIdentityTee) Close() error { return nil }
 // inspect appends p to the partial-line buffer and, for every complete line
 // it yields, logs the client identity of a handshake request.
 func (t *stdinIdentityTee) inspect(p []byte) {
+	if t.discard {
+		// An over-long line is being dropped: the bytes already passed
+		// through untouched; look only for the newline that ends it.
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			return
+		}
+		t.discard = false
+		t.partial = nil
+		p = p[i+1:]
+		if len(p) == 0 {
+			return
+		}
+	}
 	t.partial = append(t.partial, p...)
 	for {
 		i := bytes.IndexByte(t.partial, '\n')
 		if i < 0 {
+			// No newline yet: bound the buffer. A real handshake frame is
+			// tiny, so an over-long line is malformed input — discard until
+			// its newline rather than grow without bound.
+			if len(t.partial) > maxIdentityLineBytes {
+				t.discard = true
+				t.partial = nil
+			}
 			return
 		}
 		line := t.partial[:i]
 		t.partial = t.partial[i+1:]
 		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(line, "\r")); ok {
-			t.log.Info("client connected", "clientName", name, "clientVersion", version)
+			t.log.Info("client connected", "transport", "stdio", "clientName", name, "clientVersion", version)
 		}
 	}
 }
