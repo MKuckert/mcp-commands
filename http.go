@@ -427,6 +427,10 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		// sessions are vestigial.
 		Stateless:                  true,
 		DisableLocalhostProtection: cors.disableLocalhostProtection,
+		// go-sdk v1.8.0 added an internal body cap that defaults to 4 MiB;
+		// raise it to the app's documented 10 MiB so 4–10 MiB bodies keep
+		// working (the outer MaxBytesReader below enforces the same limit).
+		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
 	// chunked body must not be read into memory, and a body that dribbles
