@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,38 +31,4 @@ func resolveToolPaths(dir, scriptsDir string) (dirAbs, scriptsAbs string, err er
 		return "", "", fmt.Errorf("dir path inaccessible: %w", err)
 	}
 	return dirAbs, scriptsAbs, nil
-}
-
-func main() {
-	cfg, err := parseCLI(os.Args[1:])
-	if err != nil {
-		var parseErr *flagParseError
-		if errors.As(err, &parseErr) {
-			if errors.Is(err, flag.ErrHelp) {
-				// Full flag help (every flag and its description), exit 0.
-				fmt.Fprint(os.Stdout, parseErr.usage)
-				os.Exit(0)
-			}
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			fmt.Fprint(os.Stderr, parseErr.usage)
-			os.Exit(2)
-		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		if errors.Is(err, errMissingRequiredFlags) {
-			fmt.Fprintln(os.Stderr, usageLine)
-		}
-		os.Exit(1)
-	}
-	if cfg.version {
-		fmt.Println(serverVersion)
-		os.Exit(0)
-	}
-	env := prodLiveEnv(cfg.logLevel)
-	if cfg.mode != modeServer {
-		os.Exit(runDiagnostic(env, cfg.diagnostic))
-	}
-	if err := run(context.Background(), env, cfg.server); err != nil {
-		env.log.Error(err.Error())
-		os.Exit(1)
-	}
 }

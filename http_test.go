@@ -883,3 +883,46 @@ func TestHTTPSecurityPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestAPIKeySourceString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		src  apiKeySource
+		want string
+	}{
+		{name: "none", src: apiKeySourceNone, want: "none"},
+		{name: "flag", src: apiKeySourceFlag, want: "flag"},
+		{name: "file", src: apiKeySourceFile, want: "file"},
+		{name: "env", src: apiKeySourceEnv, want: "env"},
+		// Unknown values fail closed to "none", never to a source name.
+		{name: "unknown", src: apiKeySource(99), want: "none"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.src.String(); got != tt.want {
+				t.Errorf("String() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCORSConfigSummary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  corsConfig
+		want string
+	}{
+		{name: "allow_all", cfg: corsConfig{allowAll: true}, want: "CORS: any origin — dev mode"},
+		{name: "single_origin", cfg: corsConfig{origins: []string{"https://a.example"}}, want: "CORS: 1 origin(s)"},
+		{name: "multiple_origins", cfg: corsConfig{origins: []string{"https://a.example", "https://b.example"}}, want: "CORS: 2 origin(s)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.summary(); got != tt.want {
+				t.Errorf("summary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
