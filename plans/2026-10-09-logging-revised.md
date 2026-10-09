@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging-revised` from `main` (1abaafa). **Target version:** 0.12.0.
 **Source:** user request 2026-10-09. Builds on the completed `2026-10-06-granular-logging.md` (slog on stderr, custom one-line handler, `--log-level`/`LOG_LEVEL`).
-**Status:** Approved (B1/B2 closed, revision 2 of 2026-10-09 — see Review log).
+**Status:** Approved
 
 ## Design decisions (locked)
 
@@ -129,3 +129,24 @@ Target sites are where the record will be emitted after the change.
 12. **Non-blocking — pin the `params` representation in T3.** `executeTool` receives the *parsed* map, not the raw JSON; re-marshaling (`json.Marshal`) for the record is faithful (Go sorts keys) and avoids a signature change. State which is used.
 
 **Verdict: APPROVED** — all mechanisms are feasible as designed; close B1 (peek placement) and B2 (completion files) before building, apply the non-blocking notes where they land naturally.
+
+### Plan Reviewer — 2026-10-09 (c181187..ecd56a6, correction round 1) — **APPROVED**
+
+Verified the revision diff and re-checked every claim it made against the source. **All 14 findings from round 1 are closed:**
+
+1. **B1 (peek placement) — closed.** Design decision 2 now pins the position (between the streamable handler and the `MaxBytesReader`+`bodyReadDeadline` wrapper, peek wrapped first), POST-only inspection, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; T2 mirrors the spec and adds the two matching tests (over-cap body passes with no record; >10 MiB body rejected by the cap, not buffered unbounded). Consistent with `buildHTTPHandler` (`http.go:422`).
+2. **B2 (completion files) — closed.** All three files named in decision 1 and T1; the hard-coded `debug info warn error` lists confirmed at `mcp-commands.bash:12`, `mcp-commands.zsh:14`, `mcp-commands.fish:40`.
+3. **N13 rejection / per-request — closed.** Decision 5 records the rejection with the verified per-request rationale; T7 flipped to documenting the nil choice; table row struck; stateless-quirk risk note corrected.
+4. **T6 tests — closed.** `watch_test.go` per-event case and `server_test.go` lifecycle cases now listed.
+5. **`canceled` reason class — closed.** Four-class taxonomy pinned in decision 3 and T3 (incl. a `canceled` test case); implementable as `execute.go:209–224` stands (non-deadline `waitErr`, killed child → exit −1).
+6. **Logger plumbing — closed.** `*slog.Logger` on `executeTool` (T3) and a `log` field on `toolRegistry` populated from `env.log` (T4); no package global; `liveEnv.log` (`server.go:35`) and `newToolRegistry` (`registry.go:34`) confirmed as the real seams.
+7. **Catalogue non-slog lines — closed.** `prod.go:33/34/37/39` re-verified against the source — all four writes at exactly those lines.
+8. **`usageLine` clause — closed.** Dropped from decision 1 (and stated unchanged in T1); the synopsis does carry only `<level>`.
+9. **Signal-name seam — closed.** No-name decision recorded with justification; N9 fields and T6 aligned to `reason=signal`.
+10. **Tee typing / non-blocking — closed.** `io.ReadCloser` with no-op `Close`, pure passthrough, synchronous single-`Write` inspection, all stated in decision 2 and T2.
+11. **Double body buffering — closed.** New "Double body buffering" risk note with the 2 × min(body, 10 MiB) bound.
+12. **`params` representation — closed.** `json.Marshal` of the parsed map pinned in decision 3 and T3.
+
+**New findings.** None blocking. One cosmetic note (non-blocking, no change required): the decision-5 heading still reads "(proposed, each cheap and diagnostic)" while its last bullet is a rejected item — the bullet's own "rejected (review ruling)" label makes the state unambiguous, so leave it.
+
+**Verdict: APPROVED** — no blocking findings; the plan is ready for the Builder. T9's "plan reviewed and updated" obligation is satisfied by this entry.
