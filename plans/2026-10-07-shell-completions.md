@@ -3,7 +3,7 @@
 **Branch:** `feat/shell-completions` (from `main` @ `7c4122f`, worktree `/workspace/mcp-commands-shell-completions`)
 **Target version:** v0.11.1
 **Repos touched:** `MKuckert/mcp-commands` (main) + `MKuckert/homebrew-tap` (formula, manual PR)
-Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
+Status: Approved — Plan Reviewer, round 1 (2026-10-07); **complete 2026-10-09** — all units U1–U6 done (see Review Log)
 
 ## Scope
 
@@ -12,7 +12,7 @@ Status: Approved — Plan Reviewer, round 1 (2026-10-07); see Review Log
 - [x] U3: version bump 0.11.0 → 0.11.1 (main repo)
 - [x] U4: README — Shell completion section (main repo)
 - [x] **U5:** tap formula — completion installs + test block (tap repo, **after** the v0.11.1 release)
-- [ ] U6: cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
+- [x] **U6:** cut v0.11.1, end-to-end verification (dispatch → formula bump → `brew audit` → install/test)
 
 ## Design decisions
 
@@ -665,3 +665,14 @@ sandbox (no `brew`) — U6 remains the gate; not re-flagged.
 remains a recorded non-blocker (amended Decision 5 placement, accepted round 7). `brew`
 gates are U6's. All U5 criteria are now satisfied by this verdict; per the
 orchestrator's instruction the `- [ ]` box is left unticked in this re-review.
+
+### Completion (U6, 2026-10-09)
+
+U6 verified by the user on a real macOS machine: `brew audit --formula
+mcp-commands` clean (after the one style fix `26a8324` — current Homebrew
+wants `livecheck` before `depends_on` and `:test` deps alphabetized) and
+`brew test` green (exercises the new source-checks). Release chain complete:
+PR #32 merged → `v0.11.1` tag → GoReleaser release (6 assets incl.
+`completion/` scripts) → tap bump `325e443` → U5 (`6b80656`, `153821f`) →
+style (`26a8324`). Bump idempotency proven locally (awk re-run over the U5
+formula is a byte-identical no-op). **All units U1–U6 complete.**
