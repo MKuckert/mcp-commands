@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -149,7 +150,15 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 				if !matched {
 					continue
 				}
-				if event.Op&watchSpecEvents != 0 {
+				relevant := event.Op&watchSpecEvents != 0
+				// Per-file-event record (N11): the raw event stream feeding
+				// the debounced rescan. valid mirrors the discovery filter's
+				// cheap half (a relevant op on a .sh file); the executable-bit
+				// half is applied by the rescan itself, so a valid event can
+				// still yield no tool.
+				valid := relevant && strings.HasSuffix(event.Name, ".sh")
+				env.log.Debug("watch event", "file", filepath.Base(event.Name), "op", event.Op.String(), "valid", valid)
+				if relevant {
 					if !debounceActive {
 						debounceActive = true
 						debounceTimer.Reset(watchDebounceDelay)

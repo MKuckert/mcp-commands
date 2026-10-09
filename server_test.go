@@ -716,3 +716,56 @@ func TestStdinIdentityTee(t *testing.T) {
 		t.Errorf("second Close: %v", err)
 	}
 }
+
+// TestRunLifecycleLogs pins N9/N10: a signal produces a "shutting down"
+// INFO and a clean serve exit a "server stopped" INFO with the transport,
+// the bound port, and the run duration.
+func TestRunLifecycleLogs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "ok.sh")
+	writeScript(t, path, "#!/bin/bash\necho ok\n")
+	port := freePort(t)
+
+	var logBuf bytes.Buffer
+	var testCancel context.CancelFunc
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			testCancel = c
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, host: "127.0.0.1", port: port})
+	}()
+
+	if !waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d", port)) {
+		t.Fatal("server did not come up")
+	}
+	testCancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{
+		"shutting down",
+		"server stopped",
+		"transport=http",
+		fmt.Sprintf("port=%d", port),
+		"duration=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want it to contain %s", out, want)
+		}
+	}
+}

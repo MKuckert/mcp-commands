@@ -59,6 +59,7 @@ func prodLiveEnv(level slog.Level) liveEnv {
 func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	sigCtx, cancel := env.notifySignals(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	started := time.Now()
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(cfg.dir, cfg.scriptsDir)
 	if err != nil {
@@ -122,6 +123,9 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 		go func() {
 			<-sigCtx.Done()
+			// No signal name in the record: it would leak the calling
+			// process (the signal's sender) into the log.
+			env.log.Info("shutting down")
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 			_ = serverHTTP.Shutdown(shutdownCtx)
@@ -182,6 +186,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", serveErr)
 		}
+		env.log.Info("server stopped", "transport", "http", "port", cfg.port, "duration", time.Since(started).Round(time.Millisecond))
 		return nil
 	}
 
@@ -196,6 +201,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			Writer: os.Stdout,
 		})
 	}()
+	// One record per clean stop; both exit paths (client disconnect and
+	// signal) funnel through it.
+	stopped := func() {
+		env.log.Info("server stopped", "transport", "stdio", "duration", time.Since(started).Round(time.Millisecond))
+	}
 	select {
 	case <-sigCtx.Done():
 	case err := <-watchDone:
@@ -212,6 +222,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 			return fmt.Errorf("stdio server stopped: %w", serveErr)
 		}
+		stopped()
 		return nil
 	}
 	// The session (and the watcher) is now done: serve.Run returns once the
@@ -219,6 +230,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	if serveErr := <-serveDone; serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 		return fmt.Errorf("stdio server stopped: %w", serveErr)
 	}
+	stopped()
 	return nil
 }
 
