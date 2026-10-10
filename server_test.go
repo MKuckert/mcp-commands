@@ -732,6 +732,30 @@ func TestStdinIdentityTee(t *testing.T) {
 	}
 }
 
+// TestStdinIdentityTeeSameReadOversizedLine verifies the cap is enforced
+// even when the over-long line and its newline arrive in the same Read, and
+// that inspection resumes on the next line in that same byte slice.
+func TestStdinIdentityTeeSameReadOversizedLine(t *testing.T) {
+	t.Parallel()
+	var logBuf bytes.Buffer
+	tee := &stdinIdentityTee{log: slog.New(newLogHandler(&logBuf, levelTrace))}
+	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"cursor","version":"1.2.3"}}}`
+	input := append([]byte(strings.Repeat("x", maxIdentityLineBytes+1)+"\n"), []byte(initialize+"\n")...)
+
+	tee.inspect(input)
+
+	if len(tee.partial) > maxIdentityLineBytes {
+		t.Errorf("partial buffer length = %d, exceeds cap %d", len(tee.partial), maxIdentityLineBytes)
+	}
+	if tee.discard {
+		t.Error("discard remains set after the oversized line's newline")
+	}
+	out := logBuf.String()
+	if strings.Count(out, "client connected") != 1 || !strings.Contains(out, "clientName=cursor") {
+		t.Errorf("log = %q, want only the valid initialize identity", out)
+	}
+}
+
 // TestRunLifecycleLogs pins N9/N10: a signal produces a "shutting down"
 // INFO and a clean serve exit a "server stopped" INFO with the transport,
 // the bound port, and the run duration.

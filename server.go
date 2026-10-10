@@ -334,39 +334,50 @@ func (t *stdinIdentityTee) Read(p []byte) (int, error) {
 func (t *stdinIdentityTee) Close() error { return nil }
 
 // inspect appends p to the partial-line buffer and, for every complete line
-// it yields, logs the client identity of a handshake request.
+// it yields, logs the client identity of a handshake request. It checks the
+// cap before appending each segment, including when an oversized line and its
+// newline arrive in the same Read.
 func (t *stdinIdentityTee) inspect(p []byte) {
-	if t.discard {
-		// An over-long line is being dropped: the bytes already passed
-		// through untouched; look only for the newline that ends it.
-		i := bytes.IndexByte(p, '\n')
-		if i < 0 {
-			return
-		}
-		t.discard = false
-		t.partial = nil
-		p = p[i+1:]
-		if len(p) == 0 {
-			return
-		}
-	}
-	t.partial = append(t.partial, p...)
-	for {
-		i := bytes.IndexByte(t.partial, '\n')
-		if i < 0 {
-			// No newline yet: bound the buffer. A real handshake frame is
-			// tiny, so an over-long line is malformed input — discard until
-			// its newline rather than grow without bound.
-			if len(t.partial) > maxIdentityLineBytes {
-				t.discard = true
-				t.partial = nil
+	for len(p) > 0 {
+		if t.discard {
+			// An over-long line is being dropped: the bytes already passed
+			// through untouched; look only for the newline that ends it.
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				return
 			}
+			t.discard = false
+			t.partial = t.partial[:0]
+			p = p[i+1:]
+			continue
+		}
+
+		newline := bytes.IndexByte(p, '\n')
+		segment := p
+		if newline >= 0 {
+			segment = p[:newline]
+		}
+		if len(t.partial)+len(segment) > maxIdentityLineBytes {
+			// The current line is too long, whether or not its newline
+			// arrived in this Read. Discard it without ever appending the
+			// oversized segment to partial.
+			t.partial = t.partial[:0]
+			if newline < 0 {
+				t.discard = true
+				return
+			}
+			p = p[newline+1:]
+			continue
+		}
+
+		t.partial = append(t.partial, segment...)
+		if newline < 0 {
 			return
 		}
-		line := t.partial[:i]
-		t.partial = t.partial[i+1:]
-		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(line, "\r")); ok {
+		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(t.partial, "\r")); ok {
 			t.log.Info("client connected", "transport", "stdio", "clientName", name, "clientVersion", version)
 		}
+		t.partial = t.partial[:0]
+		p = p[newline+1:]
 	}
 }
