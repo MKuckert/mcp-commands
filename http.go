@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -455,13 +456,35 @@ func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Hand
 			_ = r.Body.Close()
 			if err == nil {
 				if name, version, ok := clientInfoFromBody(body); ok {
-					log.Info("client connected", "transport", "http", "clientName", name, "clientVersion", version)
+					log.Info("client connected", "transport", "http",
+						"clientName", boundIdentityField(name),
+						"clientVersion", boundIdentityField(version))
 				}
 				r.Body = io.NopCloser(bytes.NewBuffer(body))
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// maxIdentityFieldBytes bounds a single clientInfo field in the N1 record.
+// The HTTP body cap is 10 MiB, so a hostile client can carry megabytes in
+// clientInfo.name; the log must not become an amplification sink. 256 bytes
+// is generous for any real client name/version; over-long values are cut at
+// a rune boundary and marked with an explicit truncation indicator.
+const maxIdentityFieldBytes = 256
+
+// boundIdentityField cuts s to maxIdentityFieldBytes (at a rune boundary)
+// and appends the truncation indicator; short values pass through unchanged.
+func boundIdentityField(s string) string {
+	if len(s) <= maxIdentityFieldBytes {
+		return s
+	}
+	cut := maxIdentityFieldBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\u2026"
 }
 
 // clientInfoFromBody inspects a JSON-RPC body — a single message, a batch

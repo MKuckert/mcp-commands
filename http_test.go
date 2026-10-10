@@ -261,6 +261,15 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 			want:   []string{"client connected", "transport=http", "clientName=pretty", "clientVersion=2.0"},
 			unwant: []string{"unknown"},
 		},
+		{
+			// A hostile client can carry megabytes in clientInfo (the body cap
+			// is 10 MiB); the record must stay bounded and carry an explicit
+			// truncation indicator.
+			name:   "oversized clientInfo is bounded",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"` + strings.Repeat("a", maxIdentityFieldBytes+10) + `","version":"` + strings.Repeat("b", maxIdentityFieldBytes+10) + `"}}}`,
+			want:   []string{"client connected", "transport=http", "clientName=" + strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
+			unwant: []string{strings.Repeat("a", maxIdentityFieldBytes+1)},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := newTestMCPServer(t)
@@ -344,6 +353,33 @@ func TestBuildHTTPHandlerClientIdentityPeekBoundedByCap(t *testing.T) {
 	}
 	if got := logBuf.String(); strings.Contains(got, "client connected") {
 		t.Errorf("over-cap body produced an identity record, want none; log: %q", got)
+	}
+}
+
+// TestBoundIdentityField pins the N1 field bound: short values (incl. one
+// exactly at the cap) pass through; over-long values are cut to
+// maxIdentityFieldBytes at a rune boundary and marked with the truncation
+// indicator, so no client can grow a log record past cap + marker.
+func TestBoundIdentityField(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "short", in: "cursor", want: "cursor"},
+		{name: "exact cap", in: strings.Repeat("a", maxIdentityFieldBytes), want: strings.Repeat("a", maxIdentityFieldBytes)},
+		{name: "over by one", in: strings.Repeat("a", maxIdentityFieldBytes+1), want: strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
+		// A multi-byte rune straddling the cut must not be split: 86 × "€"
+		// (3 bytes) + "a" puts a continuation byte at index 256, so the cut
+		// backs off to the start of the last rune (255).
+		{name: "rune boundary", in: strings.Repeat("€", 86) + "a", want: strings.Repeat("€", 85) + "\u2026"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundIdentityField(tc.in); got != tc.want {
+				t.Errorf("boundIdentityField = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

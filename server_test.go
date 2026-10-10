@@ -397,7 +397,7 @@ func TestRunWatchSetupFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 	env.newWatcher = func() (*fsnotify.Watcher, error) {
 		return nil, errors.New("inotify unavailable")
@@ -443,7 +443,7 @@ func TestRunHTTPBindFailure(t *testing.T) {
 	defer blocker.Close()
 	port := blocker.Addr().(*net.TCPAddr).Port
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -493,7 +493,7 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 	for name, port := range map[string]int{"stdio": 0, "http": port} {
 		name, port := name, port
 		t.Run(name, func(t *testing.T) {
-			var stderr strings.Builder
+			var stderr captureWriter
 			env := liveEnvFor(t, io.Discard, &stderr)
 			closed := make(chan error)
 			close(closed)
@@ -561,7 +561,7 @@ func TestRunStdioWatchServes(t *testing.T) {
 		os.Stdin, os.Stdout = oldStdin, oldStdout
 	}()
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -626,7 +626,10 @@ func TestRunStdioClientIdentity(t *testing.T) {
 		os.Stdin, os.Stdout = oldStdin, oldStdout
 	}()
 
-	var stderr strings.Builder
+	// captureWriter (mutex-guarded): the SDK's stdin reader goroutine emits
+	// the identity record while run() logs from its own; a plain
+	// strings.Builder would race under -race.
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -691,12 +694,15 @@ func TestStdinIdentityTee(t *testing.T) {
 	initLine := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}` + "\n"
 	discLine := `{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}` + "\n"
 	listLine := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
+	// An over-long clientInfo name (past maxIdentityFieldBytes): the record
+	// must be bounded and carry the truncation indicator.
+	longNameLine := `{"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"` + strings.Repeat("n", maxIdentityFieldBytes+10) + `","version":"1"}}}` + "\n"
 
 	// Write in fragments that split the lines mid-JSON to exercise the
 	// partial-line buffer; the over-long line is split mid-line so the
 	// cap triggers before its newline arrives.
 	go func() {
-		for _, chunk := range []string{bigLine[:10], bigLine[10 : maxIdentityLineBytes+3], bigLine[maxIdentityLineBytes+3:], initLine[:10], initLine[10:25], initLine[25:], discLine[:12], discLine[12:], listLine[:5], listLine[5:]} {
+		for _, chunk := range []string{bigLine[:10], bigLine[10 : maxIdentityLineBytes+3], bigLine[maxIdentityLineBytes+3:], initLine[:10], initLine[10:25], initLine[25:], discLine[:12], discLine[12:], longNameLine[:20], longNameLine[20:], listLine[:5], listLine[5:]} {
 			if _, err := w.Write([]byte(chunk)); err != nil {
 				return
 			}
@@ -708,8 +714,8 @@ func TestStdinIdentityTee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
-	if len(got) != len(bigLine)+len(initLine)+len(discLine)+len(listLine) || string(got) != bigLine+initLine+discLine+listLine {
-		t.Fatalf("passthrough = %d bytes, want %d (no reordering, no loss)", len(got), len(bigLine)+len(initLine)+len(discLine)+len(listLine))
+	if len(got) != len(bigLine)+len(initLine)+len(discLine)+len(longNameLine)+len(listLine) || string(got) != bigLine+initLine+discLine+longNameLine+listLine {
+		t.Fatalf("passthrough = %d bytes, want %d (no reordering, no loss)", len(got), len(bigLine)+len(initLine)+len(discLine)+len(longNameLine)+len(listLine))
 	}
 
 	out := logBuf.String()
@@ -719,8 +725,14 @@ func TestStdinIdentityTee(t *testing.T) {
 	if !strings.Contains(out, "clientName=claude-code") || !strings.Contains(out, "clientVersion=1.0.6") {
 		t.Errorf("log = %q, want one identity record for the server/discover line", out)
 	}
-	if n := strings.Count(out, "client connected"); n != 2 {
-		t.Errorf("identity records = %d, want 2 (the over-long line and tools/list must not log); log: %q", n, out)
+	if !strings.Contains(out, "clientName="+strings.Repeat("n", maxIdentityFieldBytes)+"\u2026") {
+		t.Errorf("log = %q, want the over-long name bounded with the truncation indicator", out)
+	}
+	if strings.Contains(out, strings.Repeat("n", maxIdentityFieldBytes+1)) {
+		t.Errorf("log = %q, want the over-long name cut to the cap", out)
+	}
+	if n := strings.Count(out, "client connected"); n != 3 {
+		t.Errorf("identity records = %d, want 3 (the over-long line and tools/list must not log); log: %q", n, out)
 	}
 
 	// Close is a no-op and safe to call twice.

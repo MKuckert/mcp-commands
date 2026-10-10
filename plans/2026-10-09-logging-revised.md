@@ -2,7 +2,7 @@
 
 **Branch:** `feature/logging-revised` from `main` (1abaafa). **Target version:** 0.12.0.
 **Source:** user request 2026-10-09. Builds on the completed `2026-10-06-granular-logging.md` (slog on stderr, custom one-line handler, `--log-level`/`LOG_LEVEL`).
-**Status:** Approved
+**Status:** Completed
 
 ## Design decisions (locked)
 
@@ -64,7 +64,7 @@ Target sites are where the record will be emitted after the change.
 
 | # | Site (planned) | Event | Severity | Fields |
 |---|----------------|-------|----------|--------|
-| N1 | `http.go` body-peek middleware / `server.go` stdio stdin tee | client connected (initialize request) | INFO | `transport`, `clientName`, `clientVersion` |
+| N1 | `http.go` body-peek middleware / `server.go` stdio stdin tee | client connected (initialize request) | INFO | `transport`, `clientName`, `clientVersion` (each field cut at 256 B, rune-boundary safe, with an explicit truncation indicator — a 10 MiB body must not become a multi-MiB log record) |
 | N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated` |
 | N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each) |
 | N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout |
@@ -80,15 +80,15 @@ Target sites are where the record will be emitted after the change.
 
 ## Tasks
 
-- [ ] **T1 — TRACE level.** `flags.go`: add `"trace"` to `logLevels`, update `resolveLogLevel` error text and flag help (`usageLine` unchanged — it carries no level list). `completion/mcp-commands.{bash,zsh,fish}`: add `trace` to the hard-coded `--log-level` lists (they track `logLevels`). `flags_test.go`: table case for `trace` (resolves to `levelTrace`), invalid-value text, precedence test extended; verify a TRACE record is captured at `trace` and dropped at `debug` (`server_test.go` filtering test gains a trace column).
-- [ ] **T2 — Client identity (N1).** HTTP body-peek middleware in `buildHTTPHandler` per Design decision 2: placed between the streamable handler and the size/deadline wrapper (B1), POST only, initialize detection across batched JSON-RPC messages, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; logs `clientName`/`clientVersion`. Stdio: switch `&mcp.StdioTransport{}` → `&mcp.IOTransport{Reader: tee, Writer: os.Stdout}` with the same inspection; the tee is a no-op-`Close` `io.ReadCloser` wrapping `os.Stdin`, synchronous non-blocking inspection. Tests: HTTP initialize with/without `clientInfo`, batched initialize+other messages, non-initialize POST untouched, over-cap body passes through with no record, peek sits inside the cap (a >10 MiB initialize-shaped body is rejected by `MaxBytesReader`, not buffered unbounded); stdio via `IOTransport` pair.
-- [ ] **T3 — Tool-call records (N2–N4).** `execute.go`: `executeTool` gains two parameters — a `*slog.Logger` (no package global) and the **raw arguments string** (handler: `req.Params.Arguments`; diagnostic: `--params` JSON; never re-marshaled); capture `start` time, argv (`cmd.Args`), exit code (`cmd.ProcessState`), stream sizes, truncation, duration; log `params` from that raw string; emit DEBUG on completion, TRACE with raw output, WARN with raw output + `reason` over the pinned four classes (`timeout` / `nonzero-exit` / `canceled` / `start-failed`). Update the `registry.go` handler and the `runCallTool` call site (`diagnostic.go`) accordingly. `execute_test.go`: one record per outcome class at the right level (incl. a `canceled` case), `params` renders the raw string verbatim (incl. unsorted key order); TRACE absent at `debug`; WARN present at `warn`; output values stay one physical line (newline in output → `\n`-escaped).
-- [ ] **T4 — Registry records (N5–N6, N12).** `toolRegistry` gains a `log *slog.Logger` field (populated from `env.log` at the `server.go` `newToolRegistry` call site; no package global); the handler passes it to `executeTool`. Validation-failure WARN, at-capacity DEBUG, `replaceLocked` diff DEBUG (skip when empty). `registry_test.go` accordingly (logger over a `bytes.Buffer`).
-- [ ] **T5 — CORS preflight records (N7–N8).** `http.go`: DEBUG on allowed preflight, WARN on rejected origin. `http_test.go`: allowed/denied preflight at `debug`; denied origin record at `warn`; non-preflight requests emit nothing.
-- [ ] **T6 — Lifecycle + rescan records (N9–N11).** `server.go` `shutting down` (INFO, `reason=signal`, no name) / `server stopped` (INFO, `mode`); `watch.go` per-event DEBUG; keep the existing `rescan fired` DEBUG. Tests: `watch_test.go` case asserting the per-event DEBUG record; `server_test.go` cases for the two lifecycle records.
-- [ ] **T7 — SDK logger: document the nil choice.** `server.go`: `mcp.NewServer(impl, nil)` gains a comment pinning why `ServerOptions.Logger` stays nil — the SDK logs `server connecting` (INFO) at *every* connect and stateless HTTP connects per *request*, so wiring the app logger would double-log every request; nil maps to `slog.DiscardHandler` (deliberate silence). (Original optional wiring rejected in review.)
-- [ ] **T8 — Docs.** `README.md` Logging section: `trace` in the level list (both `--log-level` and `LOG_LEVEL` rows), the new records (client connected, tool call DEBUG/TRACE/WARN with the output-bound note, CORS preflight, lifecycle), one new sample line; flag table row for `--log-level`; `Makefile` `VERSION ?= 0.12.0`; version refs in README.
-- [ ] **T9 — Final.** Full suite `go test ./...` + `go vet ./...` + `gofmt -l .` green; plan reviewed and updated.
+- [x] **T1 — TRACE level.** `flags.go`: add `"trace"` to `logLevels`, update `resolveLogLevel` error text and flag help (`usageLine` unchanged — it carries no level list). `completion/mcp-commands.{bash,zsh,fish}`: add `trace` to the hard-coded `--log-level` lists (they track `logLevels`). `flags_test.go`: table case for `trace` (resolves to `levelTrace`), invalid-value text, precedence test extended; verify a TRACE record is captured at `trace` and dropped at `debug` (`server_test.go` filtering test gains a trace column).
+- [x] **T2 — Client identity (N1).** HTTP body-peek middleware in `buildHTTPHandler` per Design decision 2: placed between the streamable handler and the size/deadline wrapper (B1), POST only, initialize detection across batched JSON-RPC messages, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; logs `clientName`/`clientVersion`. Stdio: switch `&mcp.StdioTransport{}` → `&mcp.IOTransport{Reader: tee, Writer: os.Stdout}` with the same inspection; the tee is a no-op-`Close` `io.ReadCloser` wrapping `os.Stdin`, synchronous non-blocking inspection. Tests: HTTP initialize with/without `clientInfo`, batched initialize+other messages, non-initialize POST untouched, over-cap body passes through with no record, peek sits inside the cap (a >10 MiB initialize-shaped body is rejected by `MaxBytesReader`, not buffered unbounded); stdio via `IOTransport` pair.
+- [x] **T3 — Tool-call records (N2–N4).** `execute.go`: `executeTool` gains two parameters — a `*slog.Logger` (no package global) and the **raw arguments string** (handler: `req.Params.Arguments`; diagnostic: `--params` JSON; never re-marshaled); capture `start` time, argv (`cmd.Args`), exit code (`cmd.ProcessState`), stream sizes, truncation, duration; log `params` from that raw string; emit DEBUG on completion, TRACE with raw output, WARN with raw output + `reason` over the pinned four classes (`timeout` / `nonzero-exit` / `canceled` / `start-failed`). Update the `registry.go` handler and the `runCallTool` call site (`diagnostic.go`) accordingly. `execute_test.go`: one record per outcome class at the right level (incl. a `canceled` case), `params` renders the raw string verbatim (incl. unsorted key order); TRACE absent at `debug`; WARN present at `warn`; output values stay one physical line (newline in output → `\n`-escaped).
+- [x] **T4 — Registry records (N5–N6, N12).** `toolRegistry` gains a `log *slog.Logger` field (populated from `env.log` at the `server.go` `newToolRegistry` call site; no package global); the handler passes it to `executeTool`. Validation-failure WARN, at-capacity DEBUG, `replaceLocked` diff DEBUG (skip when empty). `registry_test.go` accordingly (logger over a `bytes.Buffer`).
+- [x] **T5 — CORS preflight records (N7–N8).** `http.go`: DEBUG on allowed preflight, WARN on rejected origin. `http_test.go`: allowed/denied preflight at `debug`; denied origin record at `warn`; non-preflight requests emit nothing.
+- [x] **T6 — Lifecycle + rescan records (N9–N11).** `server.go` `shutting down` (INFO, `reason=signal`, no name) / `server stopped` (INFO, `mode`); `watch.go` per-event DEBUG; keep the existing `rescan fired` DEBUG. Tests: `watch_test.go` case asserting the per-event DEBUG record; `server_test.go` cases for the two lifecycle records.
+- [x] **T7 — SDK logger: document the nil choice.** `server.go`: `mcp.NewServer(impl, nil)` gains a comment pinning why `ServerOptions.Logger` stays nil — the SDK logs `server connecting` (INFO) at *every* connect and stateless HTTP connects per *request*, so wiring the app logger would double-log every request; nil maps to `slog.DiscardHandler` (deliberate silence). (Original optional wiring rejected in review.)
+- [x] **T8 — Docs.** `README.md` Logging section: `trace` in the level list (both `--log-level` and `LOG_LEVEL` rows), the new records (client connected, tool call DEBUG/TRACE/WARN with the output-bound note, CORS preflight, lifecycle), one new sample line; flag table row for `--log-level`; `Makefile` `VERSION ?= 0.12.0`; version refs in README.
+- [x] **T9 — Final.** Full suite `go test ./...` + `go vet ./...` + `gofmt -l .` green; plan reviewed and updated.
 
 ## Risks & notes
 
@@ -184,3 +184,34 @@ addressed in `66059b7`):
   corrected to `levelTrace` (`slog.Level(-8)`) — the stdlib defines no such
   constant; the N1 row and design decision 2 carry the new `transport` field
   and the tee cap.
+
+### Builder — 2026-10-10 (Copilot PR review, rounds 3–4)
+
+Fixed the remaining Copilot findings on PR #38:
+
+- **Same-read tee cap bypass** (`19fb7cf`). The 64 KiB line cap was skipped
+  when the over-long line and its newline arrived in one `Read`. `inspect`
+  now checks `len(partial)+len(segment)` before appending each pre-newline
+  segment; an oversized line is discarded through its newline without ever
+  growing `partial` past the cap. `TestStdinIdentityTeeSameReadOversizedLine`
+  pins it.
+- **Start-failed record contract** (`execute.go`). The `start-failed` path —
+  the only failed outcome that lacked the paired TRACE record and the common
+  N2 fields — now emits WARN + TRACE from one complete attribute slice:
+  `exitCode=-1`, zero byte counts, empty output, `truncated=false`. No
+  failed outcome diverges from the documented contract. The start-failed
+  test case asserts both records and the full field set.
+- **Identity field bound** (`http.go`/`server.go`). `clientName`/
+  `clientVersion` were logged unbounded at INFO; a hostile client can carry
+  megabytes in `clientInfo` under the 10 MiB body cap. Both call sites now
+  run fields through `boundIdentityField` (256 B, rune-boundary cut, explicit
+  `…` truncation indicator). Covered by `TestBoundIdentityField`, an
+  oversized-name case in the HTTP peek table, and a third handshake with an
+  over-long name in `TestStdinIdentityTee`.
+- **Test race** (`server_test.go`). `TestRunStdioClientIdentity` passed a
+  plain `strings.Builder` to a logger written from the SDK's stdin reader
+  goroutine and `run()`'s own; the four sibling run-tests using the same
+  pattern were converted as well. All five now use the mutex-protected
+  `captureWriter`.
+- **Plan state.** T1–T9 marked complete, status flipped to Completed, the N1
+  row carries the field bound — the archived plan now matches what shipped.

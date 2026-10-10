@@ -375,7 +375,9 @@ func (t *stdinIdentityTee) inspect(p []byte) {
 			return
 		}
 		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(t.partial, "\r")); ok {
-			t.log.Info("client connected", "transport", "stdio", "clientName", name, "clientVersion", version)
+			t.log.Info("client connected", "transport", "stdio",
+				"clientName", boundIdentityField(name),
+				"clientVersion", boundIdentityField(version))
 		}
 		t.partial = t.partial[:0]
 		p = p[newline+1:]

@@ -538,9 +538,12 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			timeout:   5 * time.Second,
 			wantLevel: "WARN",
 			wantMsg:   "tool call failed",
-			wantTrace: false, // nothing ran, so there is no output to trace
-			want:      []string{`reason=start-failed`},
-			unwant:    []string{"tool call completed"},
+			wantTrace: true, // every failed outcome emits the paired TRACE record
+			// The start-failed record carries the full N2 field set with empty
+			// output and zero byte counts (nothing ran).
+			wantTraceField: []string{"exitCode=-1", "stdoutBytes=0", "stderrBytes=0", "truncated=false"},
+			want:           []string{`reason=start-failed`, "exitCode=-1", "stdoutBytes=0", "stderrBytes=0", "truncated=false"},
+			unwant:         []string{"tool call completed"},
 		},
 		{
 			name:      "truncated-output",

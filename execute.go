@@ -231,13 +231,28 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		// The script never ran (missing, not executable, bad interpreter):
-		// fail loudly and say why.
-		log.Warn("tool call failed",
-			"tool", name, "path", scriptPath,
-			"command", formatCommand(cmd.Args), "params", rawArgs,
-			"reason", "start-failed", "error", err,
+		// fail loudly and say why. It emits the same complete attribute set
+		// as every other failed outcome (N4) — exitCode -1 (no process),
+		// zero captured bytes, empty output, nothing truncated — plus the
+		// paired TRACE record, so no failed outcome diverges from the
+		// documented WARN/TRACE contract.
+		startAttrs := []any{
+			"tool", name,
+			"path", scriptPath,
+			"command", formatCommand(cmd.Args),
+			"params", rawArgs,
+			"exitCode", -1,
+			"stdoutBytes", 0,
+			"stderrBytes", 0,
 			"duration", time.Since(started),
-		)
+			"truncated", false,
+			"reason", "start-failed",
+			"error", err,
+			"stdout", "",
+			"stderr", "",
+		}
+		log.Warn("tool call failed", startAttrs...)
+		log.Log(ctx, levelTrace, "tool call failed", startAttrs...)
 		return nil, err
 	}
 
