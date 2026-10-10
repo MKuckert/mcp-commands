@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -58,6 +59,7 @@ func prodLiveEnv(level slog.Level) liveEnv {
 func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	sigCtx, cancel := env.notifySignals(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	started := time.Now()
 
 	dirAbs, scriptsAbs, err := resolveToolPaths(cfg.dir, cfg.scriptsDir)
 	if err != nil {
@@ -77,8 +79,13 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		Name:    serverName,
 		Version: serverVersion,
 	}
+	// The SDK's internal logger is intentionally nil (resolves to a discard
+	// handler): the SDK logs `server connecting` at INFO on *every* connect,
+	// and stateless HTTP mode connects per request, so a wired-up SDK logger
+	// would flood the operator log with per-request noise the app's own
+	// records already cover.
 	server := mcp.NewServer(impl, nil)
-	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent)
+	registry := newToolRegistry(server, dirAbs, cfg.timeout, cfg.maxConcurrent, env.log)
 	registry.replace(tools)
 
 	// --watch is an explicit request: a setup failure, or a fatal mid-run
@@ -108,7 +115,12 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			env.log.Warn(w)
 		}
 
-		handler := buildHTTPHandler(server, cfg.apiKey.Token, cfg.cors)
+		handler := buildHTTPHandler(server, env.log, cfg.apiKey.Token, cfg.cors)
+		stopReason := make(chan string, 1)
+		// Ack from the shutdown goroutine: closed after the shutdown record
+		// and Shutdown, so run() can wait for the record to land before
+		// returning — the process must not exit first.
+		shutdownDone := make(chan struct{})
 		serverHTTP := &http.Server{
 			Addr:    addr,
 			Handler: handler,
@@ -121,9 +133,24 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 
 		go func() {
 			<-sigCtx.Done()
+			// The goroutine fires on ANY cancellation of sigCtx — a signal, or
+			// a cancel() from the watch-error and bind-failure paths below — so
+			// non-signal exits queue their reason first (buffered, so it is
+			// already there by the time cancel() runs) and the record carries
+			// the truth, never a fake reason=signal.
+			// (No signal name: liveEnv.notifySignals wraps signal.NotifyContext,
+			// which does not expose which signal fired.)
+			reason := "signal"
+			select {
+			case r := <-stopReason:
+				reason = r
+			default:
+			}
+			env.log.Info("shutting down", "reason", reason)
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer shutdownCancel()
 			_ = serverHTTP.Shutdown(shutdownCtx)
+			close(shutdownDone)
 		}()
 
 		serve := serverHTTP.ListenAndServe
@@ -161,8 +188,11 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 		case err := <-watchDone:
 			if err != nil && !errors.Is(err, context.Canceled) {
 				// Not logged here: run() returns it and main() is the single
-				// reporting site (a log here would double the record).
+				// reporting site (a log here would double the record). The
+				// shutdown record must not claim a signal fired.
+				stopReason <- "watch-error"
 				cancel()
+				<-shutdownDone
 				<-serveDone
 				return fmt.Errorf("failed to watch scripts directory: %w", err)
 			}
@@ -174,35 +204,75 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 			// behind a "Starting" banner with no listener.
 			serveErr = err
 		}
+		// A bind/startup failure cancelled the run without a signal: tell the
+		// shutdown record so.
+		if serveErr != nil {
+			stopReason <- "serve-failure"
+		}
 		cancel()
+		// Settle the shutdown record before proceeding: without this wait,
+		// a serve-failure return could race the goroutine and the process
+		// would exit before the "shutting down" line landed in the log.
+		<-shutdownDone
 		if serveErr == nil {
 			serveErr = <-serveDone
 		}
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			return fmt.Errorf("failed to start HTTP server: %w", serveErr)
 		}
+		env.log.Info("server stopped", "mode", "http", "port", cfg.port, "duration", time.Since(started).Round(time.Millisecond))
 		return nil
 	}
 
 	env.log.Info("Starting stdio server")
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Run(sigCtx, &mcp.StdioTransport{}) }()
+	go func() {
+		// Stdio: client name and version come from the handshake request
+		// (initialize, or server/discover for the 2026-07-28 protocol), which
+		// the SDK's transport API never exposes to the app; the stdin tee
+		// captures it (the HTTP side uses newClientIdentityPeekHandler).
+		serveDone <- server.Run(sigCtx, &mcp.IOTransport{
+			Reader: newStdinIdentityTee(env.log),
+			Writer: nopStdoutCloser{Writer: os.Stdout},
+		})
+	}()
+	// One record per clean stop; both exit paths (client disconnect and
+	// signal) funnel through it.
+	stopped := func() {
+		env.log.Info("server stopped", "mode", "stdio", "duration", time.Since(started).Round(time.Millisecond))
+	}
 	select {
 	case <-sigCtx.Done():
+		env.log.Info("shutting down", "reason", "signal")
 	case err := <-watchDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			// Not logged here: run() returns it and main() is the single
-			// reporting site (a log here would double the record).
+			// A fatal watch error ends the process: write the shutdown record
+			// synchronously from run() (no goroutine to race the exit) and
+			// return; main() is the single reporting site for the error itself.
+			env.log.Info("shutting down", "reason", "watch-error")
 			cancel()
 			return fmt.Errorf("failed to watch scripts directory: %w", err)
 		}
+		// A clean watch stop (the watcher's context is the signal context, so
+		// a Canceled result means a signal fired) can win the select over
+		// sigCtx.Done(): emit the record here so it is never skipped.
+		if sigCtx.Err() != nil {
+			env.log.Info("shutting down", "reason", "signal")
+		}
+		// Falls through: the serve outcome must still be reported.
 	case serveErr := <-serveDone:
-		// The client side ended the session (e.g. stdin closed): stop the
-		// watcher and surface the serve result.
+		// The client side ended the session (e.g. stdin closed). If a
+		// signal fired at the same moment (sigCtx done), record it — the
+		// arm that wins the select must not swallow the record.
+		if sigCtx.Err() != nil {
+			env.log.Info("shutting down", "reason", "signal")
+		}
+		// Stop the watcher and surface the serve result.
 		cancel()
 		if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 			return fmt.Errorf("stdio server stopped: %w", serveErr)
 		}
+		stopped()
 		return nil
 	}
 	// The session (and the watcher) is now done: serve.Run returns once the
@@ -210,5 +280,106 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	if serveErr := <-serveDone; serveErr != nil && !errors.Is(serveErr, context.Canceled) {
 		return fmt.Errorf("stdio server stopped: %w", serveErr)
 	}
+	stopped()
 	return nil
+}
+
+// maxIdentityLineBytes caps the stdin tee's partial-line buffer. A
+// handshake frame (initialize / server/discover) is a few hundred bytes at
+// most; a line longer than this is malformed input, and the bytes up to its
+// newline are discarded so a pathological frame cannot grow the buffer
+// without bound. The passthrough is unaffected: inspect only ever reads a
+// copy of the bytes, never the protocol stream.
+const maxIdentityLineBytes = 64 << 10
+
+// stdinIdentityTee is a pure byte passthrough over os.Stdin that inspects each
+// complete newline-delimited line for a handshake request (initialize, or
+// server/discover for the 2026-07-28 protocol) and logs the MCP client
+// identity at INFO (N1, stdio side). It buffers at most the current line —
+// the protocol's own newline framing, capped at maxIdentityLineBytes — and the
+// inspection is synchronous (a single slog Write per line), so the read path
+// is never blocked on anything external. Close is a no-op: os.Stdin must not
+// be closed from here.
+type stdinIdentityTee struct {
+	in      io.Reader
+	partial []byte
+	discard bool // the current line exceeded the cap; drop bytes until its newline
+	log     *slog.Logger
+}
+
+// nopStdoutCloser is an io.WriteCloser whose Close is a no-op — the same
+// wrapper the SDK's StdioTransport uses for os.Stdout. The process owns the
+// descriptor: a session end must not close it, which would turn every later
+// write to fd 1 (test output, coverage reports) into "file already closed".
+type nopStdoutCloser struct {
+	io.Writer
+}
+
+func (nopStdoutCloser) Close() error { return nil }
+
+func newStdinIdentityTee(log *slog.Logger) *stdinIdentityTee {
+	return &stdinIdentityTee{in: os.Stdin, log: log}
+}
+
+// Read implements io.Reader: every byte is passed through verbatim.
+func (t *stdinIdentityTee) Read(p []byte) (int, error) {
+	n, err := t.in.Read(p)
+	if n > 0 {
+		t.inspect(p[:n])
+	}
+	return n, err
+}
+
+// Close implements io.Closer as a no-op (the process owns os.Stdin).
+func (t *stdinIdentityTee) Close() error { return nil }
+
+// inspect appends p to the partial-line buffer and, for every complete line
+// it yields, logs the client identity of a handshake request. It checks the
+// cap before appending each segment, including when an oversized line and its
+// newline arrive in the same Read.
+func (t *stdinIdentityTee) inspect(p []byte) {
+	for len(p) > 0 {
+		if t.discard {
+			// An over-long line is being dropped: the bytes already passed
+			// through untouched; look only for the newline that ends it.
+			i := bytes.IndexByte(p, '\n')
+			if i < 0 {
+				return
+			}
+			t.discard = false
+			t.partial = t.partial[:0]
+			p = p[i+1:]
+			continue
+		}
+
+		newline := bytes.IndexByte(p, '\n')
+		segment := p
+		if newline >= 0 {
+			segment = p[:newline]
+		}
+		if len(t.partial)+len(segment) > maxIdentityLineBytes {
+			// The current line is too long, whether or not its newline
+			// arrived in this Read. Discard it without ever appending the
+			// oversized segment to partial.
+			t.partial = t.partial[:0]
+			if newline < 0 {
+				t.discard = true
+				return
+			}
+			p = p[newline+1:]
+			continue
+		}
+
+		t.partial = append(t.partial, segment...)
+		if newline < 0 {
+			return
+		}
+		if name, version, ok := clientInfoFromMessage(bytes.TrimRight(t.partial, "\r")); ok {
+			t.log.Info("client connected", "transport", "stdio",
+				"clientName", boundIdentityField(name),
+				"clientVersion", boundIdentityField(version))
+		}
+		t.partial = t.partial[:0]
+		p = p[newline+1:]
+	}
 }

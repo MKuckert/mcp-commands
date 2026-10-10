@@ -105,6 +105,7 @@ const logLevelEnvVar = "LOG_LEVEL"
 
 // logLevels is the accepted --log-level value set, mapped to slog levels.
 var logLevels = map[string]slog.Level{
+	"trace": levelTrace,
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
 	"warn":  slog.LevelWarn,
@@ -117,7 +118,7 @@ var logLevels = map[string]slog.Level{
 func resolveLogLevel(value, source string) (slog.Level, error) {
 	level, ok := logLevels[value]
 	if !ok {
-		return 0, fmt.Errorf("%s must be one of debug, info, warn, or error (got %q)", source, value)
+		return 0, fmt.Errorf("%s must be one of trace, debug, info, warn, or error (got %q)", source, value)
 	}
 	return level, nil
 }
@@ -149,7 +150,7 @@ func parseCLI(args []string) (cliConfig, error) {
 	listToolsFlag := fs.Bool("list-tools", false, "List the discovered tools (name, signature, description) and exit; no server is started. With --watch: re-print the list live on script changes")
 	callToolFlag := fs.String("call-tool", "", "Run one discovered tool by name and exit (debug mode; no server is started)")
 	paramsFlag := fs.String("params", "{}", "JSON object of named arguments for --call-tool (default: empty object; required-param validation applies)")
-	logLevelFlag := fs.String("log-level", "info", "Minimum log level: debug, info, warn, or error (or LOG_LEVEL when the flag is absent; logs always go to stderr)")
+	logLevelFlag := fs.String("log-level", "info", "Minimum log level: trace, debug, info, warn, or error (or LOG_LEVEL when the flag is absent; logs always go to stderr)")
 
 	if err := fs.Parse(args); err != nil {
 		// Wrapped so main can restore the flag package's parse-error

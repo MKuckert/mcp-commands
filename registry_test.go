@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,7 +58,7 @@ func TestResolvedTimeoutViaRegistry(t *testing.T) {
 	writeScript(t, fastPath, "#!/bin/bash\necho fast\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir, 2*time.Second, 16)
+	registry := newToolRegistry(server, tmpDir, 2*time.Second, 16, testDiscardLogger)
 	oneSecond := time.Second
 	noTimeout := time.Duration(0)
 	registry.replace([]discoveredTool{
@@ -181,7 +183,7 @@ func TestRequiredParamValidationViaRegistry(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\necho done\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir, defaultToolTimeout, 16)
+	registry := newToolRegistry(server, tmpDir, defaultToolTimeout, 16, testDiscardLogger)
 
 	registry.replace([]discoveredTool{
 		{
@@ -228,7 +230,7 @@ func TestInputContractViaRegistry(t *testing.T) {
 	path := filepath.Join(dir, "tool.sh")
 	writeScript(t, path, "#!/bin/bash\necho ran >> "+marker+"\nprintf '%s\\n' \"$@\"\n")
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, dir, defaultToolTimeout, 1)
+	registry := newToolRegistry(server, dir, defaultToolTimeout, 1, testDiscardLogger)
 	registry.replace([]discoveredTool{
 		{Name: "empty", Path: path},
 		{Name: "optional", Path: path, Params: []paramSpec{{Name: "flag", Type: "string", Required: true}, {Name: "flag", Type: "boolean"}}},
@@ -351,7 +353,7 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 	noTimeout := time.Duration(0)
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, tmpDir, 30*time.Second, 1) // capacity 1
+	registry := newToolRegistry(server, tmpDir, 30*time.Second, 1, testDiscardLogger) // capacity 1
 	registry.replace([]discoveredTool{
 		{Name: "slow", Path: slowPath, Description: "slow tool", Timeout: &noTimeout},
 	})
@@ -425,7 +427,7 @@ func TestToolCapacityViaRegistry(t *testing.T) {
 func TestRegistryReplaceConcurrency(t *testing.T) {
 	t.Parallel()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry := newToolRegistry(server, "", 30*time.Second, 16, testDiscardLogger)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -463,7 +465,7 @@ func TestRegistryReplaceConcurrency(t *testing.T) {
 func TestRegistryReplaceIfChangedSkipsIdentical(t *testing.T) {
 	t.Parallel()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry := newToolRegistry(server, "", 30*time.Second, 16, testDiscardLogger)
 	set := []discoveredTool{{Name: "alpha", Path: "/a.sh", Description: "d1"}, {Name: "beta", Path: "/b.sh", Description: "d2"}}
 	registry.replace(set)
 	if registry.replaceIfChanged(set) {
@@ -494,7 +496,7 @@ func TestRegistryReplaceIfChangedSkipsIdentical(t *testing.T) {
 func TestRegistryReplaceDiffOnlyRemovedNames(t *testing.T) {
 	t.Parallel()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry := newToolRegistry(server, "", 30*time.Second, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{
 		{Name: "alpha", Path: "/a.sh", Description: "keep"},
 		{Name: "beta", Path: "/b.sh", Description: "gone"},
@@ -534,7 +536,7 @@ func TestRegistryReplaceDiffOnlyRemovedNames(t *testing.T) {
 func TestRegistryReplaceConcurrentListNoGap(t *testing.T) {
 	t.Parallel()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry := newToolRegistry(server, "", 30*time.Second, 16, testDiscardLogger)
 	base := make([]discoveredTool, 20)
 	for i := range base {
 		base[i] = discoveredTool{Name: fmt.Sprintf("tool%02d", i), Path: fmt.Sprintf("/t%02d.sh", i), Description: "v1"}
@@ -600,5 +602,152 @@ func TestRegistryReplaceConcurrentListNoGap(t *testing.T) {
 	}
 	if missing > 0 {
 		t.Fatalf("%d concurrent lists lost tools that the diff left unchanged", missing)
+	}
+}
+
+// TestRegistryReplaceDiffLogging pins N6: one DEBUG record per replace that
+// changes anything, carrying the added/removed/changed name lists; an
+// unchanged replace logs nothing.
+func TestRegistryReplaceDiffLogging(t *testing.T) {
+	t.Parallel()
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, "", 2*time.Second, 16, log)
+
+	alpha := discoveredTool{Name: "alpha", Path: "/a", Description: "a1"}
+	beta := discoveredTool{Name: "beta", Path: "/b", Description: "b1"}
+	registry.replace([]discoveredTool{alpha, beta})
+	first := logBuf.String()
+	if !strings.Contains(first, "tools replaced") || !strings.Contains(first, `added="alpha, beta"`) {
+		t.Fatalf("first replace log = %q, want the added names", first)
+	}
+	if strings.Contains(first, `removed="`) || strings.Contains(first, `changed="`) {
+		t.Errorf("first replace log = %q, want empty removed/changed lists unquoted", first)
+	}
+
+	logBuf.Reset()
+	registry.replace([]discoveredTool{alpha, beta}) // identical: a no-op
+	if got := logBuf.String(); got != "" {
+		t.Fatalf("identical replace logged %q, want nothing", got)
+	}
+
+	logBuf.Reset()
+	betaChanged := discoveredTool{Name: "beta", Path: "/b", Description: "b2"}
+	gamma := discoveredTool{Name: "gamma", Path: "/g", Description: "g1"}
+	registry.replace([]discoveredTool{betaChanged, gamma})
+	third := logBuf.String()
+	for _, want := range []string{"tools replaced", `added=gamma`, `removed=alpha`, `changed=beta`} {
+		if !strings.Contains(third, want) {
+			t.Errorf("third replace log = %q, want it to contain %s", third, want)
+		}
+	}
+}
+
+// TestRegistryCallRejectedLogs pins N5: a call rejected by argument
+// validation logs one WARN with the tool, the raw params, and the error.
+func TestRegistryCallRejectedLogs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "typed.sh")
+	writeScript(t, path, "#!/bin/bash\necho ok\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 5*time.Second, 16, log)
+	registry.replace([]discoveredTool{
+		{Name: "typed", Path: path, Description: "d", Params: []paramSpec{{Name: "p", Type: "string", Required: true}}},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "typed", Arguments: map[string]any{"p": 42}})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("a number for a string param must be a validation error, got %+v", res)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{"tool call rejected", "tool=typed", `params=`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want it to contain %s", out, want)
+		}
+	}
+}
+
+// TestRegistryAtCapacityLogs pins N6: a call that hits the concurrency cap
+// logs one DEBUG record with the tool and the limit.
+func TestRegistryAtCapacityLogs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	slowPath := filepath.Join(tmpDir, "slow.sh")
+	writeScript(t, slowPath, "#!/bin/bash\nsleep 3\n")
+	noTimeout := time.Duration(0)
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 30*time.Second, 1, log) // capacity 1
+	registry.replace([]discoveredTool{
+		{Name: "slow", Path: slowPath, Description: "slow tool", Timeout: &noTimeout},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	firstDone := make(chan struct{}, 1)
+	go func() {
+		_, _ = clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "slow"})
+		firstDone <- struct{}{}
+	}()
+
+	// Bounded poll until the first call holds the only slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for registry.slot.tryAcquire() {
+		registry.slot.release()
+		if time.Now().After(deadline) {
+			t.Fatal("first call never acquired the slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "slow"})
+	if err != nil {
+		t.Fatalf("second call returned an error: %v (want a clean at-capacity result)", err)
+	}
+	if !res.IsError {
+		t.Fatalf("second call must be an at-capacity error, got %+v", res)
+	}
+	<-firstDone
+
+	out := logBuf.String()
+	if !strings.Contains(out, "tool call at capacity") || !strings.Contains(out, "tool=slow") || !strings.Contains(out, "limit=1") {
+		t.Errorf("log = %q, want a capacity DEBUG record with tool and limit", out)
 	}
 }

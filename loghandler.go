@@ -14,6 +14,31 @@ import (
 // invariant.
 var messageEscaper = strings.NewReplacer("\n", `\n`, "\r", `\r`)
 
+// levelTrace is the TRACE severity (below debug). The stdlib defines no such
+// constant (slog.Level(-8).String() would render "DEBUG-4"), so the app names
+// it and the handler renders it as "TRACE" (see levelName).
+const levelTrace = slog.Level(-8)
+
+// levelName renders a level for the one-line prefix: the five app levels map
+// to their canonical names, any other level falls back to slog's rendering
+// (e.g. "DEBUG-1").
+func levelName(l slog.Level) string {
+	switch l {
+	case levelTrace:
+		return "TRACE"
+	case slog.LevelDebug:
+		return "DEBUG"
+	case slog.LevelInfo:
+		return "INFO"
+	case slog.LevelWarn:
+		return "WARN"
+	case slog.LevelError:
+		return "ERROR"
+	default:
+		return l.String()
+	}
+}
+
 // logHandler is a compact slog.Handler that renders each record on one line as
 //
 //	<LEVEL>@<HH:mm:ss> <message> [ | key=value …]
@@ -59,7 +84,7 @@ func (h *logHandler) Enabled(_ context.Context, level slog.Level) bool {
 // Handle renders the record as one line followed by a newline.
 func (h *logHandler) Handle(_ context.Context, rec slog.Record) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s@%s %s", rec.Level.String(), rec.Time.Format("15:04:05"), messageEscaper.Replace(rec.Message))
+	fmt.Fprintf(&b, "%s@%s %s", levelName(rec.Level), rec.Time.Format("15:04:05"), messageEscaper.Replace(rec.Message))
 	first := true
 	// h.attrs carry baked-in keys, so no group prefix is applied; the record's
 	// own attrs are the only ones h.group prefixes.

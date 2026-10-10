@@ -37,7 +37,7 @@ complete -c mcp-commands -n '__mcp_commands_token_is_flag' -f -a "(__mcp_command
 # entries document the value kind); --log-level completes its fixed set.
 complete -c mcp-commands -n '__mcp_commands_prev_is_flag --dir --scripts' -d 'Directory'
 complete -c mcp-commands -n '__mcp_commands_prev_is_flag --api-key-file --tls-cert --tls-key' -d 'File'
-complete -c mcp-commands -n '__mcp_commands_prev_is_flag --log-level' -f -x -a 'debug info warn error' -d 'Log level'
+complete -c mcp-commands -n '__mcp_commands_prev_is_flag --log-level' -f -x -a 'trace debug info warn error' -d 'Log level'
 
 # Free-form values: suppress file completion.
 complete -c mcp-commands -n '__mcp_commands_prev_is_flag --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params' -f -x

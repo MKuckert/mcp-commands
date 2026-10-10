@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -339,11 +343,22 @@ const (
 
 var corsAllowedMethods = []string{http.MethodPost, http.MethodOptions}
 
-func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
+func newCORSHandler(next http.Handler, log *slog.Logger, cfg corsConfig) http.Handler {
 	allowed := cfg.originSet()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		isPreflight := r.Method == http.MethodOptions
 		if origin == "" || (!cfg.allowAll && !allowed[canonicalOrigin(origin)]) {
+			// A preflight whose origin was rejected fails closed in the
+			// browser (no CORS headers are echoed); the WARN shows the
+			// operator which origin was blocked and why (N8).
+			if isPreflight && origin != "" {
+				reason := "not-in-allowlist"
+				if canonicalOrigin(origin) == "" {
+					reason = "non-canonical"
+				}
+				log.Warn("CORS preflight rejected", "origin", origin, "reason", reason)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -351,7 +366,13 @@ func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 		h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
 		h.Add("Vary", "Origin")
 		h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
-		if r.Method == http.MethodOptions { // preflight
+		if isPreflight { // preflight
+			// An allowed preflight is a routine record at DEBUG (N7).
+			args := []any{"origin", canonicalOrigin(origin), "maxAge", corsAllowMaxAge}
+			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
+				args = append(args, "requestHeaders", achr)
+			}
+			log.Debug("CORS preflight allowed", args...)
 			h.Set("Access-Control-Allow-Methods", strings.Join(corsAllowedMethods, ", "))
 			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
 				h.Set("Access-Control-Allow-Headers", achr)
@@ -412,6 +433,145 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 
 func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 
+// newClientIdentityPeekHandler wraps next with a body peek that logs the MCP
+// client identity at INFO when the request batch contains a JSON-RPC
+// handshake request (initialize, or server/discover for the 2026-07-28
+// protocol — clientInfo is only carried by the handshake; the SDK's
+// stateless session synthesis drops it for every other request, so the
+// transport boundary is the only reliable capture point).
+//
+// Placement: buildHTTPHandler inserts it *inside* the size/deadline wrapper
+// (the peek is applied to the streamable handler first, then the cap), so the
+// peek's ReadAll runs through the maxHTTPBodyBytes cap and the body-read
+// deadline — exactly where the SDK's own stateless peek runs. A failed read
+// (over cap, deadline) skips the record and passes the request through
+// unchanged: the SDK handler then applies its own limits and answers.
+// Only POST bodies are inspected (GETs and SSE streams carry none); a
+// successfully read body is reset via io.NopCloser(bytes.NewBuffer(...)) like
+// the SDK does.
+func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Body != nil {
+			body, err := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if err == nil {
+				if name, version, ok := clientInfoFromBody(body); ok {
+					log.Info("client connected", "transport", "http",
+						"clientName", boundIdentityField(name),
+						"clientVersion", boundIdentityField(version))
+				}
+				r.Body = io.NopCloser(bytes.NewBuffer(body))
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// maxIdentityFieldBytes bounds a single clientInfo field in the N1 record.
+// The HTTP body cap is 10 MiB, so a hostile client can carry megabytes in
+// clientInfo.name; the log must not become an amplification sink. 256 bytes
+// is generous for any real client name/version; over-long values are cut at
+// a rune boundary and marked with an explicit truncation indicator.
+const maxIdentityFieldBytes = 256
+
+// boundIdentityField cuts s to maxIdentityFieldBytes (at a rune boundary)
+// and appends the truncation indicator; short values pass through unchanged.
+func boundIdentityField(s string) string {
+	if len(s) <= maxIdentityFieldBytes {
+		return s
+	}
+	cut := maxIdentityFieldBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\u2026"
+}
+
+// clientInfoFromBody inspects a JSON-RPC body — a single message, a batch
+// array, or newline-delimited messages — and returns the client name/version
+// of the first handshake request it finds. The bool result is false when the
+// body carries no handshake request (or is unparseable).
+func clientInfoFromBody(body []byte) (name, version string, ok bool) {
+	var batch []json.RawMessage
+	if err := json.Unmarshal(body, &batch); err == nil {
+		for _, raw := range batch {
+			if n, v, found := clientInfoFromMessage(raw); found {
+				return n, v, true
+			}
+		}
+		return "", "", false
+	}
+	// A single message, pretty-printed across lines: the batch unmarshal above
+	// fails on a lone object, so try the whole body before falling back to
+	// line-by-line NDJSON.
+	if n, v, found := clientInfoFromMessage(body); found {
+		return n, v, true
+	}
+	// Newline-delimited bodies carry one compact message per line.
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if line == "" {
+			continue
+		}
+		if n, v, found := clientInfoFromMessage([]byte(line)); found {
+			return n, v, true
+		}
+	}
+	return "", "", false
+}
+
+// clientInfoFromMessage inspects one raw JSON-RPC message and reports the
+// client identity of a handshake request, with absent or empty fields rendered
+// as "unknown". Every other method, and unparseable input, reports !ok. The
+// two handshakes: legacy `initialize` (clientInfo in params) and the
+// 2026-07-28 `server/discover` (clientInfo in params._meta) that modern
+// clients send in its place.
+func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
+	var env struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", "", false
+	}
+	switch env.Method {
+	case "initialize":
+		name, version = "unknown", "unknown"
+		var params mcp.InitializeParams
+		if err := json.Unmarshal(env.Params, &params); err == nil && params.ClientInfo != nil {
+			if params.ClientInfo.Name != "" {
+				name = params.ClientInfo.Name
+			}
+			if params.ClientInfo.Version != "" {
+				version = params.ClientInfo.Version
+			}
+		}
+		return name, version, true
+	case "server/discover":
+		name, version = "unknown", "unknown"
+		var params struct {
+			Meta map[string]json.RawMessage `json:"_meta"`
+		}
+		if err := json.Unmarshal(env.Params, &params); err == nil {
+			if raw, found := params.Meta[mcp.MetaKeyClientInfo]; found {
+				var info struct {
+					Name    string `json:"name"`
+					Version string `json:"version"`
+				}
+				if json.Unmarshal(raw, &info) == nil {
+					if info.Name != "" {
+						name = info.Name
+					}
+					if info.Version != "" {
+						version = info.Version
+					}
+				}
+			}
+		}
+		return name, version, true
+	}
+	return "", "", false
+}
+
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are
 // vestigial). The body size cap (maxHTTPBodyBytes) is enforced by the SDK
@@ -420,7 +580,7 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 // wrapped in bearer-token auth middleware;
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
-func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
+func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors corsConfig) http.Handler {
 	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
@@ -432,14 +592,22 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		// the app's documented 10 MiB so 4–10 MiB bodies keep working.
 		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
-	// Bound the total body-read time (innermost: below auth and CORS) — a
-	// body that dribbles must not pin the handler past the read deadline.
-	// The size cap lives in the SDK (MaxRequestBodyBytes), so no
-	// MaxBytesReader of our own is needed here.
-	next := h
+	// The client-identity peek runs *through* the size cap and read deadline
+	// applied below (wrap order: peek first, then the cap), so its ReadAll is
+	// bounded in size and time exactly like the SDK's own stateless peek.
+	// The cap is applied twice on purpose: it bounds the peek's ReadAll here,
+	// and the SDK's MaxRequestBodyBytes (same 10 MiB) bounds the handler
+	// path after the peek resets the body — an over-cap body 413s in the
+	// SDK, and the peek simply skips its record.
+	var next http.Handler = h
+	h = newClientIdentityPeekHandler(next, log)
+	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
+	// chunked body must not be read into memory by the peek, and a body that dribbles
+	// must not pin the handler past the total read deadline.
+	next = h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}
+			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -447,7 +615,7 @@ func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Ha
 		h = newBearerAuthHandler(h, token)
 	}
 	if cors.enabled() {
-		h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
+		h = newCORSHandler(h, log, cors) // outermost: preflight unauthenticated, 401s carry CORS
 	}
 	return h
 }

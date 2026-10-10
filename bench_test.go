@@ -75,7 +75,7 @@ func benchToolSet(n int) []discoveredTool {
 // changed case measures the diff plus one re-registration.
 func BenchmarkRegistryReload(b *testing.B) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "bench"}, nil)
-	registry := newToolRegistry(server, "", 30*time.Second, 16)
+	registry := newToolRegistry(server, "", 30*time.Second, 16, testDiscardLogger)
 	set := benchToolSet(100)
 	registry.replace(set)
 	// Testing re-runs a subbenchmark's closure (calibration, then final)
@@ -156,7 +156,7 @@ func BenchmarkExecuteCappedOutput(b *testing.B) {
 				} else {
 					ready <- struct{}{}
 					<-start
-					out.res, out.err = executeTool(context.Background(), scriptPath, nil, 30*time.Second, dir)
+					out.res, out.err = executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, nil, "", 30*time.Second, dir)
 					slot.release()
 				}
 				done <- out
