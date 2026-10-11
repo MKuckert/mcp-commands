@@ -324,7 +324,6 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 	// The calling client's identity (SDK req.ClientInfo()), when available:
 	// omitted entirely for a nil/empty identity, bounded otherwise.
 	attrs = append(attrs, identityAttrs(clientInfo)...)
-	outputAttrs := append([]any{}, "stdout", string(stdout.Bytes()), "stderr", string(stderr.Bytes()))
 
 	if waitErr != nil {
 		// Classify the failure (N4): the deadline, a context cancellation,
@@ -336,13 +335,19 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 		case execCtx.Err() != nil:
 			reason = "canceled"
 		}
-		failAttrs := append(append(attrs, "reason", reason), outputAttrs...)
+		// The raw output is built only here: a successful call never pays
+		// for the up-to-2 MiB string copies, and at the default level the
+		// TRACE record is disabled anyway.
+		failAttrs := append(append(attrs, "reason", reason),
+			"stdout", string(stdout.Bytes()),
+			"stderr", string(stderr.Bytes()))
 		if reason == "timeout" {
 			failAttrs = append(failAttrs, "timeout", timeout)
 		}
 		log.Warn("tool call failed", failAttrs...)
 		// The TRACE record is the WARN record plus the raw output — the same
-		// complete attribute set, so the two never diverge.
+		// complete attribute set, so the two never diverge. (No extra
+		// construction cost: failAttrs is already built for the WARN.)
 		log.Log(ctx, levelTrace, "tool call failed", failAttrs...)
 
 		if reason == "timeout" {
@@ -361,6 +366,12 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 	}
 
 	log.Debug("tool call completed", attrs...)
-	log.Log(ctx, levelTrace, "tool call completed", append(append(attrs, "stdout", string(stdout.Bytes())), "stderr", string(stderr.Bytes()))...)
+	// The TRACE record carries the full raw output (up to 2 MiB of string
+	// copies); guard the construction so a success logged at the default
+	// level does not pay for it — Logger.Log would drop the record as
+	// disabled after evaluating its arguments.
+	if log.Enabled(ctx, levelTrace) {
+		log.Log(ctx, levelTrace, "tool call completed", append(append(attrs, "stdout", string(stdout.Bytes())), "stderr", string(stderr.Bytes()))...)
+	}
 	return textResult(combinedOutput, false), nil
 }
