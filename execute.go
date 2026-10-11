@@ -360,7 +360,10 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 		// for the up-to-2 MiB string copies. The output strings are shared
 		// by both records; only the params bound differs (WARN ≤
 		// maxWarnParamsBytes, TRACE raw) — the extra slice construction is
-		// cheap appends.
+		// cheap appends. warnAttrs and traceAttrs may share a backing array;
+		// that is safe because the handler renders each record synchronously
+		// — the WARN line is fully written before traceAttrs overwrites the
+		// shared slot.
 		stdoutStr := string(stdout.Bytes())
 		stderrStr := string(stderr.Bytes())
 		warnAttrs := append(append(attrs, "params", boundLogValue(rawArgs, maxWarnParamsBytes)),
