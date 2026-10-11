@@ -27,6 +27,13 @@ Re-recorded 2026-10-11 with Go 1.27.2 on:
   output-attribute fix (Copilot round 5), not hardware.
 - The `-4` suffix is `GOMAXPROCS` (4 cores).
 
+Re-verified 2026-10-11 after the per-level params caps (WARN 1 KiB / DEBUG
+64 KiB / TRACE raw): the benchmarked path is unchanged — `testDiscardLogger`
+runs at INFO, so neither the DEBUG record (now guarded by `log.Enabled`)
+nor the TRACE pair is enabled, and the benchmark's `rawArgs` is empty.
+Single re-run: 12.28 ms / 5.34 MB/op, 94 allocs — within run-to-run
+variance of the recorded numbers.
+
 ## What each measures
 
 | Benchmark | Path | Read it as |
