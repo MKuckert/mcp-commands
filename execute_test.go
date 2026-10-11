@@ -481,6 +481,7 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 		clientInfo     *mcp.Implementation // the SDK's req.ClientInfo() equivalent; nil = unavailable
 		wantLevel      string              // the outcome record's level prefix
 		wantMsg        string
+		wantLevelField []string // fields the level record itself must carry (line-verified)
 		wantTrace      bool     // a TRACE record is emitted for every outcome that ran
 		wantTraceField []string // fields the TRACE record must carry (WARN's full set)
 		want           []string
@@ -558,7 +559,8 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			wantMsg:    "tool call completed",
 			wantTrace:  true,
 			// The identity rides on the shared attribute slice: both the
-			// DEBUG and its TRACE pair carry it.
+			// DEBUG and its TRACE pair carry it (each line-verified).
+			wantLevelField: []string{"clientName=cursor", "clientVersion=1.2.3"},
 			wantTraceField: []string{"clientName=cursor", "clientVersion=1.2.3"},
 			want:           []string{"clientName=cursor", "clientVersion=1.2.3"},
 		},
@@ -574,6 +576,7 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			// record stays bounded with an explicit truncation indicator.
 			want:           []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026", "clientVersion=9"},
 			unwant:         []string{strings.Repeat("c", maxIdentityFieldBytes+1)},
+			wantLevelField: []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026"},
 			wantTraceField: []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026"},
 		},
 		{
@@ -604,13 +607,21 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			_, _ = executeTool(ctx, log, tc.script, path, map[string]any{}, rawArgs, tc.clientInfo, tc.timeout, tmpDir)
 			out := logBuf.String()
 
-			// One record per outcome class at the correct level.
+			// One record per outcome class at the correct level; its own
+			// line must carry wantLevelField (a whole-log check would pass
+			// even if the field landed only on the paired TRACE record).
 			found := false
 			for _, line := range strings.Split(out, "\n") {
-				if strings.HasPrefix(line, tc.wantLevel+"@") && strings.Contains(line, tc.wantMsg) {
-					found = true
-					break
+				if !strings.HasPrefix(line, tc.wantLevel+"@") || !strings.Contains(line, tc.wantMsg) {
+					continue
 				}
+				found = true
+				for _, f := range tc.wantLevelField {
+					if !strings.Contains(line, f) {
+						t.Errorf("%s %q record lacks %s:\n%s", tc.wantLevel, tc.wantMsg, f, out)
+					}
+				}
+				break
 			}
 			if !found {
 				t.Errorf("log lacks a %s %q record:\n%s", tc.wantLevel, tc.wantMsg, out)

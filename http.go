@@ -439,7 +439,7 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
 func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors corsConfig) http.Handler {
-	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	var streamable http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
 		// Always stateless: the app keeps no per-session state, so protocol
@@ -453,12 +453,11 @@ func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors c
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
 	// chunked body must not be read into memory, and a body that dribbles
 	// must not pin the handler past the total read deadline.
-	next := h
-	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)
 		}
-		next.ServeHTTP(w, r)
+		streamable.ServeHTTP(w, r)
 	})
 	if token != "" {
 		h = newBearerAuthHandler(h, token)
