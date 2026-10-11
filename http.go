@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -433,40 +431,6 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 
 func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 
-// newClientIdentityPeekHandler wraps next with a body peek that logs the MCP
-// client identity at INFO when the request batch contains a JSON-RPC
-// handshake request (initialize, or server/discover for the 2026-07-28
-// protocol — clientInfo is only carried by the handshake; the SDK's
-// stateless session synthesis drops it for every other request, so the
-// transport boundary is the only reliable capture point).
-//
-// Placement: buildHTTPHandler inserts it *inside* the size/deadline wrapper
-// (the peek is applied to the streamable handler first, then the cap), so the
-// peek's ReadAll runs through the maxHTTPBodyBytes cap and the body-read
-// deadline — exactly where the SDK's own stateless peek runs. A failed read
-// (over cap, deadline) skips the record and passes the request through
-// unchanged: the SDK handler then applies its own limits and answers.
-// Only POST bodies are inspected (GETs and SSE streams carry none); a
-// successfully read body is reset via io.NopCloser(bytes.NewBuffer(...)) like
-// the SDK does.
-func newClientIdentityPeekHandler(next http.Handler, log *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.Body != nil {
-			body, err := io.ReadAll(r.Body)
-			_ = r.Body.Close()
-			if err == nil {
-				if name, version, ok := clientInfoFromBody(body); ok {
-					log.Info("client connected", "transport", "http",
-						"clientName", boundIdentityField(name),
-						"clientVersion", boundIdentityField(version))
-				}
-				r.Body = io.NopCloser(bytes.NewBuffer(body))
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // maxIdentityFieldBytes bounds a single clientInfo field in the N1 record.
 // The HTTP body cap is 10 MiB, so a hostile client can carry megabytes in
 // clientInfo.name; the log must not become an amplification sink. 256 bytes
@@ -485,106 +449,6 @@ func boundIdentityField(s string) string {
 		cut--
 	}
 	return s[:cut] + "\u2026"
-}
-
-// clientInfoFromBody inspects a JSON-RPC body — a single message, a batch
-// array, or newline-delimited messages — and returns the client name/version
-// of the first handshake request it finds. The bool result is false when the
-// body carries no handshake request (or is unparseable).
-//
-// Hot path: this runs on every POST before the SDK's own parse, so a body
-// that parses as one message costs exactly one full parse — the batch
-// attempt is dispatched on the first non-whitespace byte, and a valid
-// non-handshake message never falls through to the line scan (a single JSON
-// value cannot be NDJSON).
-func clientInfoFromBody(body []byte) (name, version string, ok bool) {
-	trimmed := bytes.TrimLeft(body, " \t\r\n")
-	if len(trimmed) == 0 {
-		return "", "", false
-	}
-	if trimmed[0] == '[' {
-		var batch []json.RawMessage
-		if err := json.Unmarshal(body, &batch); err == nil {
-			for _, raw := range batch {
-				if n, v, found, _ := clientInfoFromMessage(raw); found {
-					return n, v, true
-				}
-			}
-			return "", "", false
-		}
-		// Malformed array: fall through to the line scan below.
-	} else if n, v, found, parsed := clientInfoFromMessage(body); found {
-		return n, v, true
-	} else if parsed {
-		// A single message that is not a handshake: the body cannot be
-		// NDJSON either, so stop here.
-		return "", "", false
-	}
-	// Newline-delimited bodies carry one compact message per line.
-	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
-		if line == "" {
-			continue
-		}
-		if n, v, found, _ := clientInfoFromMessage([]byte(line)); found {
-			return n, v, true
-		}
-	}
-	return "", "", false
-}
-
-// clientInfoFromMessage inspects one raw JSON-RPC message and reports the
-// client identity of a handshake request, with absent or empty fields rendered
-// as "unknown". The found result is true only for a handshake; the parsed
-// result is true whenever the input is a valid JSON object — it lets callers
-// distinguish "a message that is not a handshake" (no further inspection
-// needed) from unparseable input. The two handshakes: legacy `initialize`
-// (clientInfo in params) and the 2026-07-28 `server/discover` (clientInfo in
-// params._meta) that modern clients send in its place.
-func clientInfoFromMessage(raw []byte) (name, version string, found bool, parsed bool) {
-	var env struct {
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return "", "", false, false
-	}
-	switch env.Method {
-	case "initialize":
-		name, version = "unknown", "unknown"
-		var params mcp.InitializeParams
-		if err := json.Unmarshal(env.Params, &params); err == nil && params.ClientInfo != nil {
-			if params.ClientInfo.Name != "" {
-				name = params.ClientInfo.Name
-			}
-			if params.ClientInfo.Version != "" {
-				version = params.ClientInfo.Version
-			}
-		}
-		return name, version, true, true
-	case "server/discover":
-		name, version = "unknown", "unknown"
-		var params struct {
-			Meta map[string]json.RawMessage `json:"_meta"`
-		}
-		if err := json.Unmarshal(env.Params, &params); err == nil {
-			if raw, found := params.Meta[mcp.MetaKeyClientInfo]; found {
-				var info struct {
-					Name    string `json:"name"`
-					Version string `json:"version"`
-				}
-				if json.Unmarshal(raw, &info) == nil {
-					if info.Name != "" {
-						name = info.Name
-					}
-					if info.Version != "" {
-						version = info.Version
-					}
-				}
-			}
-		}
-		return name, version, true, true
-	}
-	return "", "", false, true
 }
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
@@ -607,19 +471,10 @@ func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors c
 		// the app's documented 10 MiB so 4–10 MiB bodies keep working.
 		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
-	// The client-identity peek runs *through* the size cap and read deadline
-	// applied below (wrap order: peek first, then the cap), so its ReadAll is
-	// bounded in size and time exactly like the SDK's own stateless peek.
-	// The cap is applied twice on purpose: it bounds the peek's ReadAll here,
-	// and the SDK's MaxRequestBodyBytes (same 10 MiB) bounds the handler
-	// path after the peek resets the body — an over-cap body 413s in the
-	// SDK, and the peek simply skips its record.
-	var next http.Handler = h
-	h = newClientIdentityPeekHandler(next, log)
 	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
-	// chunked body must not be read into memory by the peek, and a body that dribbles
+	// chunked body must not be read into memory, and a body that dribbles
 	// must not pin the handler past the total read deadline.
-	next = h
+	next := h
 	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)

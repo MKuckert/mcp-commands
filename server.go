@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -227,14 +226,7 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	env.log.Info("Starting stdio server")
 	serveDone := make(chan error, 1)
 	go func() {
-		// Stdio: client name and version come from the handshake request
-		// (initialize, or server/discover for the 2026-07-28 protocol), which
-		// the SDK's transport API never exposes to the app; the stdin tee
-		// captures it (the HTTP side uses newClientIdentityPeekHandler).
-		serveDone <- server.Run(sigCtx, &mcp.IOTransport{
-			Reader: newStdinIdentityTee(env.log),
-			Writer: nopStdoutCloser{Writer: os.Stdout},
-		})
+		serveDone <- server.Run(sigCtx, &mcp.StdioTransport{})
 	}()
 	// One record per clean stop; both exit paths (client disconnect and
 	// signal) funnel through it.
@@ -282,104 +274,4 @@ func run(ctx context.Context, env liveEnv, cfg serverConfig) error {
 	}
 	stopped()
 	return nil
-}
-
-// maxIdentityLineBytes caps the stdin tee's partial-line buffer. A
-// handshake frame (initialize / server/discover) is a few hundred bytes at
-// most; a line longer than this is malformed input, and the bytes up to its
-// newline are discarded so a pathological frame cannot grow the buffer
-// without bound. The passthrough is unaffected: inspect only ever reads a
-// copy of the bytes, never the protocol stream.
-const maxIdentityLineBytes = 64 << 10
-
-// stdinIdentityTee is a pure byte passthrough over os.Stdin that inspects each
-// complete newline-delimited line for a handshake request (initialize, or
-// server/discover for the 2026-07-28 protocol) and logs the MCP client
-// identity at INFO (N1, stdio side). It buffers at most the current line —
-// the protocol's own newline framing, capped at maxIdentityLineBytes — and the
-// inspection is synchronous (a single slog Write per line), so the read path
-// is never blocked on anything external. Close is a no-op: os.Stdin must not
-// be closed from here.
-type stdinIdentityTee struct {
-	in      io.Reader
-	partial []byte
-	discard bool // the current line exceeded the cap; drop bytes until its newline
-	log     *slog.Logger
-}
-
-// nopStdoutCloser is an io.WriteCloser whose Close is a no-op — the same
-// wrapper the SDK's StdioTransport uses for os.Stdout. The process owns the
-// descriptor: a session end must not close it, which would turn every later
-// write to fd 1 (test output, coverage reports) into "file already closed".
-type nopStdoutCloser struct {
-	io.Writer
-}
-
-func (nopStdoutCloser) Close() error { return nil }
-
-func newStdinIdentityTee(log *slog.Logger) *stdinIdentityTee {
-	return &stdinIdentityTee{in: os.Stdin, log: log}
-}
-
-// Read implements io.Reader: every byte is passed through verbatim.
-func (t *stdinIdentityTee) Read(p []byte) (int, error) {
-	n, err := t.in.Read(p)
-	if n > 0 {
-		t.inspect(p[:n])
-	}
-	return n, err
-}
-
-// Close implements io.Closer as a no-op (the process owns os.Stdin).
-func (t *stdinIdentityTee) Close() error { return nil }
-
-// inspect appends p to the partial-line buffer and, for every complete line
-// it yields, logs the client identity of a handshake request. It checks the
-// cap before appending each segment, including when an oversized line and its
-// newline arrive in the same Read.
-func (t *stdinIdentityTee) inspect(p []byte) {
-	for len(p) > 0 {
-		if t.discard {
-			// An over-long line is being dropped: the bytes already passed
-			// through untouched; look only for the newline that ends it.
-			i := bytes.IndexByte(p, '\n')
-			if i < 0 {
-				return
-			}
-			t.discard = false
-			t.partial = t.partial[:0]
-			p = p[i+1:]
-			continue
-		}
-
-		newline := bytes.IndexByte(p, '\n')
-		segment := p
-		if newline >= 0 {
-			segment = p[:newline]
-		}
-		if len(t.partial)+len(segment) > maxIdentityLineBytes {
-			// The current line is too long, whether or not its newline
-			// arrived in this Read. Discard it without ever appending the
-			// oversized segment to partial.
-			t.partial = t.partial[:0]
-			if newline < 0 {
-				t.discard = true
-				return
-			}
-			p = p[newline+1:]
-			continue
-		}
-
-		t.partial = append(t.partial, segment...)
-		if newline < 0 {
-			return
-		}
-		if name, version, ok, _ := clientInfoFromMessage(bytes.TrimRight(t.partial, "\r")); ok {
-			t.log.Info("client connected", "transport", "stdio",
-				"clientName", boundIdentityField(name),
-				"clientVersion", boundIdentityField(version))
-		}
-		t.partial = t.partial[:0]
-		p = p[newline+1:]
-	}
 }
