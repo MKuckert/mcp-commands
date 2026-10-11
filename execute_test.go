@@ -361,6 +361,8 @@ func TestBoundLogValue(t *testing.T) {
 		{name: "short", in: "hello", max: 16, want: "hello"},
 		{name: "exact cap", in: strings.Repeat("x", 8), max: 8, want: strings.Repeat("x", 8)},
 		{name: "over by one", in: strings.Repeat("x", 9), max: 8, want: strings.Repeat("x", 8) + "\u2026"},
+		// max=0 is a full truncation: marker only, no panic.
+		{name: "max zero", in: "abc", max: 0, want: "\u2026"},
 		// A multi-byte rune straddling the cut must not be split: 3 × "€"
 		// (9 bytes) with max 8 puts a continuation byte at index 8, so the
 		// cut backs off to 6 (the start of the last rune).
