@@ -33,7 +33,7 @@ Re-recorded 2026-10-11 with Go 1.27.2 on:
 |---|---|---|
 | `DiscoverLargeDirectory` | `discoverTools` over a 200-script directory (stat + frontmatter parse) | Startup cost, and the cost of every `--watch` rescan. ~13 ms for 200 scripts is dominated by process-external I/O, not parsing. |
 | `RegistryReload/no_op_rescan` | `replaceIfChanged` over 100 tools, set unchanged | The rescan short-circuit (M8): an unchanged rescan costs the per-tool equality diff (~96 µs) and triggers **no** AddTool/RemoveTools churn and **no** `list_changed` notifications. |
-| `RegistryReload/one_tool_changed` | same, one tool's description changed | The diff plus one re-registration (~448 µs, variants prebuilt and alternated so fixture cost stays out of the loop), dominated by schema build + validator + `AddTool` — not by the diff. |
+| `RegistryReload/one_tool_changed` | same, one tool's description changed | The diff plus one re-registration (~528 µs, variants prebuilt and alternated so fixture cost stays out of the loop), dominated by schema build + validator + `AddTool` — not by the diff. |
 | `ExecuteCappedOutput` | 16 concurrent `executeTool` calls from a start barrier, each script emitting 2 MiB (double the 1 MiB cap, so the bounded writer drops on every call) | Sustained **aggregate** throughput of a saturated pool: ~86 MB/s across the 16 overlapping calls (≈ 5.4 MB/s per call). `testing.B` computes MB/s as `b.N × bytes / wall clock`, and the calls overlap — the figure is pool-wide, not per call. The raw output is copied into strings only when a TRACE record is actually enabled (or the call failed), so a success at the default level pays no output-copy cost. |
 
 ## Re-running

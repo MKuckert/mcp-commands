@@ -312,7 +312,8 @@ Five new Copilot findings on the pivot commit:
   guarded with `log.Enabled(ctx, levelTrace)`.
 - **Stale plan refs:** T8's "client connected" wording updated to the
   post-pivot design; the pivot entry's closing range `N2–N13` → `N2–N12`
-  (N13 was rejected); "peaking" → "peeking" typo.
+  (N13 was rejected).
+- **Plan typo:** "peaking" → "peeking" in the pivot entry.
 
 `BenchmarkExecuteCappedOutput` re-recorded after the lazy fix: 13.52 →
 12.14 ms, 7.42 → 5.35 MB/op (the eager copies are gone; `docs/BENCHMARKS.md`
