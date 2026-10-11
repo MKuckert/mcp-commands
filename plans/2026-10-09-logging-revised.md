@@ -225,10 +225,12 @@ passes** over a single-message body: the batch attempt scans the whole value
 before failing on a non-array, then the message is parsed once directly and
 again by the NDJSON fallback (which ran for *every* non-handshake single
 message, with a whole-body `string` copy). Cost: ~11.5 µs + 700 B transient
-for a small body; **~18 ms + 4.2 MB transient per request for a 1 MiB body**.
+for a small body; **~17 ms + 4.2 MB transient per request for a 1 MiB body**.
 
-Fix (behavior-identical, verified by the new `TestClientInfoFromBody`
-edge-shape table — NDJSON and malformed-array fall-through preserved):
+Fix (behavior-identical except one contrived case — a valid JSON object that
+is not itself a message no longer yields an identity from a handshake-shaped
+nested line; the SDK rejects such bodies anyway, and the case is pinned in
+`TestClientInfoFromBody`; NDJSON and malformed-array fall-through preserved):
 
 - Batch parse is dispatched on the first non-whitespace byte (`'['`), so a
   single message never pays the batch scan.

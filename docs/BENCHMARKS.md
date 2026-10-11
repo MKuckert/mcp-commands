@@ -25,15 +25,16 @@ Re-recorded 2026-10-10 with Go 1.27.2 on:
   release-representative machine. Expect better ns/op on a desktop/server
   CPU; the *ratios* between benchmarks transfer better than the absolutes.
   Same VM class as the original 2026-10-06 run: the pre-existing benchmarks
-  land within noise (Discover 13.19 → 12.61 ms, no-op rescan 96 → 97.8 µs,
-  ExecuteCappedOutput 16.26 → 13.71 ms).
+  land within run-to-run variance (Discover 13.19 → 12.64 ms, no-op rescan
+  96 → 102.7 µs, ExecuteCappedOutput 16.26 → 13.78 ms — two same-machine
+  runs of the no-op rescan differ by ~5%).
 - The `-4` suffix is `GOMAXPROCS` (4 cores).
 
 ## What each measures
 
 | Benchmark | Path | Read it as |
 |---|---|---|
-| `ClientIdentityPeek/*` | `clientInfoFromBody` over one POST body (the N1 identity peek — runs on **every** request, before the SDK's own parse) and `clientInfoFromMessage` per stdio line | Per-request overhead of the client-identity feature, now **one parse** for a single message: the batch attempt is dispatched on the first non-whitespace byte, and a valid non-handshake message never falls through to the NDJSON line scan. ~3.4 µs for a small body, ~5.5 ms + 1 MB transient allocation for a 1 MiB body. (Before the single-parse fix this path made three passes — batch scan + parse + NDJSON re-parse with a whole-body `string` copy: ~11.5 µs small, ~18 ms + 4.2 MB for 1 MiB.) `batch_of_3` is array scan + one parse per element (unchanged by the fix); `initialize` adds the params parse (the only body that carries clientInfo); `message_only_stdio` is the stdio tee's cost — one parse per message. |
+| `ClientIdentityPeek/*` | `clientInfoFromBody` over one POST body (the N1 identity peek — runs on **every** request, before the SDK's own parse) and `clientInfoFromMessage` per stdio line | Per-request overhead of the client-identity feature, now **one parse** for a single message: the batch attempt is dispatched on the first non-whitespace byte, and a valid non-handshake message never falls through to the NDJSON line scan. ~3.4 µs for a small body, ~5.5 ms + 1 MB transient allocation for a 1 MiB body. (Before the single-parse fix this path made three passes — batch scan + parse + NDJSON re-parse with a whole-body `string` copy: ~11.5 µs small, ~17 ms + 4.2 MB for 1 MiB.) `batch_of_3` is array scan + one parse per element (unchanged by the fix); `initialize` adds the params parse (the only body that carries clientInfo); `message_only_stdio` is the stdio tee's cost — one parse per message. |
 | `DiscoverLargeDirectory` | `discoverTools` over a 200-script directory (stat + frontmatter parse) | Startup cost, and the cost of every `--watch` rescan. ~13 ms for 200 scripts is dominated by process-external I/O, not parsing. |
 | `RegistryReload/no_op_rescan` | `replaceIfChanged` over 100 tools, set unchanged | The rescan short-circuit (M8): an unchanged rescan costs the per-tool equality diff (~96 µs) and triggers **no** AddTool/RemoveTools churn and **no** `list_changed` notifications. |
 | `RegistryReload/one_tool_changed` | same, one tool's description changed | The diff plus one re-registration (~448 µs, variants prebuilt and alternated so fixture cost stays out of the loop), dominated by schema build + validator + `AddTool` — not by the diff. |

@@ -20,11 +20,12 @@ import (
 // the SDK's own parse, and the stdio tee runs clientInfoFromMessage on every
 // line. Subtests cover the body shapes traffic actually has: a single
 // tools/call message (the common case — one full parse; the batch attempt is
-// dispatched on the first byte, and a valid non-handshake message never
-// falls through to the line scan), a small batch (array scan + one parse per
-// element), the rare initialize handshake (extra params parse), and a 1 MiB
-// tools/call body (large-argument case — the parse walks every byte to skip
-// it). message_only isolates clientInfoFromMessage — the stdio per-line cost.
+// dispatched on the first non-whitespace byte, and a valid non-handshake
+// message never falls through to the line scan), a small batch (array scan +
+// one parse per element), the rare initialize handshake (extra params
+// parse), and a 1 MiB tools/call body (large-argument case — the parse walks
+// every byte to skip it). message_only isolates clientInfoFromMessage — the
+// stdio per-line cost.
 func BenchmarkClientIdentityPeek(b *testing.B) {
 	single := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001","arguments":{"source":"a/b.txt"}}}`)
 	batch := []byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001","arguments":{"source":"a/b.txt"}}},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tool-002","arguments":{"source":"c/d.txt"}}},{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tool-003","arguments":{"source":"e/f.txt"}}}]`)

@@ -374,6 +374,34 @@ func TestClientInfoFromBody(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:     "CRLF NDJSON handshake",
+			body:     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\r\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"crlf\",\"version\":\"5.0\"}}}\r\n",
+			wantName: "crlf",
+			wantVer:  "5.0",
+			wantOK:   true,
+		},
+		{
+			name:   "valid batch without handshake",
+			body:   `[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"ping"}]`,
+			wantOK: false,
+		},
+		{
+			name:     "discover via NDJSON",
+			body:     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/clientInfo\":{\"name\":\"disc\",\"version\":\"6.0\"}}}}",
+			wantName: "disc",
+			wantVer:  "6.0",
+			wantOK:   true,
+		},
+		{
+			// A valid JSON object that is not itself a message (no top-level
+			// "method"): the single-parse early return stops inspection, so a
+			// handshake-shaped nested line no longer yields an identity (the
+			// SDK rejects such bodies anyway).
+			name:   "valid object that is not a message",
+			body:   "{\n\"x\":\n{\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"nested\"}}}\n}",
+			wantOK: false,
+		},
+		{
 			name:   "non-object single value",
 			body:   `123`,
 			wantOK: false,
