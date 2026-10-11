@@ -8,11 +8,61 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// BenchmarkClientIdentityPeek measures the per-request cost of the N1
+// client-identity peek: clientInfoFromBody runs on every POST body before
+// the SDK's own parse, and the stdio tee runs clientInfoFromMessage on every
+// line. Subtests cover the body shapes traffic actually has: a single
+// tools/call message (the common case — the batch attempt fails on the first
+// byte, so this is one full token scan), a small batch (array scan + one
+// element scan each), the rare initialize handshake (extra params parse),
+// and a 1 MiB tools/call body (large-argument case). message_only isolates
+// clientInfoFromMessage — the stdio per-line cost.
+func BenchmarkClientIdentityPeek(b *testing.B) {
+	single := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001","arguments":{"source":"a/b.txt"}}}`)
+	batch := []byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001","arguments":{"source":"a/b.txt"}}},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tool-002","arguments":{"source":"c/d.txt"}}},{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tool-003","arguments":{"source":"e/f.txt"}}}]`)
+	initMsg := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cursor","version":"1.2.3"}}}`)
+	// A 1 MiB tools/call body: a large argument payload, the worst common
+	// case (the scan walks every byte to skip it).
+	large := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001","arguments":{"source":"` + strings.Repeat("x", 1<<20) + `"}}}`)
+
+	b.Run("single_message", func(b *testing.B) {
+		b.SetBytes(int64(len(single)))
+		for i := 0; i < b.N; i++ {
+			clientInfoFromBody(single)
+		}
+	})
+	b.Run("batch_of_3", func(b *testing.B) {
+		b.SetBytes(int64(len(batch)))
+		for i := 0; i < b.N; i++ {
+			clientInfoFromBody(batch)
+		}
+	})
+	b.Run("initialize", func(b *testing.B) {
+		b.SetBytes(int64(len(initMsg)))
+		for i := 0; i < b.N; i++ {
+			clientInfoFromBody(initMsg)
+		}
+	})
+	b.Run("large_single_1mib", func(b *testing.B) {
+		b.SetBytes(int64(len(large)))
+		for i := 0; i < b.N; i++ {
+			clientInfoFromBody(large)
+		}
+	})
+	b.Run("message_only_stdio", func(b *testing.B) {
+		b.SetBytes(int64(len(single)))
+		for i := 0; i < b.N; i++ {
+			clientInfoFromMessage(single)
+		}
+	})
+}
 
 // writeBenchScript is the benchmark twin of writeScript (no *testing.T).
 func writeBenchScript(b *testing.B, path, body string) {
