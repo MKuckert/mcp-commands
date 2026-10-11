@@ -215,3 +215,28 @@ Fixed the remaining Copilot findings on PR #38:
   `captureWriter`.
 - **Plan state.** T1–T9 marked complete, status flipped to Completed, the N1
   row carries the field bound — the archived plan now matches what shipped.
+
+### Builder — 2026-10-10 (user perf review of the N1 peek)
+
+User question: does the identity peek unmarshal every message? Yes — and
+worse than one parse. `BenchmarkClientIdentityPeek` (new, recorded in
+`docs/BENCHMARKS.md`) showed the pre-fix `clientInfoFromBody` made **three
+passes** over a single-message body: the batch attempt scans the whole value
+before failing on a non-array, then the message is parsed once directly and
+again by the NDJSON fallback (which ran for *every* non-handshake single
+message, with a whole-body `string` copy). Cost: ~11.5 µs + 700 B transient
+for a small body; **~18 ms + 4.2 MB transient per request for a 1 MiB body**.
+
+Fix (behavior-identical, verified by the new `TestClientInfoFromBody`
+edge-shape table — NDJSON and malformed-array fall-through preserved):
+
+- Batch parse is dispatched on the first non-whitespace byte (`'['`), so a
+  single message never pays the batch scan.
+- `clientInfoFromMessage` now returns a fourth `parsed` flag; a valid
+  non-handshake message stops the inspection (a single JSON value cannot be
+  NDJSON), so the line scan runs only for genuinely unparseable bodies.
+
+Post-fix: ~3.4 µs / 112 B small, **~5.5 ms / 1 MB** for 1 MiB (3.3× faster,
+4× less transient memory); batch and stdio paths unchanged. The stdio tee
+pays one parse per message (~3.3 µs small) — inherent to the design,
+documented in `docs/BENCHMARKS.md`.

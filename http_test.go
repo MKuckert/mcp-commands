@@ -319,6 +319,78 @@ func TestBuildHTTPHandlerClientIdentityPeek(t *testing.T) {
 	}
 }
 
+// TestClientInfoFromBody pins the body-shape dispatch of the identity peek,
+// including the shapes the HTTP-level tests cannot reach (the SDK rejects
+// bodies that are neither a single message nor a batch array):
+// newline-delimited lines and a malformed array that still carries a
+// complete single-line handshake.
+func TestClientInfoFromBody(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantName string
+		wantVer  string
+		wantOK   bool
+	}{
+		{
+			name:   "single non-handshake",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tool-001"}}`,
+			wantOK: false,
+		},
+		{
+			name:     "single handshake",
+			body:     `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"solo","version":"1.0"}}}`,
+			wantName: "solo",
+			wantVer:  "1.0",
+			wantOK:   true,
+		},
+		{
+			name:     "NDJSON handshake on second line",
+			body:     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"ndjson\",\"version\":\"2.0\"}}}",
+			wantName: "ndjson",
+			wantVer:  "2.0",
+			wantOK:   true,
+		},
+		{
+			name:     "malformed array still yields a single-line handshake",
+			body:     "[garbage\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"rescued\",\"version\":\"3.0\"}}}",
+			wantName: "rescued",
+			wantVer:  "3.0",
+			wantOK:   true,
+		},
+		{
+			name: "leading whitespace before a batch",
+			body: `  [{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"indented","version":"4.0"}}}]
+`,
+			wantName: "indented",
+			wantVer:  "4.0",
+			wantOK:   true,
+		},
+		{
+			name: "empty body",
+			body: `   
+`,
+			wantOK: false,
+		},
+		{
+			name:   "non-object single value",
+			body:   `123`,
+			wantOK: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name, version, ok := clientInfoFromBody([]byte(tc.body))
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (name=%q version=%q)", ok, tc.wantOK, name, version)
+			}
+			if ok && (name != tc.wantName || version != tc.wantVer) {
+				t.Errorf("identity = %q/%q, want %q/%q", name, version, tc.wantName, tc.wantVer)
+			}
+		})
+	}
+}
+
 // TestBuildHTTPHandlerClientIdentityPeekBoundedByCap pins the locked peek
 // placement (inside the size/deadline wrapper): an over-cap initialize body
 // is rejected (413) and produces NO identity record — the peek's ReadAll

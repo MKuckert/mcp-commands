@@ -491,28 +491,41 @@ func boundIdentityField(s string) string {
 // array, or newline-delimited messages — and returns the client name/version
 // of the first handshake request it finds. The bool result is false when the
 // body carries no handshake request (or is unparseable).
+//
+// Hot path: this runs on every POST before the SDK's own parse, so a body
+// that parses as one message costs exactly one full parse — the batch
+// attempt is dispatched on the first non-whitespace byte, and a valid
+// non-handshake message never falls through to the line scan (a single JSON
+// value cannot be NDJSON).
 func clientInfoFromBody(body []byte) (name, version string, ok bool) {
-	var batch []json.RawMessage
-	if err := json.Unmarshal(body, &batch); err == nil {
-		for _, raw := range batch {
-			if n, v, found := clientInfoFromMessage(raw); found {
-				return n, v, true
-			}
-		}
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) == 0 {
 		return "", "", false
 	}
-	// A single message, pretty-printed across lines: the batch unmarshal above
-	// fails on a lone object, so try the whole body before falling back to
-	// line-by-line NDJSON.
-	if n, v, found := clientInfoFromMessage(body); found {
+	if trimmed[0] == '[' {
+		var batch []json.RawMessage
+		if err := json.Unmarshal(body, &batch); err == nil {
+			for _, raw := range batch {
+				if n, v, found, _ := clientInfoFromMessage(raw); found {
+					return n, v, true
+				}
+			}
+			return "", "", false
+		}
+		// Malformed array: fall through to the line scan below.
+	} else if n, v, found, parsed := clientInfoFromMessage(body); found {
 		return n, v, true
+	} else if parsed {
+		// A single message that is not a handshake: the body cannot be
+		// NDJSON either, so stop here.
+		return "", "", false
 	}
 	// Newline-delimited bodies carry one compact message per line.
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		if line == "" {
 			continue
 		}
-		if n, v, found := clientInfoFromMessage([]byte(line)); found {
+		if n, v, found, _ := clientInfoFromMessage([]byte(line)); found {
 			return n, v, true
 		}
 	}
@@ -521,17 +534,19 @@ func clientInfoFromBody(body []byte) (name, version string, ok bool) {
 
 // clientInfoFromMessage inspects one raw JSON-RPC message and reports the
 // client identity of a handshake request, with absent or empty fields rendered
-// as "unknown". Every other method, and unparseable input, reports !ok. The
-// two handshakes: legacy `initialize` (clientInfo in params) and the
-// 2026-07-28 `server/discover` (clientInfo in params._meta) that modern
-// clients send in its place.
-func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
+// as "unknown". The found result is true only for a handshake; the parsed
+// result is true whenever the input is a valid JSON object — it lets callers
+// distinguish "a message that is not a handshake" (no further inspection
+// needed) from unparseable input. The two handshakes: legacy `initialize`
+// (clientInfo in params) and the 2026-07-28 `server/discover` (clientInfo in
+// params._meta) that modern clients send in its place.
+func clientInfoFromMessage(raw []byte) (name, version string, found bool, parsed bool) {
 	var env struct {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return "", "", false
+		return "", "", false, false
 	}
 	switch env.Method {
 	case "initialize":
@@ -545,7 +560,7 @@ func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
 				version = params.ClientInfo.Version
 			}
 		}
-		return name, version, true
+		return name, version, true, true
 	case "server/discover":
 		name, version = "unknown", "unknown"
 		var params struct {
@@ -567,9 +582,9 @@ func clientInfoFromMessage(raw []byte) (name, version string, ok bool) {
 				}
 			}
 		}
-		return name, version, true
+		return name, version, true, true
 	}
-	return "", "", false
+	return "", "", false, true
 }
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
