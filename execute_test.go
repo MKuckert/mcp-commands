@@ -158,7 +158,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 	scriptPath := filepath.Join(scriptDir, "noop.sh")
 	writeScript(t, scriptPath, "#!/bin/bash\necho noop\n")
 
-	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{"1flag": "value"}, "", 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{"1flag": "value"}, "", nil, 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, testDiscardLogger, "tool", scriptPath, map[string]any{}, "", 5*time.Second, workDir)
+	result, err := executeTool(ctx, testDiscardLogger, "tool", scriptPath, map[string]any{}, "", nil, 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{}, "", 30*time.Second, tmpDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{}, "", nil, 30*time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -478,7 +478,8 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 		script         string
 		timeout        time.Duration
 		cancelCtx      bool
-		wantLevel      string // the outcome record's level prefix
+		clientInfo     *mcp.Implementation // the SDK's req.ClientInfo() equivalent; nil = unavailable
+		wantLevel      string              // the outcome record's level prefix
 		wantMsg        string
 		wantTrace      bool     // a TRACE record is emitted for every outcome that ran
 		wantTraceField []string // fields the TRACE record must carry (WARN's full set)
@@ -497,6 +498,9 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 				"exitCode=0", "stdoutBytes=6", "stderrBytes=0",
 				"duration=", "truncated=false",
 			},
+			// No client identity (nil): the fields are omitted entirely,
+			// never rendered as "unknown".
+			unwant: []string{"clientName", "clientVersion"},
 		},
 		{
 			name:      "timeout",
@@ -546,6 +550,33 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			unwant:         []string{"tool call completed"},
 		},
 		{
+			name:       "success-with-client-identity",
+			script:     "ok.sh",
+			timeout:    5 * time.Second,
+			clientInfo: &mcp.Implementation{Name: "cursor", Version: "1.2.3"},
+			wantLevel:  "DEBUG",
+			wantMsg:    "tool call completed",
+			wantTrace:  true,
+			// The identity rides on the shared attribute slice: both the
+			// DEBUG and its TRACE pair carry it.
+			wantTraceField: []string{"clientName=cursor", "clientVersion=1.2.3"},
+			want:           []string{"clientName=cursor", "clientVersion=1.2.3"},
+		},
+		{
+			name:       "failed-with-oversized-client-identity",
+			script:     "fail.sh",
+			timeout:    5 * time.Second,
+			clientInfo: &mcp.Implementation{Name: strings.Repeat("c", maxIdentityFieldBytes+10), Version: "9"},
+			wantLevel:  "WARN",
+			wantMsg:    "tool call failed",
+			wantTrace:  true,
+			// A hostile client can carry megabytes in its identity; the
+			// record stays bounded with an explicit truncation indicator.
+			want:           []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026", "clientVersion=9"},
+			unwant:         []string{strings.Repeat("c", maxIdentityFieldBytes+1)},
+			wantTraceField: []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026"},
+		},
+		{
 			name:      "truncated-output",
 			script:    "loud.sh",
 			timeout:   10 * time.Second,
@@ -570,7 +601,7 @@ func TestExecuteToolOutcomeLogging(t *testing.T) {
 			}
 
 			path := filepath.Join(tmpDir, tc.script)
-			_, _ = executeTool(ctx, log, tc.script, path, map[string]any{}, rawArgs, tc.timeout, tmpDir)
+			_, _ = executeTool(ctx, log, tc.script, path, map[string]any{}, rawArgs, tc.clientInfo, tc.timeout, tmpDir)
 			out := logBuf.String()
 
 			// One record per outcome class at the correct level.
@@ -632,7 +663,7 @@ func TestExecuteToolNoTraceAtDebugLevel(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	log := slog.New(newLogHandler(&logBuf, slog.LevelDebug))
-	_, _ = executeTool(context.Background(), log, "ok.sh", filepath.Join(tmpDir, "ok.sh"), map[string]any{}, "", 5*time.Second, tmpDir)
+	_, _ = executeTool(context.Background(), log, "ok.sh", filepath.Join(tmpDir, "ok.sh"), map[string]any{}, "", nil, 5*time.Second, tmpDir)
 	out := logBuf.String()
 
 	if !strings.Contains(out, "DEBUG@") || !strings.Contains(out, "tool call completed") {
@@ -653,7 +684,7 @@ func TestExecuteToolWarnAtWarnLevel(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	log := slog.New(newLogHandler(&logBuf, slog.LevelWarn))
-	_, _ = executeTool(context.Background(), log, "fail.sh", filepath.Join(tmpDir, "fail.sh"), map[string]any{}, `{"a":1}`, 5*time.Second, tmpDir)
+	_, _ = executeTool(context.Background(), log, "fail.sh", filepath.Join(tmpDir, "fail.sh"), map[string]any{}, `{"a":1}`, nil, 5*time.Second, tmpDir)
 	out := logBuf.String()
 
 	if !strings.Contains(out, "WARN@") || !strings.Contains(out, "tool call failed") || !strings.Contains(out, `reason=nonzero-exit`) {
@@ -674,7 +705,7 @@ func TestExecuteToolOutputStaysOneLine(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	log := slog.New(newLogHandler(&logBuf, levelTrace))
-	_, _ = executeTool(context.Background(), log, "multi.sh", filepath.Join(tmpDir, "multi.sh"), map[string]any{}, "", 5*time.Second, tmpDir)
+	_, _ = executeTool(context.Background(), log, "multi.sh", filepath.Join(tmpDir, "multi.sh"), map[string]any{}, "", nil, 5*time.Second, tmpDir)
 
 	lines := strings.Split(logBuf.String(), "\n")
 	carriers := 0

@@ -179,6 +179,44 @@ func formatCommand(argv []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// maxIdentityFieldBytes bounds a single client-identity field in a tool-call
+// record. The HTTP body cap is 10 MiB, so a hostile client can carry megabytes
+// in its clientInfo; the log must not become an amplification sink. 256 bytes
+// is generous for any real client name/version; over-long values are cut at a
+// rune boundary and marked with an explicit truncation indicator.
+const maxIdentityFieldBytes = 256
+
+// boundIdentityField cuts s to maxIdentityFieldBytes (at a rune boundary)
+// and appends the truncation indicator; short values pass through unchanged.
+func boundIdentityField(s string) string {
+	if len(s) <= maxIdentityFieldBytes {
+		return s
+	}
+	cut := maxIdentityFieldBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\u2026"
+}
+
+// identityAttrs renders the calling client's name and version (from the SDK's
+// req.ClientInfo()) as bounded record fields. It returns nil when the identity
+// is unavailable — ClientInfo() returned nil, or both fields are empty — so
+// the record omits them entirely rather than logging "unknown" per call.
+func identityAttrs(info *mcp.Implementation) []any {
+	if info == nil {
+		return nil
+	}
+	var attrs []any
+	if name := boundIdentityField(info.Name); name != "" {
+		attrs = append(attrs, "clientName", name)
+	}
+	if version := boundIdentityField(info.Version); version != "" {
+		attrs = append(attrs, "clientVersion", version)
+	}
+	return attrs
+}
+
 // executeTool runs the script at scriptPath as a subprocess in the specified
 // working directory. It accepts pre-parsed arguments as a map, converts them to
 // CLI flags, and binds the context to a timeout to prevent hanging tools.
@@ -193,8 +231,10 @@ func formatCommand(argv []string) string {
 // "nonzero-exit" (the script ran and exited non-zero), "canceled" (the
 // request context was canceled — a client abort with --no-timeout — and the
 // process was killed; exitCode is -1), "start-failed" (the script never
-// started: no exec, no output).
-func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string, args map[string]any, rawArgs string, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
+// started: no exec, no output). When clientInfo is non-nil and carries a name
+// or version (the SDK's req.ClientInfo()), the records additionally carry
+// bounded clientName/clientVersion fields.
+func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string, args map[string]any, rawArgs string, clientInfo *mcp.Implementation, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
 		return textResult(err.Error(), true), nil
@@ -246,11 +286,13 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 			"stderrBytes", 0,
 			"duration", time.Since(started),
 			"truncated", false,
+		}
+		startAttrs = append(startAttrs, identityAttrs(clientInfo)...)
+		startAttrs = append(startAttrs,
 			"reason", "start-failed",
 			"error", err,
 			"stdout", "",
-			"stderr", "",
-		}
+			"stderr", "")
 		log.Warn("tool call failed", startAttrs...)
 		log.Log(ctx, levelTrace, "tool call failed", startAttrs...)
 		return nil, err
@@ -279,6 +321,9 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 		"duration", duration,
 		"truncated", stdout.Truncated() || stderr.Truncated(),
 	}
+	// The calling client's identity (SDK req.ClientInfo()), when available:
+	// omitted entirely for a nil/empty identity, bounded otherwise.
+	attrs = append(attrs, identityAttrs(clientInfo)...)
 	outputAttrs := append([]any{}, "stdout", string(stdout.Bytes()), "stderr", string(stderr.Bytes()))
 
 	if waitErr != nil {

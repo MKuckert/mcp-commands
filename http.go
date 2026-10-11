@@ -12,7 +12,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -430,26 +429,6 @@ func (b *bodyReadDeadline) Read(p []byte) (int, error) {
 }
 
 func (b *bodyReadDeadline) Close() error { return b.in.Close() }
-
-// maxIdentityFieldBytes bounds a single clientInfo field in the N1 record.
-// The HTTP body cap is 10 MiB, so a hostile client can carry megabytes in
-// clientInfo.name; the log must not become an amplification sink. 256 bytes
-// is generous for any real client name/version; over-long values are cut at
-// a rune boundary and marked with an explicit truncation indicator.
-const maxIdentityFieldBytes = 256
-
-// boundIdentityField cuts s to maxIdentityFieldBytes (at a rune boundary)
-// and appends the truncation indicator; short values pass through unchanged.
-func boundIdentityField(s string) string {
-	if len(s) <= maxIdentityFieldBytes {
-		return s
-	}
-	cut := maxIdentityFieldBytes
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "\u2026"
-}
 
 // buildHTTPHandler returns the streamable MCP handler, always constructed
 // stateless (the app keeps no per-session state, so protocol sessions are

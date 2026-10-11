@@ -599,6 +599,85 @@ func TestRunStdioWatchServes(t *testing.T) {
 	}
 }
 
+// TestRunStdioClientIdentity covers the client identity on tool-call records
+// over stdio (legacy protocol): the SDK's session carries the clientInfo from
+// the initialize handshake, so req.ClientInfo() resolves it and the tool-call
+// record carries clientName/clientVersion. No "client connected" record is
+// emitted (the transport-boundary capture is gone).
+func TestRunStdioClientIdentity(t *testing.T) {
+	// Not parallel: swaps the process stdin/stdout globals for pipes.
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+
+	// captureWriter (mutex-guarded): the SDK's stdin reader goroutine and
+	// run() both write to the logger; a plain strings.Builder would race
+	// under -race.
+	var stderr captureWriter
+	env := liveEnvFor(t, io.Discard, &stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "stdio-e2e", Version: "9.9.9"}, &mcp.ClientOptions{
+		Capabilities: &mcp.ClientCapabilities{},
+	})
+	session, err := client.Connect(ctx, &mcp.IOTransport{Reader: outR, Writer: inW}, nil)
+	if err != nil {
+		t.Fatalf("client connect over stdio pipe: %v", err)
+	}
+	defer session.Close()
+
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "alpha"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("CallTool returned an error result: %+v", res)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v after cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after cancel")
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"tool call completed", "clientName=stdio-e2e", "clientVersion=9.9.9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr log = %q, want it to contain %s", out, want)
+		}
+	}
+	if strings.Contains(out, "client connected") {
+		t.Errorf("stderr log = %q, want no client-connected record (the transport-boundary capture is gone)", out)
+	}
+}
+
 // TestRunLifecycleLogs pins N9/N10: a signal produces a "shutting down"
 // INFO and a clean serve exit a "server stopped" INFO with the transport,
 // the bound port, and the run duration.

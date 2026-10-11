@@ -156,7 +156,7 @@ func BenchmarkExecuteCappedOutput(b *testing.B) {
 				} else {
 					ready <- struct{}{}
 					<-start
-					out.res, out.err = executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, nil, "", 30*time.Second, dir)
+					out.res, out.err = executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, nil, "", nil, 30*time.Second, dir)
 					slot.release()
 				}
 				done <- out

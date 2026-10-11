@@ -176,7 +176,9 @@ func (r *toolRegistry) addToolLocked(tool discoveredTool) {
 		defer r.slot.release()
 		// req.Params.Arguments is the client's exact arguments JSON as
 		// received on the wire (json.RawMessage) — logged verbatim.
-		return executeTool(ctx, r.log, tool.Name, tool.Path, parsedArgs, string(req.Params.Arguments), toolTimeout, r.dirAbs)
+		// req.ClientInfo() is the SDK's per-request client identity (nil for
+		// stateless legacy-protocol clients — see the plan's review log).
+		return executeTool(ctx, r.log, tool.Name, tool.Path, parsedArgs, string(req.Params.Arguments), req.ClientInfo(), toolTimeout, r.dirAbs)
 	})
 
 	r.server.AddTool(&mcp.Tool{

@@ -206,7 +206,101 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	}
 }
 
-// TestBoundIdentityField pins the N1 field bound: short values (incl. one
+// TestBuildHTTPHandlerToolCallClientIdentity covers the client identity on
+// tool-call records (option B): the identity comes from the SDK's per-request
+// ClientInfo(), not from a transport-boundary peek. A 2026-07-28 tools/call
+// whose _meta carries clientInfo lands bounded clientName/clientVersion on
+// the tool-call record; a call without identity (stateless legacy-protocol
+// synthesis) omits the fields entirely. No "client connected" record exists.
+func TestBuildHTTPHandlerToolCallClientIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		body   string
+		header string // Mcp-Protocol-Version; empty omits it
+		want   []string
+		unwant []string
+	}{
+		{
+			name:   "with clientInfo (2026-07-28 protocol)",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}`,
+			header: "2026-07-28",
+			want:   []string{"tool call completed", "clientName=claude-code", "clientVersion=1.0.6"},
+			unwant: []string{"client connected", "unknown"},
+		},
+		{
+			// No _meta: the stateless SDK synthesizes empty InitializeParams
+			// per request, so ClientInfo() is nil — the fields are omitted.
+			name:   "without clientInfo",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{}}}`,
+			want:   []string{"tool call completed"},
+			unwant: []string{"clientName", "clientVersion"},
+		},
+		{
+			// A hostile client can carry megabytes in its identity (the body
+			// cap is 10 MiB); the record must stay bounded with an explicit
+			// truncation indicator.
+			name:   "oversized clientInfo is bounded",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"` + strings.Repeat("a", maxIdentityFieldBytes+10) + `","version":"1.0"}}}}`,
+			header: "2026-07-28",
+			want:   []string{"clientName=" + strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
+			unwant: []string{strings.Repeat("a", maxIdentityFieldBytes+1)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			scriptPath := filepath.Join(tmpDir, "noop.sh")
+			writeScript(t, scriptPath, "#!/bin/bash\necho ok\n")
+
+			var logBuf bytes.Buffer
+			log := slog.New(newLogHandler(&logBuf, levelTrace))
+			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+			registry := newToolRegistry(server, tmpDir, 30*time.Second, 16, log)
+			registry.replace([]discoveredTool{{Name: "noop", Path: scriptPath, Description: "no-op"}})
+
+			httpServer := httptest.NewServer(buildHTTPHandler(server, log, "", corsConfig{}))
+			defer httpServer.Close()
+
+			req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("failed to build request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if tc.header != "" {
+				req.Header.Set("Mcp-Protocol-Version", tc.header)
+				// The 2026-07-28 protocol requires the method and, for
+				// tools/call, the tool name in headers (validated against
+				// the body).
+				req.Header.Set("Mcp-Method", "tools/call")
+				req.Header.Set("Mcp-Name", "noop")
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST failed: %v", err)
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			out := logBuf.String()
+			for _, s := range tc.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to contain %s", out, s)
+				}
+			}
+			for _, s := range tc.unwant {
+				if strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to NOT contain %s", out, s)
+				}
+			}
+		})
+	}
+}
+
+// TestBoundIdentityField pins the client-identity field bound: short values (incl. one
 // exactly at the cap) pass through; over-long values are cut to
 // maxIdentityFieldBytes at a rune boundary and marked with the truncation
 // indicator, so no client can grow a log record past cap + marker.
