@@ -87,7 +87,7 @@ Target sites are where the record will be emitted after the change.
 - [x] **T5 — CORS preflight records (N7–N8).** `http.go`: DEBUG on allowed preflight, WARN on rejected origin. `http_test.go`: allowed/denied preflight at `debug`; denied origin record at `warn`; non-preflight requests emit nothing.
 - [x] **T6 — Lifecycle + rescan records (N9–N11).** `server.go` `shutting down` (INFO, `reason=signal`, no name) / `server stopped` (INFO, `mode`); `watch.go` per-event DEBUG; keep the existing `rescan fired` DEBUG. Tests: `watch_test.go` case asserting the per-event DEBUG record; `server_test.go` cases for the two lifecycle records.
 - [x] **T7 — SDK logger: document the nil choice.** `server.go`: `mcp.NewServer(impl, nil)` gains a comment pinning why `ServerOptions.Logger` stays nil — the SDK logs `server connecting` (INFO) at *every* connect and stateless HTTP connects per *request*, so wiring the app logger would double-log every request; nil maps to `slog.DiscardHandler` (deliberate silence). (Original optional wiring rejected in review.)
-- [x] **T8 — Docs.** `README.md` Logging section: `trace` in the level list (both `--log-level` and `LOG_LEVEL` rows), the new records (client connected, tool call DEBUG/TRACE/WARN with the output-bound note, CORS preflight, lifecycle), one new sample line; flag table row for `--log-level`; `Makefile` `VERSION ?= 0.12.0`; version refs in README.
+- [x] **T8 — Docs.** `README.md` Logging section: `trace` in the level list (both `--log-level` and `LOG_LEVEL` rows), the new records (tool call DEBUG/TRACE/WARN — with the client identity where available, after the 2026-10-11 pivot — with the output-bound note, CORS preflight, lifecycle), one new sample line; flag table row for `--log-level`; `Makefile` `VERSION ?= 0.12.0`; version refs in README.
 - [x] **T9 — Final.** Full suite `go test ./...` + `go vet ./...` + `gofmt -l .` green; plan reviewed and updated.
 
 ## Risks & notes
@@ -245,7 +245,7 @@ documented in `docs/BENCHMARKS.md`.
 
 ### Builder — 2026-10-11 (user design pivot, option B: identity from `req.ClientInfo()`)
 
-User directive: drop the raw-traffic peaking for client identity entirely and
+User directive: drop the raw-traffic peeking for client identity entirely and
 source it from the SDK's `req.ClientInfo()` instead. Verified against go-sdk
 v1.8.0 (`shared.go:693`): `ClientInfo()` reads
 `_meta.io.modelcontextprotocol/clientInfo` per request on the 2026-07-28
@@ -286,5 +286,34 @@ Added:
 
 Design decisions 2, T2, the N1 row, and the now-moot risk notes (stdio
 switch, double body buffering) are marked superseded above; the N2 row carries
-the new fields. All other records (N2–N13), the TRACE level, and the
+the new fields. All other records (N2–N12), the TRACE level, and the
 remaining benchmarks are untouched.
+
+### Builder — 2026-10-11 (Copilot round 5: injection guard, lazy TRACE output, doc fixes)
+
+Five new Copilot findings on the pivot commit:
+
+- **Log injection (security):** attribute values bearing a control character
+  but no whitespace (e.g. a clientInfo name of `\u001b[2J` — valid JSON, no
+  whitespace) rendered verbatim, so a remote client could drive the operator's
+  terminal. Fixed centrally in `loghandler.go`: new `isControl` helper,
+  `renderString` quotes values containing whitespace *or* a control character
+  (`strconv.Quote` escapes every control char), and the message escaper became
+  `escapeMessage` (all control chars → Go-style escapes, fast path for the
+  common clean case). Pinned by `TestLogHandlerControlChars` and a new
+  end-to-end case in `TestBuildHTTPHandlerToolCallClientIdentity`
+  (escape-sequence clientInfo → quoted/escaped in the record, no raw control
+  byte anywhere). README logging section documents the guard.
+- **Eager output copy (perf):** `outputAttrs` (up to 2 MiB of string copies)
+  was built on *every* successful call although only the failure branch used
+  it — moved inside the `waitErr != nil` branch.
+- **TRACE args before Enabled (perf):** the success-path TRACE record's
+  string copies were evaluated even when TRACE is disabled (the default) —
+  guarded with `log.Enabled(ctx, levelTrace)`.
+- **Stale plan refs:** T8's "client connected" wording updated to the
+  post-pivot design; the pivot entry's closing range `N2–N13` → `N2–N12`
+  (N13 was rejected); "peaking" → "peeking" typo.
+
+`BenchmarkExecuteCappedOutput` re-recorded after the lazy fix: 13.52 →
+12.14 ms, 7.42 → 5.35 MB/op (the eager copies are gone; `docs/BENCHMARKS.md`
+block + variance note updated).
