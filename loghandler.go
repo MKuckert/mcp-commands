@@ -9,10 +9,42 @@ import (
 	"strings"
 )
 
-// messageEscaper renders newline and carriage return in the record message as
-// the two-character literals `\n` / `\r`, preserving the one-line-per-record
-// invariant.
-var messageEscaper = strings.NewReplacer("\n", `\n`, "\r", `\r`)
+// isControl reports whether r is an ASCII control character (U+0000–U+001F,
+// U+007F) — bytes a terminal interprets (escape sequences, line feeds)
+// rather than printing. Attribute values and messages that carry them must
+// be escaped before rendering, so a client-controlled value (e.g. a clientInfo
+// name of "\u001b[2J") cannot drive the operator's terminal or spoof log
+// presentation.
+func isControl(r rune) bool { return r < 0x20 || r == 0x7F }
+
+// escapeMessage renders any ASCII control character in the record message as
+// a Go-style escape (\n, \r, \t, \xNN), preserving the one-line-per-record
+// invariant and keeping terminal escape sequences inert. Messages without a
+// control character pass through untouched (the common case).
+func escapeMessage(s string) string {
+	if strings.IndexFunc(s, isControl) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if isControl(r) {
+				fmt.Fprintf(&b, `\x%02x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
 
 // levelTrace is the TRACE severity (below debug). The stdlib defines no such
 // constant (slog.Level(-8).String() would render "DEBUG-4"), so the app names
@@ -43,9 +75,10 @@ func levelName(l slog.Level) string {
 //
 //	<LEVEL>@<HH:mm:ss> <message> [ | key=value …]
 //
-// The message renders unquoted; any `\n` / `\r` in it is escaped as the
-// two-character literals `\n` / `\r` so every record stays on one physical
-// line. Attribute values containing whitespace are double-quoted (see
+// The message renders unquoted; any control character in it is escaped as a
+// Go-style literal (\n, \r, \t, \xNN) so every record stays on one physical
+// line and terminal escape sequences cannot pass through. Attribute values
+// containing whitespace or a control character are double-quoted (see
 // renderString). A ` | ` separator joins the message and the attribute list
 // only when at least one attribute renders — a record with no attributes ends
 // right after the message.
@@ -84,7 +117,7 @@ func (h *logHandler) Enabled(_ context.Context, level slog.Level) bool {
 // Handle renders the record as one line followed by a newline.
 func (h *logHandler) Handle(_ context.Context, rec slog.Record) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s@%s %s", levelName(rec.Level), rec.Time.Format("15:04:05"), messageEscaper.Replace(rec.Message))
+	fmt.Fprintf(&b, "%s@%s %s", levelName(rec.Level), rec.Time.Format("15:04:05"), escapeMessage(rec.Message))
 	first := true
 	// h.attrs carry baked-in keys, so no group prefix is applied; the record's
 	// own attrs are the only ones h.group prefixes.
@@ -158,10 +191,13 @@ func writeAttr(b *strings.Builder, first *bool, group string, attr slog.Attr) {
 	b.WriteString(renderString(v.String()))
 }
 
-// renderString double-quotes attribute values containing whitespace; all other
-// values render verbatim (slog Value.String already formats numbers, times, etc.).
+// renderString double-quotes attribute values containing whitespace or a
+// control character; all other values render verbatim (slog Value.String
+// already formats numbers, times, etc.). strconv.Quote escapes every control
+// character (\xNN / \u+HHHH), so a terminal escape sequence in a
+// client-controlled value can never reach the log verbatim.
 func renderString(s string) string {
-	if strings.ContainsAny(s, " \t\n\r") {
+	if strings.ContainsAny(s, " \t\n\r") || strings.IndexFunc(s, isControl) >= 0 {
 		return strconv.Quote(s)
 	}
 	return s

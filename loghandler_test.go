@@ -270,6 +270,36 @@ func TestLogHandlerCRValue(t *testing.T) {
 	}
 }
 
+// TestLogHandlerControlChars pins the log-injection guard: a control
+// character that bears no whitespace (a terminal escape sequence) must never
+// reach the log verbatim, in attribute values or messages. The motivating
+// case is a clientInfo name of "\u001b[2J": no whitespace, so the old
+// renderer emitted the ESC byte directly and a remote client could drive the
+// operator's terminal.
+func TestLogHandlerControlChars(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	// An escape-sequence-only value (no whitespace): quoted, ESC rendered as
+	// the literal \x1b.
+	log.Info("m", slog.String("name", "\x1b[2J"))
+	// A message carrying an escape sequence: escaped, record stays one line.
+	log.Info("boom\x1b[31mred")
+	out := buf.String()
+	if strings.Count(out, "\n") != 2 {
+		t.Fatalf("records = %q, want exactly two physical lines", out)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("records = %q, want no raw control byte anywhere", out)
+	}
+	if !strings.Contains(out, `name="\x1b[2J"`) {
+		t.Errorf("records = %q, want the value quoted and escaped: name=\"\\x1b[2J\"", out)
+	}
+	if !strings.Contains(out, `boom\x1b[31mred`) {
+		t.Errorf("records = %q, want the message's escape sequence escaped", out)
+	}
+}
+
 // TestLogHandlerConcurrentHandle exercises many goroutines calling Handle on
 // the same handler value to prove it is safe for concurrent use (the sink is
 // mutex-guarded; the handler itself must be — go test -race would catch it).

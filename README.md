@@ -285,7 +285,7 @@ The registered tool description carries a `(timeout: 30s)` / `(timeout: none)` s
 
 #### Logging
 
-All diagnostics — banners, warnings, and operational errors — are logged to **stderr** as [slog](https://pkg.go.dev/log/slog) records, each rendered on one line as `<LEVEL>@HH:mm:ss message key=value …` — the message is unquoted and, when the record carries attributes, a ` | ` separator joins it to the first `key=value` (a record with no attributes ends right after the message):
+All diagnostics — banners, warnings, and operational errors — are logged to **stderr** as [slog](https://pkg.go.dev/log/slog) records, each rendered on one line as `<LEVEL>@HH:mm:ss message key=value …` — the message is unquoted and, when the record carries attributes, a ` | ` separator joins it to the first `key=value` (a record with no attributes ends right after the message). Attribute values containing whitespace or a control character are double-quoted, and control characters — including terminal escape sequences that can ride in client-controlled values such as the client identity — render as Go-style escapes (`\x1b`), so a remote client cannot corrupt the one-line format or drive the operator's terminal:
 
 ```
 WARN@18:02:11 ignoring invalid Timeout | file=/path/to/scripts/render.sh error="invalid timeout ..."

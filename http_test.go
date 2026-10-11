@@ -246,6 +246,17 @@ func TestBuildHTTPHandlerToolCallClientIdentity(t *testing.T) {
 			want:   []string{"clientName=" + strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
 			unwant: []string{strings.Repeat("a", maxIdentityFieldBytes+1)},
 		},
+		{
+			// A terminal escape sequence smuggled into clientInfo (\u001b is
+			// valid JSON; the decoded value carries a raw ESC byte) must not
+			// reach the log verbatim — the renderer quotes and escapes control
+			// characters, so no raw control byte appears in the record.
+			name:   "escape sequence in clientInfo is inert",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"\u001b[2Jcursor","version":"1.0"}}}}`,
+			header: "2026-07-28",
+			want:   []string{`clientName="\x1b[2Jcursor"`},
+			unwant: []string{"\x1b"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
