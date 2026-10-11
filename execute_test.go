@@ -376,6 +376,77 @@ func TestBoundLogValue(t *testing.T) {
 	}
 }
 
+// TestExecuteToolOutcomeParamsCaps pins the per-level caps on the client's
+// raw params: bounded to maxWarnParamsBytes on the WARN record,
+// maxDebugParamsBytes on the DEBUG success record, and raw (uncapped) on the
+// paired TRACE record. The run-length assertions are line-verified — a
+// whole-log check would pass even if the cap landed on the wrong record.
+func TestExecuteToolOutcomeParamsCaps(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+
+	// ~100 KiB of 'a' inside the client's params JSON. Only params carries
+	// the run, so per-line run-length checks isolate each record's cap.
+	rawArgs := `{"p":"` + strings.Repeat("a", 100*1024) + `"}`
+
+	run := func(t *testing.T, script string) []string {
+		t.Helper()
+		var logBuf bytes.Buffer
+		log := slog.New(newLogHandler(&logBuf, levelTrace))
+		path := filepath.Join(tmpDir, script)
+		_, _ = executeTool(context.Background(), log, script, path, map[string]any{}, rawArgs, nil, 5*time.Second, tmpDir)
+		return strings.Split(logBuf.String(), "\n")
+	}
+
+	find := func(lines []string, prefix, msg string) string {
+		for _, line := range lines {
+			if strings.HasPrefix(line, prefix) && strings.Contains(line, msg) {
+				return line
+			}
+		}
+		return ""
+	}
+
+	t.Run("success-debug-capped-trace-raw", func(t *testing.T) {
+		lines := run(t, "ok.sh")
+		debugLine := find(lines, "DEBUG@", "tool call completed")
+		traceLine := find(lines, "TRACE@", "tool call completed")
+		if debugLine == "" || traceLine == "" {
+			t.Fatalf("missing DEBUG/TRACE records:\n%s", strings.Join(lines, "\n"))
+		}
+		// The 6-byte JSON prefix leaves a ~64 KiB run inside the cap.
+		if !strings.Contains(debugLine, strings.Repeat("a", 60*1024)) {
+			t.Error("DEBUG record: params run shorter than expected — cap too small?")
+		}
+		if strings.Contains(debugLine, strings.Repeat("a", 70*1024)) {
+			t.Error("DEBUG record: params exceed maxDebugParamsBytes")
+		}
+		if !strings.Contains(traceLine, strings.Repeat("a", 100*1024)) {
+			t.Error("TRACE record: params must be raw (uncapped)")
+		}
+	})
+
+	t.Run("failure-warn-capped-trace-raw", func(t *testing.T) {
+		lines := run(t, "fail.sh")
+		warnLine := find(lines, "WARN@", "tool call failed")
+		traceLine := find(lines, "TRACE@", "tool call failed")
+		if warnLine == "" || traceLine == "" {
+			t.Fatalf("missing WARN/TRACE records:\n%s", strings.Join(lines, "\n"))
+		}
+		if !strings.Contains(warnLine, strings.Repeat("a", 900)) {
+			t.Error("WARN record: params run shorter than expected — cap too small?")
+		}
+		if strings.Contains(warnLine, strings.Repeat("a", 2000)) {
+			t.Error("WARN record: params exceed maxWarnParamsBytes")
+		}
+		if !strings.Contains(traceLine, strings.Repeat("a", 100*1024)) {
+			t.Error("TRACE record: params must be raw (uncapped)")
+		}
+	})
+}
+
 func TestBoundedWriter(t *testing.T) {
 	t.Parallel()
 	w := newBoundedWriter(10)

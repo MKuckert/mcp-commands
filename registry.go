@@ -138,17 +138,13 @@ func (r *toolRegistry) replaceLocked(tools []discoveredTool) {
 	r.current = append([]discoveredTool(nil), tools...)
 }
 
-// maxRejectedParamsBytes bounds the raw params JSON logged on a rejected
-// tool call (N5). The params are client-controlled (up to the 10 MiB body
-// cap); a kilobyte shows the request's shape, and the error attribute carries
-// the precise constraint and location.
-const maxRejectedParamsBytes = 1024
-
 // maxValidationErrorBytes bounds the validation error logged on a rejected
 // tool call (N5). Errors are normally short, but some constraint messages
 // embed the offending client value — a pattern mismatch quotes the whole
 // string, an additionalProperties violation lists every unknown key — so an
-// unbounded error would be a second amplification path.
+// unbounded error would be a second amplification path. The params field on
+// that record uses maxWarnParamsBytes (execute.go) — one cap for every
+// WARN-level params.
 const maxValidationErrorBytes = 4096
 
 // addToolLocked registers one tool (add is a replace-in-place in the SDK,
@@ -172,11 +168,11 @@ func (r *toolRegistry) addToolLocked(tool discoveredTool) {
 			// Malformed arguments JSON: the SDK also reports it as a
 			// protocol error; the app-side WARN keeps it greppable. Both
 			// fields are client-controlled and bounded (see the constants).
-			r.log.Warn("tool call rejected", "tool", tool.Name, "params", boundLogValue(string(req.Params.Arguments), maxRejectedParamsBytes), "error", boundLogValue(err.Error(), maxValidationErrorBytes))
+			r.log.Warn("tool call rejected", "tool", tool.Name, "params", boundLogValue(string(req.Params.Arguments), maxWarnParamsBytes), "error", boundLogValue(err.Error(), maxValidationErrorBytes))
 			return nil, err
 		}
 		if err := validateToolArguments(parsedArgs, validator); err != nil {
-			r.log.Warn("tool call rejected", "tool", tool.Name, "params", boundLogValue(string(req.Params.Arguments), maxRejectedParamsBytes), "error", boundLogValue(err.Error(), maxValidationErrorBytes))
+			r.log.Warn("tool call rejected", "tool", tool.Name, "params", boundLogValue(string(req.Params.Arguments), maxWarnParamsBytes), "error", boundLogValue(err.Error(), maxValidationErrorBytes))
 			return textResult(err.Error(), true), nil
 		}
 		// Capacity check after validation: malformed calls must not

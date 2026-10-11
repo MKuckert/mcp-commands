@@ -65,9 +65,9 @@ Target sites are where the record will be emitted after the change.
 | # | Site (planned) | Event | Severity | Fields |
 |---|----------------|-------|----------|--------|
 | ~~N1~~ | — (removed 2026-10-11, option B) | ~~client connected (initialize request)~~ — the transport-boundary capture is gone; identity moved onto N2–N4 via `req.ClientInfo()` | ~~INFO~~ | — |
-| N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated`; **plus (2026-10-11)** `clientName`, `clientVersion` from `req.ClientInfo()` when available (each cut at 256 B, rune-boundary safe, explicit truncation indicator; omitted entirely when the identity is nil/empty — never "unknown") |
-| N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each) |
-| N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout |
+| N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (≤64 KiB, `…` marker; raw in the TRACE pair), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated`; **plus (2026-10-11)** `clientName`, `clientVersion` from `req.ClientInfo()` when available (each cut at 256 B, rune-boundary safe, explicit truncation indicator; omitted entirely when the identity is nil/empty — never "unknown") |
+| N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each); `params` raw (uncapped — the verbatim level) |
+| N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout; `params` ≤1 KiB in the WARN record, raw in the TRACE pair |
 | N5 | `registry.go` handler | tool argument validation failed | WARN | `tool`, `params` (raw JSON, ≤1 KiB), `error` (≤4 KiB) — both client-controlled and bounded with an explicit truncation indicator (2026-10-11) |
 | N6 | `registry.go` handler | at-capacity rejection | DEBUG | `tool`, `limit` |
 | N7 | `http.go` `newCORSHandler` | CORS preflight allowed | DEBUG | `origin`, `requestHeaders`, `maxAge` |
@@ -343,3 +343,30 @@ payload.
 Note: the N2/N4 outcome records still log `params` as raw JSON — a
 documented design choice (plan row N2: "raw JSON"); bounding it would
 change documented debug/trace behavior, so it stays a separate decision.
+(Resolved the same day — see the next entry.)
+
+### Builder — 2026-10-11 (user decision: per-level caps on outcome-record params)
+
+The open item above is resolved: the user chose per-level caps for the N2/N4
+outcome records — WARN ≤ 1 KiB, DEBUG ≤ 64 KiB, TRACE raw. (The N4 failure
+WARN is emitted at the default level, so its `params` had the same
+amplification exposure as N5; only the N2 DEBUG and the TRACE pairs sit
+behind explicit level choices.)
+
+- `params` is appended per record level instead of riding the shared
+  attribute slice: every WARN record (N4 incl. start-failed, N5) gets
+  `boundLogValue(rawArgs, maxWarnParamsBytes)` — one shared constant for all
+  WARN-level params (the N5-only `maxRejectedParamsBytes` is gone); the DEBUG
+  success record gets `boundLogValue(rawArgs, maxDebugParamsBytes)` (64 KiB —
+  an operator correlating a call with its result benefits from the full
+  payload of tools with large legitimate arguments), guarded by
+  `log.Enabled(ctx, slog.LevelDebug)` so a large payload does not pay for the
+  copy at the default level; TRACE records carry the raw params uncapped.
+- Failure path: the output strings are built once and shared by the WARN and
+  TRACE records; only the params bound differs (cheap slice appends).
+- Field order: `params` now follows the base N2 fields (and identity) on
+  every tool-call record — README sample and this table updated.
+- Pinned by `TestExecuteToolOutcomeParamsCaps` (100 KiB payload; per-record
+  line-verified run-length assertions: DEBUG ~64 KiB run, WARN ~1 KiB run,
+  TRACE full run — removing a cap fails the matching subtest).
+- README: debug/trace bullets and the record-pair section updated.

@@ -19,6 +19,20 @@ import (
 
 const maxToolOutputBytes = 1 << 20
 
+// maxWarnParamsBytes caps the client's raw params JSON on any WARN record —
+// the N4 tool-call failure (including start-failed, execute.go) and the N5
+// validation rejection (registry.go). WARN is emitted at the default level,
+// so a hostile peer's 10 MiB payload must not reach the log verbatim; a
+// kilobyte shows the request's shape.
+const maxWarnParamsBytes = 1024
+
+// maxDebugParamsBytes caps params on the N2 success record, which is emitted
+// only at debug: larger than the WARN cap because an operator correlating a
+// call with its result benefits from the full payload of tools with large
+// legitimate arguments. TRACE records carry the raw params uncapped — that
+// is the level for verbatim material.
+const maxDebugParamsBytes = 64 * 1024
+
 // argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
 // formatted for execution. It enforces strict naming rules for keys to prevent
 // injection or ambiguity. Boolean values follow POSIX conventions (true -> --flag,
@@ -287,7 +301,6 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 			"tool", name,
 			"path", scriptPath,
 			"command", formatCommand(cmd.Args),
-			"params", rawArgs,
 			"exitCode", -1,
 			"stdoutBytes", 0,
 			"stderrBytes", 0,
@@ -295,13 +308,14 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 			"truncated", false,
 		}
 		startAttrs = append(startAttrs, identityAttrs(clientInfo)...)
-		startAttrs = append(startAttrs,
-			"reason", "start-failed",
-			"error", err,
-			"stdout", "",
-			"stderr", "")
-		log.Warn("tool call failed", startAttrs...)
-		log.Log(ctx, levelTrace, "tool call failed", startAttrs...)
+		// params is appended per record level — WARN (emitted at the default
+		// level) bounds it to maxWarnParamsBytes, the TRACE pair carries the
+		// raw client JSON — then the failure fields, in the same order as
+		// every other failed outcome.
+		log.Warn("tool call failed", append(append(startAttrs, "params", boundLogValue(rawArgs, maxWarnParamsBytes)),
+			"reason", "start-failed", "error", err, "stdout", "", "stderr", "")...)
+		log.Log(ctx, levelTrace, "tool call failed", append(append(startAttrs, "params", rawArgs),
+			"reason", "start-failed", "error", err, "stdout", "", "stderr", "")...)
 		return nil, err
 	}
 
@@ -309,10 +323,11 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 	duration := time.Since(started)
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
 
-	// The shared record fields (N2): the tool, the raw command line, the raw
-	// request parameters (the client's exact JSON, not re-marshaled), the
+	// The shared record fields (N2): the tool, the raw command line, the
 	// exit code, how much output was captured, how long it took, and whether
-	// the 1 MiB stream cap dropped bytes.
+	// the 1 MiB stream cap dropped bytes. The raw request parameters are
+	// appended per record level (WARN ≤ maxWarnParamsBytes, DEBUG ≤
+	// maxDebugParamsBytes, TRACE raw) — see the log sites below.
 	exitCode := -1
 	if cmd.ProcessState != nil {
 		exitCode = cmd.ProcessState.ExitCode()
@@ -321,7 +336,6 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 		"tool", name,
 		"path", scriptPath,
 		"command", formatCommand(cmd.Args),
-		"params", rawArgs,
 		"exitCode", exitCode,
 		"stdoutBytes", len(stdout.Bytes()),
 		"stderrBytes", len(stderr.Bytes()),
@@ -343,19 +357,26 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 			reason = "canceled"
 		}
 		// The raw output is built only here: a successful call never pays
-		// for the up-to-2 MiB string copies, and at the default level the
-		// TRACE record is disabled anyway.
-		failAttrs := append(append(attrs, "reason", reason),
-			"stdout", string(stdout.Bytes()),
-			"stderr", string(stderr.Bytes()))
+		// for the up-to-2 MiB string copies. The output strings are shared
+		// by both records; only the params bound differs (WARN ≤
+		// maxWarnParamsBytes, TRACE raw) — the extra slice construction is
+		// cheap appends.
+		stdoutStr := string(stdout.Bytes())
+		stderrStr := string(stderr.Bytes())
+		warnAttrs := append(append(attrs, "params", boundLogValue(rawArgs, maxWarnParamsBytes)),
+			"reason", reason, "stdout", stdoutStr, "stderr", stderrStr)
 		if reason == "timeout" {
-			failAttrs = append(failAttrs, "timeout", timeout)
+			warnAttrs = append(warnAttrs, "timeout", timeout)
 		}
-		log.Warn("tool call failed", failAttrs...)
-		// The TRACE record is the WARN record plus the raw output — the same
-		// complete attribute set, so the two never diverge. (No extra
-		// construction cost: failAttrs is already built for the WARN.)
-		log.Log(ctx, levelTrace, "tool call failed", failAttrs...)
+		log.Warn("tool call failed", warnAttrs...)
+		// The TRACE record is the WARN record's field set with raw params —
+		// the two never diverge on anything else.
+		traceAttrs := append(append(attrs, "params", rawArgs),
+			"reason", reason, "stdout", stdoutStr, "stderr", stderrStr)
+		if reason == "timeout" {
+			traceAttrs = append(traceAttrs, "timeout", timeout)
+		}
+		log.Log(ctx, levelTrace, "tool call failed", traceAttrs...)
 
 		if reason == "timeout" {
 			message := fmt.Sprintf("tool timed out after %s", timeout)
@@ -372,13 +393,17 @@ func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string,
 		return textResult(combinedOutput, true), nil
 	}
 
-	log.Debug("tool call completed", attrs...)
+	// DEBUG is disabled at the default level; guard so a large payload does
+	// not pay for the maxDebugParamsBytes copy on every successful call.
+	if log.Enabled(ctx, slog.LevelDebug) {
+		log.Debug("tool call completed", append(attrs, "params", boundLogValue(rawArgs, maxDebugParamsBytes))...)
+	}
 	// The TRACE record carries the full raw output (up to 2 MiB of string
-	// copies); guard the construction so a success logged at the default
-	// level does not pay for it — Logger.Log would drop the record as
-	// disabled after evaluating its arguments.
+	// copies) and the raw params; guard the construction so a success logged
+	// at the default level does not pay for it — Logger.Log would drop the
+	// record as disabled after evaluating its arguments.
 	if log.Enabled(ctx, levelTrace) {
-		log.Log(ctx, levelTrace, "tool call completed", append(append(attrs, "stdout", string(stdout.Bytes())), "stderr", string(stderr.Bytes()))...)
+		log.Log(ctx, levelTrace, "tool call completed", append(append(append(attrs, "params", rawArgs), "stdout", string(stdout.Bytes())), "stderr", string(stderr.Bytes()))...)
 	}
 	return textResult(combinedOutput, false), nil
 }

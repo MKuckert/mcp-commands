@@ -724,7 +724,7 @@ func TestRegistryCallRejectedBoundsClientData(t *testing.T) {
 	defer clientSession.Close()
 
 	// The raw params JSON is {\"bogus\":1,\"p\":\"aaa…\"} (keys sorted): the
-	// first maxRejectedParamsBytes carry a ~1 KiB head of the value.
+	// first maxWarnParamsBytes carry a ~1 KiB head of the value.
 	t.Run("params bounded", func(t *testing.T) {
 		res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "typed", Arguments: map[string]any{"p": strings.Repeat("a", 50*1024), "bogus": 1}})
 		if err != nil {
@@ -738,7 +738,7 @@ func TestRegistryCallRejectedBoundsClientData(t *testing.T) {
 			t.Errorf("log must keep a 900-byte head of the bounded params (record: %q…)", out[:min(len(out), 200)])
 		}
 		if strings.Contains(out, strings.Repeat("a", 2000)) {
-			t.Errorf("log must not carry params beyond maxRejectedParamsBytes (%d)", maxRejectedParamsBytes)
+			t.Errorf("log must not carry params beyond maxWarnParamsBytes (%d)", maxWarnParamsBytes)
 		}
 		if !strings.Contains(out, "\u2026") {
 			t.Errorf("log = %q…, want the truncation marker on the bounded params", out[:min(len(out), 200)])
