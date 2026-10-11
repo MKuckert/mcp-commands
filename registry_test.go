@@ -690,6 +690,82 @@ func TestRegistryCallRejectedLogs(t *testing.T) {
 	}
 }
 
+// TestRegistryCallRejectedBoundsClientData pins that both client-controlled
+// fields of the N5 rejection record are bounded. A hostile peer can carry up
+// to the 10 MiB body cap in its arguments, and some constraint messages embed
+// the offending value (an additionalProperties violation lists every unknown
+// key), so neither field may reach the record verbatim.
+func TestRegistryCallRejectedBoundsClientData(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "typed.sh")
+	writeScript(t, path, "#!/bin/bash\necho ok\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	registry := newToolRegistry(server, tmpDir, 5*time.Second, 16, log)
+	registry.replace([]discoveredTool{
+		{Name: "typed", Path: path, Description: "d", Params: []paramSpec{{Name: "p", Type: "string", Required: true}}},
+	})
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer clientSession.Close()
+
+	// The raw params JSON is {\"bogus\":1,\"p\":\"aaa…\"} (keys sorted): the
+	// first maxRejectedParamsBytes carry a ~1 KiB head of the value.
+	t.Run("params bounded", func(t *testing.T) {
+		res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "typed", Arguments: map[string]any{"p": strings.Repeat("a", 50*1024), "bogus": 1}})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if !res.IsError {
+			t.Fatalf("an unknown param must be a validation error, got %+v", res)
+		}
+		out := logBuf.String()
+		if !strings.Contains(out, strings.Repeat("a", 900)) {
+			t.Errorf("log must keep a 900-byte head of the bounded params (record: %q…)", out[:min(len(out), 200)])
+		}
+		if strings.Contains(out, strings.Repeat("a", 2000)) {
+			t.Errorf("log must not carry params beyond maxRejectedParamsBytes (%d)", maxRejectedParamsBytes)
+		}
+		if !strings.Contains(out, "\u2026") {
+			t.Errorf("log = %q…, want the truncation marker on the bounded params", out[:min(len(out), 200)])
+		}
+	})
+
+	// The validation error embeds the unknown key in its JSON pointer and
+	// message; the first maxValidationErrorBytes keep a ~4 KiB head of it.
+	t.Run("error bounded", func(t *testing.T) {
+		logBuf.Reset()
+		res, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "typed", Arguments: map[string]any{strings.Repeat("k", 10*1024): 1}})
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if !res.IsError {
+			t.Fatalf("an unknown param must be a validation error, got %+v", res)
+		}
+		out := logBuf.String()
+		if strings.Contains(out, strings.Repeat("k", 8000)) {
+			t.Errorf("log must not carry the validation error beyond maxValidationErrorBytes (%d)", maxValidationErrorBytes)
+		}
+		if !strings.Contains(out, strings.Repeat("k", 2000)) {
+			t.Errorf("log must keep a 2 KiB head of the bounded error (record: %q…)", out[:min(len(out), 200)])
+		}
+	})
+}
+
 // TestRegistryAtCapacityLogs pins N6: a call that hits the concurrency cap
 // logs one DEBUG record with the tool and the limit.
 func TestRegistryAtCapacityLogs(t *testing.T) {

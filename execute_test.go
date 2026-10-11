@@ -347,6 +347,33 @@ func TestValidateRequiredParams(t *testing.T) {
 	}
 }
 
+// TestBoundLogValue pins the general client-value bound (the identity fields
+// use it with maxIdentityFieldBytes): short values pass through, over-long
+// ones are cut at a rune boundary with the truncation marker.
+func TestBoundLogValue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "short", in: "hello", max: 16, want: "hello"},
+		{name: "exact cap", in: strings.Repeat("x", 8), max: 8, want: strings.Repeat("x", 8)},
+		{name: "over by one", in: strings.Repeat("x", 9), max: 8, want: strings.Repeat("x", 8) + "\u2026"},
+		// A multi-byte rune straddling the cut must not be split: 3 × "€"
+		// (9 bytes) with max 8 puts a continuation byte at index 8, so the
+		// cut backs off to 6 (the start of the last rune).
+		{name: "rune boundary", in: strings.Repeat("€", 3), max: 8, want: "€€" + "\u2026"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundLogValue(tc.in, tc.max); got != tc.want {
+				t.Errorf("boundLogValue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBoundedWriter(t *testing.T) {
 	t.Parallel()
 	w := newBoundedWriter(10)

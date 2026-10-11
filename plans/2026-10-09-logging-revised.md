@@ -68,7 +68,7 @@ Target sites are where the record will be emitted after the change.
 | N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated`; **plus (2026-10-11)** `clientName`, `clientVersion` from `req.ClientInfo()` when available (each cut at 256 B, rune-boundary safe, explicit truncation indicator; omitted entirely when the identity is nil/empty — never "unknown") |
 | N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each) |
 | N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout |
-| N5 | `registry.go` handler | tool argument validation failed | WARN | `tool`, `params`, `error` |
+| N5 | `registry.go` handler | tool argument validation failed | WARN | `tool`, `params` (raw JSON, ≤1 KiB), `error` (≤4 KiB) — both client-controlled and bounded with an explicit truncation indicator (2026-10-11) |
 | N6 | `registry.go` handler | at-capacity rejection | DEBUG | `tool`, `limit` |
 | N7 | `http.go` `newCORSHandler` | CORS preflight allowed | DEBUG | `origin`, `requestHeaders`, `maxAge` |
 | N8 | `http.go` `newCORSHandler` | CORS preflight origin rejected | WARN | `origin`, `reason` |
@@ -318,3 +318,28 @@ Five new Copilot findings on the pivot commit:
 `BenchmarkExecuteCappedOutput` re-recorded after the lazy fix: 13.52 →
 12.14 ms, 7.42 → 5.35 MB/op (the eager copies are gone; `docs/BENCHMARKS.md`
 block + variance note updated).
+
+### Builder — 2026-10-11 (user request: bound client data on the rejection record)
+
+The N5 rejection record logged both of its client-controlled fields
+unbounded: `params` is the raw arguments JSON (up to the 10 MiB body cap),
+and `error` can embed offending client values — a pattern mismatch quotes
+the whole string, an additionalProperties violation lists every unknown key
+(jsonschema v6 `kind.Pattern.Got`, `kind.AdditionalProperties.Properties`).
+A hostile peer could bloat the always-emitted WARN record with megabytes of
+payload.
+
+- `boundIdentityField` generalized to `boundLogValue(s, max)` (`execute.go`);
+  the identity fields use it with the existing 256 B cap (`TestBoundIdentityField`
+  unchanged, new `TestBoundLogValue` pins the helper at a custom cap).
+- New caps in `registry.go`: `maxRejectedParamsBytes = 1024` (a kilobyte
+  shows the request's shape; the error attribute carries the precise
+  constraint) and `maxValidationErrorBytes = 4096` (errors are short except
+  when a constraint message embeds the offending value).
+- Pinned by `TestRegistryCallRejectedBoundsClientData` (50 KiB argument →
+  params bounded; 10 KiB unknown key → error bounded, both through real SDK
+  calls).
+
+Note: the N2/N4 outcome records still log `params` as raw JSON — a
+documented design choice (plan row N2: "raw JSON"); bounding it would
+change documented debug/trace behavior, so it stays a separate decision.

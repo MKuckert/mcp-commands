@@ -186,18 +186,25 @@ func formatCommand(argv []string) string {
 // rune boundary and marked with an explicit truncation indicator.
 const maxIdentityFieldBytes = 256
 
-// boundIdentityField cuts s to maxIdentityFieldBytes (at a rune boundary)
-// and appends the truncation indicator; short values pass through unchanged.
-func boundIdentityField(s string) string {
-	if len(s) <= maxIdentityFieldBytes {
+// boundLogValue cuts s to max bytes (at a rune boundary) and appends the
+// truncation indicator; short values pass through unchanged. Every
+// client-controlled value logged verbatim passes through this so a hostile
+// peer cannot bloat a record (the body cap is 10 MiB; the log must not become
+// an amplification sink).
+func boundLogValue(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	cut := maxIdentityFieldBytes
+	cut := max
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
 	return s[:cut] + "\u2026"
 }
+
+// boundIdentityField bounds one client-identity field (name/version) to
+// maxIdentityFieldBytes.
+func boundIdentityField(s string) string { return boundLogValue(s, maxIdentityFieldBytes) }
 
 // identityAttrs renders the calling client's name and version (from the SDK's
 // req.ClientInfo()) as bounded record fields. It returns nil when the identity
