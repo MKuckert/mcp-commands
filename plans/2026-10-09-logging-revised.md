@@ -7,7 +7,7 @@
 ## Design decisions (locked)
 
 1. **TRACE severity.** The stdlib `slog` defines no TRACE constant (only `LevelDebug`/`LevelInfo`/`LevelWarn`/`LevelError`), so the app names one: `const levelTrace = slog.Level(-8)` in `loghandler.go` (`Level(-8).String()` would render `DEBUG-4`; the handler's `levelName` renders it `TRACE`). No new dependency. `flags.go` `logLevels` gains `"trace": levelTrace` (lowest), `resolveLogLevel`'s error text becomes `…one of trace, debug, info, warn, or error…`, the flag help text gains `trace` (`usageLine` renders only `--log-level <level>` with no level list — unchanged). The shipped completion scripts (`completion/mcp-commands.{bash,zsh,fish}`) hard-code the level list and gain `trace` there too. The handler renders levels via `levelName` (the five app levels map to their names; `levelTrace` renders `TRACE`). Precedence (`--log-level` > `LOG_LEVEL` > `info`) and default unchanged.
-2. **Client identity (INFO "client connected").** The MCP `initialize` request carries `clientInfo` (name/version, e.g. Claude Code). Captured at the transport boundary, because the SDK synthesizes session state in our stateless HTTP mode (a bare `notifications/initialized` request gets a fabricated `InitializeParams` without `clientInfo`, so `ServerOptions.InitializedHandler` alone is unreliable):
+2. **Client identity (INFO "client connected").** ~~The MCP `initialize` request carries `clientInfo` (name/version, e.g. Claude Code). Captured at the transport boundary, because the SDK synthesizes session state in our stateless HTTP mode (a bare `notifications/initialized` request gets a fabricated `InitializeParams` without `clientInfo`, so `ServerOptions.InitializedHandler` alone is unreliable):~~ **SUPERSEDED 2026-10-11 (user design pivot, option B — see the review log):** the transport-boundary capture (HTTP body-peek middleware, stdio stdin tee) is removed. Client identity now rides on every tool-call record (N2–N4), sourced from the SDK's `req.ClientInfo()` — per-request `_meta.io.modelcontextprotocol/clientInfo` on the 2026-07-28 protocol, the `initialize` handshake for legacy stdio sessions, nil (fields omitted) otherwise. The 256-byte field bound (`boundIdentityField`) survives on the tool-call records.
    - **HTTP:** a middleware in `buildHTTPHandler` peeks POST bodies and, when the batch contains a JSON-RPC `initialize` request, logs the `clientInfo` name/version. **Placement (B1):** inserted *between* the streamable handler and the `MaxBytesReader`+`bodyReadDeadline` wrapper — i.e. wrap the streamable handler with the peek *first*, then apply the size/deadline cap — so the peek's `ReadAll` runs *through* the 10 MiB cap and the 30 s read deadline (exactly where the SDK's own stateless peek runs). Placed outside the cap, the peek would buffer unbounded bodies into memory and read without a time bound. The peek inspects **POST only** (GETs/SSE have no body); a failed or over-cap read **skips the record and passes the request through unchanged** (the SDK's handler then applies its own limits); the body is reset via `io.NopCloser(bytes.NewBuffer(…))` like the SDK.
    - **stdio:** switch `server.Run(sigCtx, &mcp.StdioTransport{})` to `&mcp.IOTransport{Reader: <tee>, Writer: <no-op-closer over os.Stdout>}` (the SDK's `rwc.Close` closes both ends — a raw `os.Stdout` would close fd 1 at session end); the tee reader inspects the newline-delimited `initialize` line the same way. The tee implements `io.ReadCloser` with a no-op `Close` (wraps `os.Stdin`), is a pure byte passthrough (no reordering, no buffering past the protocol's newline framing — the partial-line buffer is capped at 64 KiB and an over-long line is discarded until its newline, so a malformed frame cannot grow it without bound), and its inspection is synchronous (one slog emit, a single `Write`) — no channel hand-off that could stall the read path.
    - Fields: `transport` (`http`/`stdio`), `clientName`, `clientVersion` (absent/empty → `unknown`). One record per `initialize`, at INFO, in both transports.
@@ -64,8 +64,8 @@ Target sites are where the record will be emitted after the change.
 
 | # | Site (planned) | Event | Severity | Fields |
 |---|----------------|-------|----------|--------|
-| N1 | `http.go` body-peek middleware / `server.go` stdio stdin tee | client connected (initialize request) | INFO | `transport`, `clientName`, `clientVersion` (each field cut at 256 B, rune-boundary safe, with an explicit truncation indicator — a 10 MiB body must not become a multi-MiB log record) |
-| N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated` |
+| ~~N1~~ | — (removed 2026-10-11, option B) | ~~client connected (initialize request)~~ — the transport-boundary capture is gone; identity moved onto N2–N4 via `req.ClientInfo()` | ~~INFO~~ | — |
+| N2 | `execute.go` `executeTool` | tool call completed | DEBUG | `tool`, `command` (raw argv), `params` (raw JSON), `exitCode`, `stdoutBytes`, `stderrBytes`, `duration`, `truncated`; **plus (2026-10-11)** `clientName`, `clientVersion` from `req.ClientInfo()` when available (each cut at 256 B, rune-boundary safe, explicit truncation indicator; omitted entirely when the identity is nil/empty — never "unknown") |
 | N3 | `execute.go` `executeTool` | tool call output (same as N2 + full output) | TRACE | N2 fields + `stdout`, `stderr` (raw, ≤1 MiB each) |
 | N4 | `execute.go` `executeTool` | tool call failed | WARN | N2 fields + `reason`, `stdout`, `stderr` (raw); `timeout` on timeout |
 | N5 | `registry.go` handler | tool argument validation failed | WARN | `tool`, `params`, `error` |
@@ -81,7 +81,7 @@ Target sites are where the record will be emitted after the change.
 ## Tasks
 
 - [x] **T1 — TRACE level.** `flags.go`: add `"trace"` to `logLevels`, update `resolveLogLevel` error text and flag help (`usageLine` unchanged — it carries no level list). `completion/mcp-commands.{bash,zsh,fish}`: add `trace` to the hard-coded `--log-level` lists (they track `logLevels`). `flags_test.go`: table case for `trace` (resolves to `levelTrace`), invalid-value text, precedence test extended; verify a TRACE record is captured at `trace` and dropped at `debug` (`server_test.go` filtering test gains a trace column).
-- [x] **T2 — Client identity (N1).** HTTP body-peek middleware in `buildHTTPHandler` per Design decision 2: placed between the streamable handler and the size/deadline wrapper (B1), POST only, initialize detection across batched JSON-RPC messages, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; logs `clientName`/`clientVersion`. Stdio: switch `&mcp.StdioTransport{}` → `&mcp.IOTransport{Reader: tee, Writer: os.Stdout}` with the same inspection; the tee is a no-op-`Close` `io.ReadCloser` wrapping `os.Stdin`, synchronous non-blocking inspection. Tests: HTTP initialize with/without `clientInfo`, batched initialize+other messages, non-initialize POST untouched, over-cap body passes through with no record, peek sits inside the cap (a >10 MiB initialize-shaped body is rejected by `MaxBytesReader`, not buffered unbounded); stdio via `IOTransport` pair.
+- [x] **T2 — Client identity (N1).** ~~HTTP body-peek middleware in `buildHTTPHandler` per Design decision 2: placed between the streamable handler and the size/deadline wrapper (B1), POST only, initialize detection across batched JSON-RPC messages, failed/over-cap read → skip record + pass through, body reset via `io.NopCloser(bytes.NewBuffer(…))`; logs `clientName`/`clientVersion`. Stdio: switch `&mcp.StdioTransport{}` → `&mcp.IOTransport{Reader: tee, Writer: os.Stdout}` with the same inspection; the tee is a no-op-`Close` `io.ReadCloser` wrapping `os.Stdin`, synchronous non-blocking inspection. Tests: HTTP initialize with/without `clientInfo`, batched initialize+other messages, non-initialize POST untouched, over-cap body passes through with no record, peek sits inside the cap (a >10 MiB initialize-shaped body is rejected by `MaxBytesReader`, not buffered unbounded); stdio via `IOTransport` pair.~~ **SUPERSEDED 2026-10-11 (option B):** the peek and tee are deleted; identity is carried on the tool-call records via `req.ClientInfo()` (see the review log — `TestBuildHTTPHandlerToolCallClientIdentity`, `TestRunStdioClientIdentity` (rewritten), and the identity cases in `TestExecuteToolOutcomeLogging` replace the removed tests).
 - [x] **T3 — Tool-call records (N2–N4).** `execute.go`: `executeTool` gains two parameters — a `*slog.Logger` (no package global) and the **raw arguments string** (handler: `req.Params.Arguments`; diagnostic: `--params` JSON; never re-marshaled); capture `start` time, argv (`cmd.Args`), exit code (`cmd.ProcessState`), stream sizes, truncation, duration; log `params` from that raw string; emit DEBUG on completion, TRACE with raw output, WARN with raw output + `reason` over the pinned four classes (`timeout` / `nonzero-exit` / `canceled` / `start-failed`). Update the `registry.go` handler and the `runCallTool` call site (`diagnostic.go`) accordingly. `execute_test.go`: one record per outcome class at the right level (incl. a `canceled` case), `params` renders the raw string verbatim (incl. unsorted key order); TRACE absent at `debug`; WARN present at `warn`; output values stay one physical line (newline in output → `\n`-escaped).
 - [x] **T4 — Registry records (N5–N6, N12).** `toolRegistry` gains a `log *slog.Logger` field (populated from `env.log` at the `server.go` `newToolRegistry` call site; no package global); the handler passes it to `executeTool`. Validation-failure WARN, at-capacity DEBUG, `replaceLocked` diff DEBUG (skip when empty). `registry_test.go` accordingly (logger over a `bytes.Buffer`).
 - [x] **T5 — CORS preflight records (N7–N8).** `http.go`: DEBUG on allowed preflight, WARN on rejected origin. `http_test.go`: allowed/denied preflight at `debug`; denied origin record at `warn`; non-preflight requests emit nothing.
@@ -95,9 +95,9 @@ Target sites are where the record will be emitted after the change.
 - **One-line invariant.** Raw multi-line output is only safe as an *attribute value*: `renderString` quotes whitespace-bearing values via `strconv.Quote`, which escapes `\n`/`\r`. Never put raw output in the message.
 - **Bounded size.** TRACE/WARN output is capped by `boundedWriter` at 1 MiB per stream; a pathological tool cannot grow a log record beyond ~2 MiB.
 - **Secrets.** Tool parameters are client (LLM) data; they are logged in DEBUG as the user requested. API keys never appear: they live in flags/env, not in tool arguments.
-- **Stateless-mode quirk.** In stateless HTTP, a bare `initialized` notification carries a synthesized `InitializeParams` without `clientInfo` — the reason N1 peeks the `initialize` request at the transport boundary instead of using `InitializedHandler`. Related: the SDK logs `server connecting` (INFO) at every connect, and stateless mode connects per *request* — the reason the SDK logger wiring (former N13) was rejected (T7).
-- **Stdio switch.** `IOTransport{os.Stdin, os.Stdout}` is byte-identical in behavior to `StdioTransport` (the SDK's `StdioTransport.Connect` is `newIOConn(rwc{os.Stdin, …os.Stdout})`); the tee must be a pure passthrough (no reordering, no buffering past the protocol's newline framing) to avoid changing protocol timing, and its inspection must not block the read path.
-- **Double body buffering.** In stateless HTTP the request body is read and buffered twice per request (the app's peek, then the SDK's own stateless peek) — peak ≈ 2 × min(body, 10 MiB) per request. Acceptable: the cap bounds it, and initialize-shaped bodies are small in practice; noted here so a future single-peek redesign has to beat this explicitly.
+- **Stateless-mode quirk.** In stateless HTTP, a bare `initialized` notification carries a synthesized `InitializeParams` without `clientInfo`. (2026-10-11, option B: this is now the *expected* absence — `req.ClientInfo()` returns nil and the tool-call record omits the identity fields; the transport-boundary peek that worked around it was removed.) Related: the SDK logs `server connecting` (INFO) at every connect, and stateless mode connects per *request* — the reason the SDK logger wiring (former N13) was rejected (T7).
+- **Stdio switch.** ~~`IOTransport{os.Stdin, os.Stdout}` is byte-identical in behavior to `StdioTransport` (the SDK's `StdioTransport.Connect` is `newIOConn(rwc{os.Stdin, …os.Stdout})`); the tee must be a pure passthrough (no reordering, no buffering past the protocol's newline framing) to avoid changing protocol timing, and its inspection must not block the read path.~~ (2026-10-11, option B: moot — the stdio path is back to `&mcp.StdioTransport{}`.)
+- **Double body buffering.** ~~In stateless HTTP the request body is read and buffered twice per request (the app's peek, then the SDK's own stateless peek) — peak ≈ 2 × min(body, 10 MiB) per request. Acceptable: the cap bounds it, and initialize-shaped bodies are small in practice; noted here so a future single-peek redesign has to beat this explicitly.~~ (2026-10-11, option B: moot — the app no longer peeks request bodies; only the SDK's own stateless read remains.)
 
 ## Review log
 
@@ -242,3 +242,49 @@ Post-fix: ~3.4 µs / 112 B small, **~5.5 ms / 1 MB** for 1 MiB (3.3× faster,
 4× less transient memory); batch and stdio paths unchanged. The stdio tee
 pays one parse per message (~3.3 µs small) — inherent to the design,
 documented in `docs/BENCHMARKS.md`.
+
+### Builder — 2026-10-11 (user design pivot, option B: identity from `req.ClientInfo()`)
+
+User directive: drop the raw-traffic peaking for client identity entirely and
+source it from the SDK's `req.ClientInfo()` instead. Verified against go-sdk
+v1.8.0 (`shared.go:693`): `ClientInfo()` reads
+`_meta.io.modelcontextprotocol/clientInfo` per request on the 2026-07-28
+protocol, falls back to the `initialize` handshake for legacy sessions (stdio),
+and returns nil in stateless HTTP for legacy-protocol requests (the SDK
+synthesizes empty `InitializeParams`) — so the field is simply absent there,
+which matches the locked decision to omit rather than log "unknown".
+
+Removed:
+
+- `newClientIdentityPeekHandler`, `clientInfoFromBody`,
+  `clientInfoFromMessage` (`http.go`) and the N1 "client connected" INFO
+  record — including the `transport` field, which existed only to tell the
+  two captures apart.
+- `stdinIdentityTee`, `maxIdentityLineBytes`, `newStdinIdentityTee`,
+  `nopStdoutCloser` (`server.go`); the stdio path is back to
+  `&mcp.StdioTransport{}`.
+- `BenchmarkClientIdentityPeek` and all its tests (`TestBuildHTTPHandler*Peek*`,
+  `TestClientInfoFromBody`, `TestRunStdioClientIdentity` (old),
+  `TestStdinIdentityTee*`); the five `ClientIdentityPeek/*` rows in
+  `docs/BENCHMARKS.md` (block re-recorded).
+
+Added:
+
+- `executeTool` takes the SDK's `*mcp.Implementation` (registry handler:
+  `req.ClientInfo()`; `--call-tool`: nil) and appends bounded
+  `clientName`/`clientVersion` to every tool-call record — the DEBUG success
+  and WARN failure records, both with their TRACE pairs. `boundIdentityField`
+  (256 B, rune-boundary cut, `…` marker) survives and moves to `execute.go`;
+  its test is unchanged.
+- New tests: `TestBuildHTTPHandlerToolCallClientIdentity` (2026-07-28
+  `tools/call` with `_meta` clientInfo → bounded fields on the record; no
+  `_meta` → fields absent; oversized name → bounded with `…`; asserts no
+  "client connected" record), the rewritten `TestRunStdioClientIdentity`
+  (legacy stdio handshake → identity on the tool-call record), and two
+  `TestExecuteToolOutcomeLogging` cases (identity present on DEBUG+TRACE;
+  oversized identity bounded on WARN; the nil case asserts omission).
+
+Design decisions 2, T2, the N1 row, and the now-moot risk notes (stdio
+switch, double body buffering) are marked superseded above; the N2 row carries
+the new fields. All other records (N2–N13), the TRACE level, and the
+remaining benchmarks are untouched.

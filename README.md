@@ -297,8 +297,8 @@ stdout is reserved for program output only: in stdio mode it carries the MCP pro
 
 What each level adds, from the default up:
 
-- **`info` (default)** — operational milestones: the connecting client's identity and version (from the `initialize` request, or `server/discover` on the 2026-07-28 protocol; a `transport` field distinguishes the `http` and `stdio` captures; each field is cut at 256 bytes with an explicit truncation marker, so a hostile client cannot inflate the record), `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
-- **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`path`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`), and allowed CORS preflights.
+- **`info` (default)** — operational milestones: `Starting HTTP server` / `Starting stdio server`, `shutting down` on a termination signal, `server stopped` on clean exit, watch setup, and all warnings and errors.
+- **`debug`** — operational detail: the discovery summary, each file event the watch loop sees (`path`, `op`, `valid`), each rescan that changes the tool set (the `added`/`removed`/`changed` names), watch reattach attempts, every completed tool call (tool, path, command, the client's arguments JSON, exit code, output byte counts, duration, `truncated`, and — when the request carries it — the calling client's name and version), and allowed CORS preflights.
 - **`trace`** — the raw material: for every tool call, the full stdout and stderr of the script, capped at **1 MiB each** with a `truncated` marker in the record — everything a client could have seen, verbatim. Note a *failed* call writes that output in two records (the `WARN` and its `TRACE` pair), so expect up to ~4 MiB of log per failed call at this level.
 
 The record pair for a failing call (`WARN` at the default level, `TRACE` at `trace`) — the `TRACE` record is the `WARN` record's complete set:
@@ -309,6 +309,8 @@ TRACE@18:02:11 tool call failed | tool=render path=/scripts/render.sh command="/
 ```
 
 Failed calls carry a `reason` from a fixed taxonomy: `timeout` (the script outlived its deadline), `nonzero-exit`, `canceled` (the client aborted the request), or `start-failed` (the process never started, e.g. the script is missing).
+
+Tool-call records additionally carry the calling client's identity when the request provides it — `clientName` and `clientVersion`, sourced from the SDK's per-request `ClientInfo()`. Clients on the 2026-07-28 protocol send `clientInfo` in every request's `_meta`, so their identity is always present; legacy-protocol clients carry it from the `initialize` handshake over stdio, and a stateless HTTP session without one omits the fields entirely rather than logging "unknown". Each field is cut at 256 bytes with an explicit truncation marker, so a hostile client cannot inflate the record.
 
 One exception: flag-parse and validation failures occur before the logger exists and are printed as raw `Error: …` lines — slog formatting (and `--log-level`) do not apply to startup configuration errors.
 
