@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,7 +24,7 @@ func TestWatchTools(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -99,7 +100,7 @@ func TestWatchToolsDetectsContentChanges(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -176,7 +177,7 @@ func TestWatchToolsSkipsIdenticalRescan(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\n# Description: alpha\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	initial, err := discoverTools(tmpDir, testDiscardLogger)
 	if err != nil {
 		t.Fatalf("discoverTools failed: %v", err)
@@ -269,7 +270,7 @@ func TestWatchToolsDetectsTimeoutChanges(t *testing.T) {
 	writeScript(t, scriptPath, "#!/bin/bash\necho alpha\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 2*time.Second, 16)
+	registry := newToolRegistry(server, "", 2*time.Second, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{{Name: "alpha", Path: scriptPath, Description: "alpha", Params: []paramSpec{}}})
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -430,7 +431,7 @@ func TestWatchToolsWatchedDirDeleted(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 
 	stderr, err := os.CreateTemp(t.TempDir(), "watch-stderr-")
 	if err != nil {
@@ -619,7 +620,7 @@ func TestWatchToolsRemovesDeletedTool(t *testing.T) {
 	writeScript(t, betaPath, "#!/bin/bash\necho beta\n")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", defaultToolTimeout, 16)
+	registry := newToolRegistry(server, "", defaultToolTimeout, 16, testDiscardLogger)
 	registry.replace([]discoveredTool{
 		{Name: "alpha", Path: alphaPath, Description: "alpha", Params: []paramSpec{}},
 		{Name: "beta", Path: betaPath, Description: "beta", Params: []paramSpec{}},
@@ -825,7 +826,7 @@ func TestWatchToolsDeletedDirRecreated(t *testing.T) {
 func newTestRegistryClient(t *testing.T) (*toolRegistry, *mcp.ClientSession) {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	registry := newToolRegistry(server, "", 2*time.Second, 16)
+	registry := newToolRegistry(server, "", 2*time.Second, 16, testDiscardLogger)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	serverSession, err := server.Connect(ctx, serverTransport, nil)
@@ -994,4 +995,81 @@ func TestWatchToolsSymlinkTargetEditNotWatched(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("touching the link did not refresh the tool; description = %q", listDescription(t, ctx, clientSession, "alpha"))
+}
+
+// TestWatchPerEventLogs pins N11: every matched file event produces one
+// DEBUG record with the file, the operation, and whether it passes the
+// discovery filter (a relevant op on a .sh file).
+func TestWatchPerEventLogs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	// captureWriter (mutex-guarded): the handler writes from the watchChanges
+	// goroutine while the test goroutine polls String().
+	logBuf := &captureWriter{}
+	env := liveEnv{
+		log:           slog.New(newLogHandler(logBuf, levelTrace)),
+		notifySignals: prodNotifySignals,
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- watchChanges(ctx, env, tmpDir, func() {}) }()
+
+	// Readiness handshake: rewrite a sentinel until its create event is
+	// recorded. A file written before watcher.Add is invisible to inotify,
+	// so the real assertion files must only be written once the watcher is
+	// demonstrably live.
+	sentinel := filepath.Join(tmpDir, "ready.txt")
+	deadline := time.Now().Add(5 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		_ = os.Remove(sentinel)
+		if err := os.WriteFile(sentinel, []byte("done"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(logBuf.String(), "ready.txt") {
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("watcher never reported the sentinel create event")
+	}
+	// No reset: the sentinel's record stays in the capture; every assertion
+	// below is file-specific, so it is harmless.
+
+	shPath := filepath.Join(tmpDir, "a.sh")
+	if err := os.WriteFile(shPath, []byte("#!/bin/bash\necho a\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	txtPath := filepath.Join(tmpDir, "note.txt")
+	if err := os.WriteFile(txtPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bounded poll: inotify delivery is asynchronous.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out := logBuf.String()
+		if strings.Contains(out, "a.sh") && strings.Contains(out, "note.txt") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "watch event") || !strings.Contains(out, "a.sh") {
+		t.Errorf("log = %q, want a watch event for a.sh", out)
+	}
+	if !strings.Contains(out, "note.txt") {
+		t.Errorf("log = %q, want a watch event for note.txt", out)
+	}
+	if !strings.Contains(out, "valid=true") {
+		t.Errorf("log = %q, want the create/write events marked valid", out)
+	}
+	cancel()
+	<-done
 }

@@ -313,6 +313,16 @@ func TestParseCLI(t *testing.T) {
 			wantErr: "flag provided but not defined",
 		},
 		{
+			name:    "log_level_trace",
+			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "trace"},
+			wantErr: "",
+			check: func(t *testing.T, c cliConfig) {
+				if c.logLevel != levelTrace {
+					t.Errorf("logLevel = %v, want trace", c.logLevel)
+				}
+			},
+		},
+		{
 			name:    "log_level_debug",
 			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "debug"},
 			wantErr: "",
@@ -367,7 +377,7 @@ func TestParseCLI(t *testing.T) {
 		{
 			name:    "log_level_invalid",
 			args:    []string{"--dir", "d", "--scripts", "s", "--log-level", "verbose"},
-			wantErr: `--log-level must be one of debug, info, warn, or error (got "verbose")`,
+			wantErr: `--log-level must be one of trace, debug, info, warn, or error (got "verbose")`,
 		},
 	}
 
@@ -438,6 +448,18 @@ func TestLogLevelPrecedence(t *testing.T) {
 			wantLevel: slog.LevelDebug,
 		},
 		{
+			name:      "flag_trace_wins_over_env",
+			args:      []string{"--dir", "d", "--scripts", "s", "--log-level", "trace"},
+			env:       "warn",
+			wantLevel: levelTrace,
+		},
+		{
+			name:      "env_trace_when_flag_absent",
+			args:      []string{"--dir", "d", "--scripts", "s"},
+			env:       "trace",
+			wantLevel: levelTrace,
+		},
+		{
 			name:      "env_used_when_flag_absent",
 			args:      []string{"--dir", "d", "--scripts", "s"},
 			env:       "warn",
@@ -447,7 +469,7 @@ func TestLogLevelPrecedence(t *testing.T) {
 			name:    "invalid_env_value_fails_naming_the_source",
 			args:    []string{"--dir", "d", "--scripts", "s"},
 			env:     "verbose",
-			wantErr: `LOG_LEVEL must be one of debug, info, warn, or error (got "verbose")`,
+			wantErr: `LOG_LEVEL must be one of trace, debug, info, warn, or error (got "verbose")`,
 		},
 		{
 			name:      "empty_env_ignored_default_applies",

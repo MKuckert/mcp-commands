@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -196,7 +198,7 @@ func doInitialize(t *testing.T, url, auth, origin string) *http.Response {
 func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusOK {
@@ -204,10 +206,142 @@ func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	}
 }
 
+// TestBuildHTTPHandlerToolCallClientIdentity covers the client identity on
+// tool-call records (option B): the identity comes from the SDK's per-request
+// ClientInfo(), not from a transport-boundary peek. A 2026-07-28 tools/call
+// whose _meta carries clientInfo lands bounded clientName/clientVersion on
+// the tool-call record; a call without identity (stateless legacy-protocol
+// synthesis) omits the fields entirely. No "client connected" record exists.
+func TestBuildHTTPHandlerToolCallClientIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		body   string
+		header string // Mcp-Protocol-Version; empty omits it
+		want   []string
+		unwant []string
+	}{
+		{
+			name:   "with clientInfo (2026-07-28 protocol)",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"claude-code","version":"1.0.6"}}}}`,
+			header: "2026-07-28",
+			want:   []string{"tool call completed", "clientName=claude-code", "clientVersion=1.0.6"},
+			unwant: []string{"client connected", "unknown"},
+		},
+		{
+			// No _meta: the stateless SDK synthesizes empty InitializeParams
+			// per request, so ClientInfo() is nil — the fields are omitted.
+			name:   "without clientInfo",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{}}}`,
+			want:   []string{"tool call completed"},
+			unwant: []string{"clientName", "clientVersion"},
+		},
+		{
+			// A hostile client can carry megabytes in its identity (the body
+			// cap is 10 MiB); the record must stay bounded with an explicit
+			// truncation indicator.
+			name:   "oversized clientInfo is bounded",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"` + strings.Repeat("a", maxIdentityFieldBytes+10) + `","version":"1.0"}}}}`,
+			header: "2026-07-28",
+			want:   []string{"clientName=" + strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
+			unwant: []string{strings.Repeat("a", maxIdentityFieldBytes+1)},
+		},
+		{
+			// A terminal escape sequence smuggled into clientInfo (\u001b is
+			// valid JSON; the decoded value carries a raw ESC byte) must not
+			// reach the log verbatim — the renderer quotes and escapes control
+			// characters, so no raw control byte appears in the record.
+			name:   "escape sequence in clientInfo is inert",
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"noop","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"\u001b[2Jcursor","version":"1.0"}}}}`,
+			header: "2026-07-28",
+			want:   []string{`clientName="\x1b[2Jcursor"`},
+			unwant: []string{"\x1b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			scriptPath := filepath.Join(tmpDir, "noop.sh")
+			writeScript(t, scriptPath, "#!/bin/bash\necho ok\n")
+
+			var logBuf bytes.Buffer
+			log := slog.New(newLogHandler(&logBuf, levelTrace))
+			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.1"}, nil)
+			registry := newToolRegistry(server, tmpDir, 30*time.Second, 16, log)
+			registry.replace([]discoveredTool{{Name: "noop", Path: scriptPath, Description: "no-op"}})
+
+			httpServer := httptest.NewServer(buildHTTPHandler(server, log, "", corsConfig{}))
+			defer httpServer.Close()
+
+			req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("failed to build request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if tc.header != "" {
+				req.Header.Set("Mcp-Protocol-Version", tc.header)
+				// The 2026-07-28 protocol requires the method and, for
+				// tools/call, the tool name in headers (validated against
+				// the body).
+				req.Header.Set("Mcp-Method", "tools/call")
+				req.Header.Set("Mcp-Name", "noop")
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST failed: %v", err)
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			out := logBuf.String()
+			for _, s := range tc.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to contain %s", out, s)
+				}
+			}
+			for _, s := range tc.unwant {
+				if strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to NOT contain %s", out, s)
+				}
+			}
+		})
+	}
+}
+
+// TestBoundIdentityField pins the client-identity field bound: short values (incl. one
+// exactly at the cap) pass through; over-long values are cut to
+// maxIdentityFieldBytes at a rune boundary and marked with the truncation
+// indicator, so no client can grow a log record past cap + marker.
+func TestBoundIdentityField(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "short", in: "cursor", want: "cursor"},
+		{name: "exact cap", in: strings.Repeat("a", maxIdentityFieldBytes), want: strings.Repeat("a", maxIdentityFieldBytes)},
+		{name: "over by one", in: strings.Repeat("a", maxIdentityFieldBytes+1), want: strings.Repeat("a", maxIdentityFieldBytes) + "\u2026"},
+		// A multi-byte rune straddling the cut must not be split: 86 × "€"
+		// (3 bytes) + "a" puts a continuation byte at index 256, so the cut
+		// backs off to the start of the last rune (255).
+		{name: "rune boundary", in: strings.Repeat("€", 86) + "a", want: strings.Repeat("€", 85) + "\u2026"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundIdentityField(tc.in); got != tc.want {
+				t.Errorf("boundIdentityField = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", corsConfig{}))
 	defer httpServer.Close()
 
 	if status := postInitializeStatus(t, httpServer.URL, ""); status != http.StatusUnauthorized {
@@ -231,7 +365,7 @@ func TestBuildHTTPHandlerEndToEnd(t *testing.T) {
 func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	// Valid JSON-RPC initialize prefix, then enough padding to cross the cap.
@@ -271,7 +405,7 @@ func TestBuildHTTPHandlerRejectsOversizedBody(t *testing.T) {
 func TestBuildHTTPHandlerAcceptsBodyBelowCap(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	// Valid JSON whose clientInfo name carries ~5 MiB of padding.
@@ -425,7 +559,7 @@ func TestCORSHandlerPreflight(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			newCORSHandler(next, cfg).ServeHTTP(rec, req)
+			newCORSHandler(next, testDiscardLogger, cfg).ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusNoContent {
 				t.Errorf("status = %d, want 204", rec.Code)
@@ -565,7 +699,7 @@ func TestCORSHandlerNonPreflight(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 
-			newCORSHandler(next, tt.cfg).ServeHTTP(rec, req)
+			newCORSHandler(next, testDiscardLogger, tt.cfg).ServeHTTP(rec, req)
 
 			if reached != tt.wantReached {
 				t.Fatalf("downstream reached = %v, want %v", reached, tt.wantReached)
@@ -595,7 +729,7 @@ func TestBuildHTTPHandlerPreflightUnauthenticated(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	req, err := http.NewRequest(http.MethodOptions, httpServer.URL+"/", nil)
@@ -622,7 +756,7 @@ func TestBuildHTTPHandler401CarriesCORS(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/", strings.NewReader(`{}`))
@@ -667,7 +801,7 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 	req.Header.Set("Origin", "https://evil.example")
 	rec := httptest.NewRecorder()
 
-	newCORSHandler(next, cfg).ServeHTTP(rec, req)
+	newCORSHandler(next, testDiscardLogger, cfg).ServeHTTP(rec, req)
 
 	if !reached {
 		t.Error("preflight from a disallowed origin must be forwarded to next, not answered by the CORS layer")
@@ -687,7 +821,7 @@ func TestCORSHandlerPreflightDisallowedOrigin(t *testing.T) {
 func TestBuildHTTPHandlerMethodAllowlist(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	do := func(method string) (int, string) {
@@ -722,7 +856,7 @@ func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
 	cors := corsConfig{origins: []string{"https://app.example.com"}}
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "s3cret", cors))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "s3cret", cors))
 	defer httpServer.Close()
 
 	resp := doInitialize(t, httpServer.URL, "Bearer s3cret", "https://app.example.com")
@@ -768,7 +902,7 @@ func TestBuildHTTPHandlerInitializeCORS(t *testing.T) {
 func TestBuildHTTPHandlerCORSDisabled(t *testing.T) {
 	t.Parallel()
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	resp := doInitialize(t, httpServer.URL, "", "")
@@ -825,7 +959,7 @@ func TestHTTPBodyReadDeadline(t *testing.T) {
 	t.Cleanup(func() { httpBodyReadTimeout = old })
 
 	server := newTestMCPServer(t)
-	httpServer := httptest.NewServer(buildHTTPHandler(server, "", corsConfig{}))
+	httpServer := httptest.NewServer(buildHTTPHandler(server, testDiscardLogger, "", corsConfig{}))
 	defer httpServer.Close()
 
 	body := &stallingBody{released: make(chan struct{})}
@@ -958,4 +1092,92 @@ func TestCORSConfigSummary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCORSHandlerPreflightLogging pins N7 (allowed preflight → DEBUG with
+// origin, requestHeaders, maxAge) and N8 (rejected preflight origin → WARN
+// with the reason; no record for origin-less requests).
+func TestCORSHandlerPreflightLogging(t *testing.T) {
+	t.Parallel()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("next"))
+	})
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	h := newCORSHandler(next, log, corsConfig{origins: []string{"https://app.example"}})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	do := func(t *testing.T, headers map[string]string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodOptions, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp
+	}
+
+	t.Run("allowed", func(t *testing.T) {
+		resp := do(t, map[string]string{
+			"Origin":                         "https://app.example",
+			"Access-Control-Request-Method":  http.MethodPost,
+			"Access-Control-Request-Headers": "x-api-key",
+		})
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", resp.StatusCode)
+		}
+		out := logBuf.String()
+		for _, want := range []string{"CORS preflight allowed", "origin=https://app.example", `requestHeaders=x-api-key`, "maxAge=900"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("log = %q, want it to contain %s", out, want)
+			}
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("rejected-not-in-allowlist", func(t *testing.T) {
+		resp := do(t, map[string]string{
+			"Origin":                        "https://evil.example",
+			"Access-Control-Request-Method": http.MethodPost,
+		})
+		// Rejected preflight falls through to next: no CORS headers.
+		if resp.StatusCode != 200 {
+			t.Fatalf("status = %d, want 200 (fell through to next)", resp.StatusCode)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Allow-Origin = %q, want empty", got)
+		}
+		out := logBuf.String()
+		if !strings.Contains(out, "CORS preflight rejected") || !strings.Contains(out, `origin=https://evil.example`) || !strings.Contains(out, "reason=not-in-allowlist") {
+			t.Errorf("log = %q, want a rejection WARN with origin and reason", out)
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("rejected-non-canonical", func(t *testing.T) {
+		do(t, map[string]string{
+			"Origin":                        "null",
+			"Access-Control-Request-Method": http.MethodPost,
+		})
+		out := logBuf.String()
+		if !strings.Contains(out, "CORS preflight rejected") || !strings.Contains(out, `origin=null`) || !strings.Contains(out, "reason=non-canonical") {
+			t.Errorf("log = %q, want a non-canonical rejection WARN", out)
+		}
+	})
+
+	logBuf.Reset()
+	t.Run("no-origin-no-record", func(t *testing.T) {
+		do(t, map[string]string{"Access-Control-Request-Method": http.MethodPost})
+		if got := logBuf.String(); got != "" {
+			t.Errorf("log = %q, want nothing for an origin-less preflight", got)
+		}
+	})
 }

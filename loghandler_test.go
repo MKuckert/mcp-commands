@@ -11,13 +11,14 @@ import (
 	"time"
 )
 
-// TestLogHandlerLevels pins the four standard levels and the one-line,
-// newline-terminated record shape.
+// TestLogHandlerLevels pins the five app levels (trace, debug, info, warn,
+// error) and the one-line, newline-terminated record shape.
 func TestLogHandlerLevels(t *testing.T) {
 	for _, tc := range []struct {
 		level slog.Level
 		want  string
 	}{
+		{levelTrace, "TRACE@"},
 		{slog.LevelDebug, "DEBUG@"},
 		{slog.LevelInfo, "INFO@"},
 		{slog.LevelWarn, "WARN@"},
@@ -266,6 +267,36 @@ func TestLogHandlerCRValue(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "\n") || strings.Count(got, "\n") != 1 {
 		t.Fatalf("record = %q, must stay on one physical line", got)
+	}
+}
+
+// TestLogHandlerControlChars pins the log-injection guard: a control
+// character that bears no whitespace (a terminal escape sequence) must never
+// reach the log verbatim, in attribute values or messages. The motivating
+// case is a clientInfo name of "\u001b[2J": no whitespace, so the old
+// renderer emitted the ESC byte directly and a remote client could drive the
+// operator's terminal.
+func TestLogHandlerControlChars(t *testing.T) {
+	var buf bytes.Buffer
+	h := newLogHandler(&buf, slog.LevelDebug)
+	log := slog.New(h)
+	// An escape-sequence-only value (no whitespace): quoted, ESC rendered as
+	// the literal \x1b.
+	log.Info("m", slog.String("name", "\x1b[2J"))
+	// A message carrying an escape sequence: escaped, record stays one line.
+	log.Info("boom\x1b[31mred")
+	out := buf.String()
+	if strings.Count(out, "\n") != 2 {
+		t.Fatalf("records = %q, want exactly two physical lines", out)
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("records = %q, want no raw control byte anywhere", out)
+	}
+	if !strings.Contains(out, `name="\x1b[2J"`) {
+		t.Errorf("records = %q, want the value quoted and escaped: name=\"\\x1b[2J\"", out)
+	}
+	if !strings.Contains(out, `boom\x1b[31mred`) {
+		t.Errorf("records = %q, want the message's escape sequence escaped", out)
 	}
 }
 

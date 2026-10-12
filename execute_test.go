@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +158,7 @@ func TestExecuteToolRejectsInvalidArgumentKeys(t *testing.T) {
 	scriptPath := filepath.Join(scriptDir, "noop.sh")
 	writeScript(t, scriptPath, "#!/bin/bash\necho noop\n")
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{"1flag": "value"}, 5*time.Second, scriptDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{"1flag": "value"}, "", nil, 5*time.Second, scriptDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestExecuteToolWithWorkingDirectory(t *testing.T) {
 
 	// Execute the script with the working directory set
 	ctx := context.Background()
-	result, err := executeTool(ctx, scriptPath, map[string]any{}, 5*time.Second, workDir)
+	result, err := executeTool(ctx, testDiscardLogger, "tool", scriptPath, map[string]any{}, "", nil, 5*time.Second, workDir)
 	if err != nil {
 		t.Fatalf("executeTool failed: %v", err)
 	}
@@ -345,6 +347,106 @@ func TestValidateRequiredParams(t *testing.T) {
 	}
 }
 
+// TestBoundLogValue pins the general client-value bound (the identity fields
+// use it with maxIdentityFieldBytes): short values pass through, over-long
+// ones are cut at a rune boundary with the truncation marker.
+func TestBoundLogValue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{name: "short", in: "hello", max: 16, want: "hello"},
+		{name: "exact cap", in: strings.Repeat("x", 8), max: 8, want: strings.Repeat("x", 8)},
+		{name: "over by one", in: strings.Repeat("x", 9), max: 8, want: strings.Repeat("x", 8) + "\u2026"},
+		// max=0 is a full truncation: marker only, no panic.
+		{name: "max zero", in: "abc", max: 0, want: "\u2026"},
+		// A multi-byte rune straddling the cut must not be split: 3 × "€"
+		// (9 bytes) with max 8 puts a continuation byte at index 8, so the
+		// cut backs off to 6 (the start of the last rune).
+		{name: "rune boundary", in: strings.Repeat("€", 3), max: 8, want: "€€" + "\u2026"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundLogValue(tc.in, tc.max); got != tc.want {
+				t.Errorf("boundLogValue = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecuteToolOutcomeParamsCaps pins the per-level caps on the client's
+// raw params: bounded to maxWarnParamsBytes on the WARN record,
+// maxDebugParamsBytes on the DEBUG success record, and raw (uncapped) on the
+// paired TRACE record. The run-length assertions are line-verified — a
+// whole-log check would pass even if the cap landed on the wrong record.
+func TestExecuteToolOutcomeParamsCaps(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+
+	// ~100 KiB of 'a' inside the client's params JSON. Only params carries
+	// the run, so per-line run-length checks isolate each record's cap.
+	rawArgs := `{"p":"` + strings.Repeat("a", 100*1024) + `"}`
+
+	run := func(t *testing.T, script string) []string {
+		t.Helper()
+		var logBuf bytes.Buffer
+		log := slog.New(newLogHandler(&logBuf, levelTrace))
+		path := filepath.Join(tmpDir, script)
+		_, _ = executeTool(context.Background(), log, script, path, map[string]any{}, rawArgs, nil, 5*time.Second, tmpDir)
+		return strings.Split(logBuf.String(), "\n")
+	}
+
+	find := func(lines []string, prefix, msg string) string {
+		for _, line := range lines {
+			if strings.HasPrefix(line, prefix) && strings.Contains(line, msg) {
+				return line
+			}
+		}
+		return ""
+	}
+
+	t.Run("success-debug-capped-trace-raw", func(t *testing.T) {
+		lines := run(t, "ok.sh")
+		debugLine := find(lines, "DEBUG@", "tool call completed")
+		traceLine := find(lines, "TRACE@", "tool call completed")
+		if debugLine == "" || traceLine == "" {
+			t.Fatalf("missing DEBUG/TRACE records:\n%s", strings.Join(lines, "\n"))
+		}
+		// The 6-byte JSON prefix leaves a ~64 KiB run inside the cap.
+		if !strings.Contains(debugLine, strings.Repeat("a", 60*1024)) {
+			t.Error("DEBUG record: params run shorter than expected — cap too small?")
+		}
+		if strings.Contains(debugLine, strings.Repeat("a", 70*1024)) {
+			t.Error("DEBUG record: params exceed maxDebugParamsBytes")
+		}
+		if !strings.Contains(traceLine, strings.Repeat("a", 100*1024)) {
+			t.Error("TRACE record: params must be raw (uncapped)")
+		}
+	})
+
+	t.Run("failure-warn-capped-trace-raw", func(t *testing.T) {
+		lines := run(t, "fail.sh")
+		warnLine := find(lines, "WARN@", "tool call failed")
+		traceLine := find(lines, "TRACE@", "tool call failed")
+		if warnLine == "" || traceLine == "" {
+			t.Fatalf("missing WARN/TRACE records:\n%s", strings.Join(lines, "\n"))
+		}
+		if !strings.Contains(warnLine, strings.Repeat("a", 900)) {
+			t.Error("WARN record: params run shorter than expected — cap too small?")
+		}
+		if strings.Contains(warnLine, strings.Repeat("a", 2000)) {
+			t.Error("WARN record: params exceed maxWarnParamsBytes")
+		}
+		if !strings.Contains(traceLine, strings.Repeat("a", 100*1024)) {
+			t.Error("TRACE record: params must be raw (uncapped)")
+		}
+	})
+}
+
 func TestBoundedWriter(t *testing.T) {
 	t.Parallel()
 	w := newBoundedWriter(10)
@@ -433,7 +535,7 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 		t.Fatalf("failed to create script: %v", err)
 	}
 
-	result, err := executeTool(context.Background(), scriptPath, map[string]any{}, 30*time.Second, tmpDir)
+	result, err := executeTool(context.Background(), testDiscardLogger, "tool", scriptPath, map[string]any{}, "", nil, 30*time.Second, tmpDir)
 	if err != nil {
 		t.Fatalf("executeTool returned unexpected error: %v", err)
 	}
@@ -452,5 +554,281 @@ func TestExecuteToolHugeStdout(t *testing.T) {
 	}
 	if !utf8.ValidString(text.Text) {
 		t.Fatal("result text is not valid UTF-8")
+	}
+}
+
+// TestExecuteToolOutcomeLogging pins the N2–N4 record contract: one record
+// per outcome class at the correct level (success → DEBUG; timeout,
+// nonzero-exit, canceled, start-failed → WARN, each with its reason), the
+// raw request params rendered verbatim, the raw output present at TRACE, and
+// no TRACE record at the debug minimum level.
+func TestExecuteToolOutcomeLogging(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+	writeScript(t, filepath.Join(tmpDir, "slow.sh"), "#!/bin/bash\nsleep 5\n")
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+	writeScript(t, filepath.Join(tmpDir, "loud.sh"), "#!/bin/bash\nhead -c 2000000 /dev/zero | tr '\\0' 'a'\n")
+
+	rawArgs := `{"a":1,"b":["x y","z\"q"]}`
+
+	for _, tc := range []struct {
+		name           string
+		script         string
+		timeout        time.Duration
+		cancelCtx      bool
+		clientInfo     *mcp.Implementation // the SDK's req.ClientInfo() equivalent; nil = unavailable
+		wantLevel      string              // the outcome record's level prefix
+		wantMsg        string
+		wantLevelField []string // fields the level record itself must carry (line-verified)
+		wantTrace      bool     // a TRACE record is emitted for every outcome that ran
+		wantTraceField []string // fields the TRACE record must carry (WARN's full set)
+		want           []string
+		unwant         []string
+	}{
+		{
+			name:      "success",
+			script:    "ok.sh",
+			timeout:   5 * time.Second,
+			wantLevel: "DEBUG",
+			wantMsg:   "tool call completed",
+			wantTrace: true,
+			want: []string{
+				"tool=ok.sh", "path=", `command=`, "params=",
+				"exitCode=0", "stdoutBytes=6", "stderrBytes=0",
+				"duration=", "truncated=false",
+			},
+			// No client identity (nil): the fields are omitted entirely,
+			// never rendered as "unknown".
+			unwant: []string{"clientName", "clientVersion"},
+		},
+		{
+			name:      "timeout",
+			script:    "slow.sh",
+			timeout:   200 * time.Millisecond,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			// The paired TRACE record is the WARN record's complete set —
+			// including the effective timeout.
+			wantTraceField: []string{`reason=timeout`, "timeout="},
+			want:           []string{`reason=timeout`, "timeout="},
+			unwant:         []string{"tool call completed"},
+		},
+		{
+			name:      "nonzero-exit",
+			script:    "fail.sh",
+			timeout:   5 * time.Second,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			want:      []string{`reason=nonzero-exit`, "exitCode=3"},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "canceled",
+			script:    "slow.sh",
+			timeout:   0, // no deadline: only a client abort can end it
+			cancelCtx: true,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true,
+			want:      []string{`reason=canceled`, "exitCode=-1"},
+			unwant:    []string{"tool call completed"},
+		},
+		{
+			name:      "start-failed",
+			script:    "missing.sh", // never written: the script does not exist
+			timeout:   5 * time.Second,
+			wantLevel: "WARN",
+			wantMsg:   "tool call failed",
+			wantTrace: true, // every failed outcome emits the paired TRACE record
+			// The start-failed record carries the full N2 field set with empty
+			// output and zero byte counts (nothing ran).
+			wantTraceField: []string{"exitCode=-1", "stdoutBytes=0", "stderrBytes=0", "truncated=false"},
+			want:           []string{`reason=start-failed`, "exitCode=-1", "stdoutBytes=0", "stderrBytes=0", "truncated=false"},
+			unwant:         []string{"tool call completed"},
+		},
+		{
+			name:       "success-with-client-identity",
+			script:     "ok.sh",
+			timeout:    5 * time.Second,
+			clientInfo: &mcp.Implementation{Name: "cursor", Version: "1.2.3"},
+			wantLevel:  "DEBUG",
+			wantMsg:    "tool call completed",
+			wantTrace:  true,
+			// The identity rides on the shared attribute slice: both the
+			// DEBUG and its TRACE pair carry it (each line-verified).
+			wantLevelField: []string{"clientName=cursor", "clientVersion=1.2.3"},
+			wantTraceField: []string{"clientName=cursor", "clientVersion=1.2.3"},
+			want:           []string{"clientName=cursor", "clientVersion=1.2.3"},
+		},
+		{
+			name:       "failed-with-oversized-client-identity",
+			script:     "fail.sh",
+			timeout:    5 * time.Second,
+			clientInfo: &mcp.Implementation{Name: strings.Repeat("c", maxIdentityFieldBytes+10), Version: "9"},
+			wantLevel:  "WARN",
+			wantMsg:    "tool call failed",
+			wantTrace:  true,
+			// A hostile client can carry megabytes in its identity; the
+			// record stays bounded with an explicit truncation indicator.
+			want:           []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026", "clientVersion=9"},
+			unwant:         []string{strings.Repeat("c", maxIdentityFieldBytes+1)},
+			wantLevelField: []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026"},
+			wantTraceField: []string{"clientName=" + strings.Repeat("c", maxIdentityFieldBytes) + "\u2026"},
+		},
+		{
+			name:      "truncated-output",
+			script:    "loud.sh",
+			timeout:   10 * time.Second,
+			wantLevel: "DEBUG",
+			wantMsg:   "tool call completed",
+			wantTrace: true,
+			want:      []string{"truncated=true"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			log := slog.New(newLogHandler(&logBuf, levelTrace))
+
+			ctx := context.Background()
+			var cancel context.CancelFunc
+			if tc.cancelCtx {
+				ctx, cancel = context.WithCancel(ctx)
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					cancel()
+				}()
+			}
+
+			path := filepath.Join(tmpDir, tc.script)
+			_, _ = executeTool(ctx, log, tc.script, path, map[string]any{}, rawArgs, tc.clientInfo, tc.timeout, tmpDir)
+			out := logBuf.String()
+
+			// One record per outcome class at the correct level; its own
+			// line must carry wantLevelField (a whole-log check would pass
+			// even if the field landed only on the paired TRACE record).
+			found := false
+			for _, line := range strings.Split(out, "\n") {
+				if !strings.HasPrefix(line, tc.wantLevel+"@") || !strings.Contains(line, tc.wantMsg) {
+					continue
+				}
+				found = true
+				for _, f := range tc.wantLevelField {
+					if !strings.Contains(line, f) {
+						t.Errorf("%s %q record lacks %s:\n%s", tc.wantLevel, tc.wantMsg, f, out)
+					}
+				}
+				break
+			}
+			if !found {
+				t.Errorf("log lacks a %s %q record:\n%s", tc.wantLevel, tc.wantMsg, out)
+			}
+			for _, s := range tc.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to contain %s", out, s)
+				}
+			}
+			for _, s := range tc.unwant {
+				if strings.Contains(out, s) {
+					t.Errorf("log = %q, want it to NOT contain %s", out, s)
+				}
+			}
+			// The raw request params render verbatim (whitespace-quoted, no
+			// re-marshaling of the client's JSON).
+			if !strings.Contains(out, `params=`+strconv.Quote(rawArgs)) {
+				t.Errorf("log = %q, want the raw params verbatim: %s", out, strconv.Quote(rawArgs))
+			}
+			// TRACE carries the raw output on every outcome that ran, with the
+			// WARN record's complete attribute set (the two must not diverge).
+			if tc.wantTrace {
+				found := false
+				for _, line := range strings.Split(out, "\n") {
+					if !strings.HasPrefix(line, "TRACE@") || !strings.Contains(line, tc.wantMsg) {
+						continue
+					}
+					found = true
+					for _, f := range tc.wantTraceField {
+						if !strings.Contains(line, f) {
+							t.Errorf("TRACE %q record lacks %s:\n%s", tc.wantMsg, f, out)
+						}
+					}
+					break
+				}
+				if !found {
+					t.Errorf("log lacks a TRACE %q record:\n%s", tc.wantMsg, out)
+				}
+			}
+		})
+	}
+}
+
+// TestExecuteToolNoTraceAtDebugLevel pins the level gating: at the debug
+// minimum the TRACE record is dropped while the DEBUG/WARN records remain.
+func TestExecuteToolNoTraceAtDebugLevel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho hello\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, slog.LevelDebug))
+	_, _ = executeTool(context.Background(), log, "ok.sh", filepath.Join(tmpDir, "ok.sh"), map[string]any{}, "", nil, 5*time.Second, tmpDir)
+	out := logBuf.String()
+
+	if !strings.Contains(out, "DEBUG@") || !strings.Contains(out, "tool call completed") {
+		t.Errorf("log = %q, want the DEBUG record at the debug minimum", out)
+	}
+	if strings.Contains(out, "TRACE@") {
+		t.Errorf("log = %q, want no TRACE record at the debug minimum", out)
+	}
+}
+
+// TestExecuteToolWarnAtWarnLevel pins the upper half of the N3/N4 contract:
+// at the warn minimum, a failed call produces exactly one record — the WARN
+// — with no DEBUG or TRACE companion.
+func TestExecuteToolWarnAtWarnLevel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "fail.sh"), "#!/bin/bash\necho oops >&2\nexit 3\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, slog.LevelWarn))
+	_, _ = executeTool(context.Background(), log, "fail.sh", filepath.Join(tmpDir, "fail.sh"), map[string]any{}, `{"a":1}`, nil, 5*time.Second, tmpDir)
+	out := logBuf.String()
+
+	if !strings.Contains(out, "WARN@") || !strings.Contains(out, "tool call failed") || !strings.Contains(out, `reason=nonzero-exit`) {
+		t.Errorf("log = %q, want the WARN record at the warn minimum", out)
+	}
+	if strings.Contains(out, "DEBUG@") || strings.Contains(out, "TRACE@") {
+		t.Errorf("log = %q, want no DEBUG/TRACE record at the warn minimum", out)
+	}
+}
+
+// TestExecuteToolOutputStaysOneLine pins the single-physical-line contract
+// for tool output: a multi-line script's stdout renders as one record line
+// with \n-escaped newlines, never as a record that splits across lines.
+func TestExecuteToolOutputStaysOneLine(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "multi.sh"), "#!/bin/bash\necho line1\necho line2\n")
+
+	var logBuf bytes.Buffer
+	log := slog.New(newLogHandler(&logBuf, levelTrace))
+	_, _ = executeTool(context.Background(), log, "multi.sh", filepath.Join(tmpDir, "multi.sh"), map[string]any{}, "", nil, 5*time.Second, tmpDir)
+
+	lines := strings.Split(logBuf.String(), "\n")
+	carriers := 0
+	for _, line := range lines {
+		if strings.Contains(line, "line1") && strings.Contains(line, "line2") {
+			carriers++
+		}
+	}
+	if carriers != 1 {
+		t.Errorf("want exactly one record line carrying both output lines, got %d:\n%s", carriers, logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), `line1\nline2`) {
+		t.Errorf("log = %q, want the newlines \n-escaped inside the value", logBuf.String())
 	}
 }

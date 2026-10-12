@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +18,20 @@ import (
 )
 
 const maxToolOutputBytes = 1 << 20
+
+// maxWarnParamsBytes caps the client's raw params JSON on any WARN record —
+// the N4 tool-call failure (including start-failed, execute.go) and the N5
+// validation rejection (registry.go). WARN is emitted at the default level,
+// so a hostile peer's 10 MiB payload must not reach the log verbatim; a
+// kilobyte shows the request's shape.
+const maxWarnParamsBytes = 1024
+
+// maxDebugParamsBytes caps params on the N2 success record, which is emitted
+// only at debug: larger than the WARN cap because an operator correlating a
+// call with its result benefits from the full payload of tools with large
+// legitimate arguments. TRACE records carry the raw params uncapped — that
+// is the level for verbatim material.
+const maxDebugParamsBytes = 64 * 1024
 
 // argumentsToCLIArgs converts a map of parsed arguments into a slice of CLI flags
 // formatted for execution. It enforces strict naming rules for keys to prevent
@@ -164,11 +181,81 @@ func combineToolOutput(stdout, stderr []byte) string {
 	return string(combined[:cut]) + fmt.Sprintf("\n[output truncated after %d bytes]", maxToolOutputBytes)
 }
 
+// formatCommand renders argv as a single shell-style quoted string for the
+// `command` record field: every element is double-quoted with escaping and
+// the elements are joined with single spaces, so spaces and quotes in a
+// path or argument can never be misread as separators.
+func formatCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = strconv.Quote(a)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// maxIdentityFieldBytes bounds a single client-identity field in a tool-call
+// record. The HTTP body cap is 10 MiB, so a hostile client can carry megabytes
+// in its clientInfo; the log must not become an amplification sink. 256 bytes
+// is generous for any real client name/version; over-long values are cut at a
+// rune boundary and marked with an explicit truncation indicator.
+const maxIdentityFieldBytes = 256
+
+// boundLogValue cuts s to max bytes (at a rune boundary) and appends the
+// truncation indicator; short values pass through unchanged. Every
+// client-controlled value logged verbatim passes through this so a hostile
+// peer cannot bloat a record (the body cap is 10 MiB; the log must not become
+// an amplification sink).
+func boundLogValue(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\u2026"
+}
+
+// boundIdentityField bounds one client-identity field (name/version) to
+// maxIdentityFieldBytes.
+func boundIdentityField(s string) string { return boundLogValue(s, maxIdentityFieldBytes) }
+
+// identityAttrs renders the calling client's name and version (from the SDK's
+// req.ClientInfo()) as bounded record fields. It returns nil when the identity
+// is unavailable — ClientInfo() returned nil, or both fields are empty — so
+// the record omits them entirely rather than logging "unknown" per call.
+func identityAttrs(info *mcp.Implementation) []any {
+	if info == nil {
+		return nil
+	}
+	var attrs []any
+	if name := boundIdentityField(info.Name); name != "" {
+		attrs = append(attrs, "clientName", name)
+	}
+	if version := boundIdentityField(info.Version); version != "" {
+		attrs = append(attrs, "clientVersion", version)
+	}
+	return attrs
+}
+
 // executeTool runs the script at scriptPath as a subprocess in the specified
 // working directory. It accepts pre-parsed arguments as a map, converts them to
 // CLI flags, and binds the context to a timeout to prevent hanging tools.
 // The output is captured, combined, and returned as an MCP CallToolResult.
-func executeTool(ctx context.Context, scriptPath string, args map[string]any, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
+//
+// Logging (N2–N4): every completed call logs one DEBUG record with the tool,
+// the raw command line, the raw request parameters, the exit code, the
+// captured byte counts, the duration, and the truncation flag; the TRACE
+// record adds the full raw stdout/stderr. A failed call logs one WARN record
+// (same fields plus a failure reason and the full raw output) plus the TRACE
+// record. The reason taxonomy: "timeout" (the per-call deadline fired),
+// "nonzero-exit" (the script ran and exited non-zero), "canceled" (the
+// request context was canceled — a client abort with --no-timeout — and the
+// process was killed; exitCode is -1), "start-failed" (the script never
+// started: no exec, no output). When clientInfo is non-nil and carries a name
+// or version (the SDK's req.ClientInfo()), the records additionally carry
+// bounded clientName/clientVersion fields.
+func executeTool(ctx context.Context, log *slog.Logger, name, scriptPath string, args map[string]any, rawArgs string, clientInfo *mcp.Implementation, timeout time.Duration, dir string) (*mcp.CallToolResult, error) {
 	cliArgs, err := argumentsToCLIArgs(args)
 	if err != nil {
 		return textResult(err.Error(), true), nil
@@ -202,15 +289,99 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 	// Override CommandContext's direct-child kill before Start so exec's
 	// context watcher always kills the complete process group.
 	cmd.Cancel = func() error { return killToolProcess(cmd) }
+	started := time.Now()
 	if err := cmd.Start(); err != nil {
+		// The script never ran (missing, not executable, bad interpreter):
+		// fail loudly and say why. It emits the same complete attribute set
+		// as every other failed outcome (N4) — exitCode -1 (no process),
+		// zero captured bytes, empty output, nothing truncated — plus the
+		// paired TRACE record, so no failed outcome diverges from the
+		// documented WARN/TRACE contract.
+		startAttrs := []any{
+			"tool", name,
+			"path", scriptPath,
+			"command", formatCommand(cmd.Args),
+			"exitCode", -1,
+			"stdoutBytes", 0,
+			"stderrBytes", 0,
+			"duration", time.Since(started),
+			"truncated", false,
+		}
+		startAttrs = append(startAttrs, identityAttrs(clientInfo)...)
+		// params is appended per record level — WARN (emitted at the default
+		// level) bounds it to maxWarnParamsBytes, the TRACE pair carries the
+		// raw client JSON — then the failure fields, in the same order as
+		// every other failed outcome.
+		log.Warn("tool call failed", append(append(startAttrs, "params", boundLogValue(rawArgs, maxWarnParamsBytes)),
+			"reason", "start-failed", "error", err, "stdout", "", "stderr", "")...)
+		log.Log(ctx, levelTrace, "tool call failed", append(append(startAttrs, "params", rawArgs),
+			"reason", "start-failed", "error", err, "stdout", "", "stderr", "")...)
 		return nil, err
 	}
 
 	waitErr := cmd.Wait()
+	duration := time.Since(started)
 	combinedOutput := combineToolOutput(stdout.Bytes(), stderr.Bytes())
 
+	// The shared record fields (N2): the tool, the raw command line, the
+	// exit code, how much output was captured, how long it took, and whether
+	// the 1 MiB stream cap dropped bytes. The raw request parameters are
+	// appended per record level (WARN ≤ maxWarnParamsBytes, DEBUG ≤
+	// maxDebugParamsBytes, TRACE raw) — see the log sites below.
+	exitCode := -1
+	if cmd.ProcessState != nil {
+		exitCode = cmd.ProcessState.ExitCode()
+	}
+	attrs := []any{
+		"tool", name,
+		"path", scriptPath,
+		"command", formatCommand(cmd.Args),
+		"exitCode", exitCode,
+		"stdoutBytes", len(stdout.Bytes()),
+		"stderrBytes", len(stderr.Bytes()),
+		"duration", duration,
+		"truncated", stdout.Truncated() || stderr.Truncated(),
+	}
+	// The calling client's identity (SDK req.ClientInfo()), when available:
+	// omitted entirely for a nil/empty identity, bounded otherwise.
+	attrs = append(attrs, identityAttrs(clientInfo)...)
+
 	if waitErr != nil {
-		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+		// Classify the failure (N4): the deadline, a context cancellation,
+		// or a non-zero exit.
+		reason := "nonzero-exit"
+		switch {
+		case errors.Is(execCtx.Err(), context.DeadlineExceeded):
+			reason = "timeout"
+		case execCtx.Err() != nil:
+			reason = "canceled"
+		}
+		// The raw output is built only here: a successful call never pays
+		// for the up-to-2 MiB string copies. The output strings are shared
+		// by both records; only the params bound differs (WARN ≤
+		// maxWarnParamsBytes, TRACE raw) — the extra slice construction is
+		// cheap appends. warnAttrs and traceAttrs may share a backing array;
+		// that is safe because the handler renders each record synchronously
+		// — the WARN line is fully written before traceAttrs overwrites the
+		// shared slot.
+		stdoutStr := string(stdout.Bytes())
+		stderrStr := string(stderr.Bytes())
+		warnAttrs := append(append(attrs, "params", boundLogValue(rawArgs, maxWarnParamsBytes)),
+			"reason", reason, "stdout", stdoutStr, "stderr", stderrStr)
+		if reason == "timeout" {
+			warnAttrs = append(warnAttrs, "timeout", timeout)
+		}
+		log.Warn("tool call failed", warnAttrs...)
+		// The TRACE record is the WARN record's field set with raw params —
+		// the two never diverge on anything else.
+		traceAttrs := append(append(attrs, "params", rawArgs),
+			"reason", reason, "stdout", stdoutStr, "stderr", stderrStr)
+		if reason == "timeout" {
+			traceAttrs = append(traceAttrs, "timeout", timeout)
+		}
+		log.Log(ctx, levelTrace, "tool call failed", traceAttrs...)
+
+		if reason == "timeout" {
 			message := fmt.Sprintf("tool timed out after %s", timeout)
 			if combinedOutput != "" {
 				message += "\n" + combinedOutput
@@ -225,5 +396,17 @@ func executeTool(ctx context.Context, scriptPath string, args map[string]any, ti
 		return textResult(combinedOutput, true), nil
 	}
 
+	// DEBUG is disabled at the default level; guard so a large payload does
+	// not pay for the maxDebugParamsBytes copy on every successful call.
+	if log.Enabled(ctx, slog.LevelDebug) {
+		log.Debug("tool call completed", append(attrs, "params", boundLogValue(rawArgs, maxDebugParamsBytes))...)
+	}
+	// The TRACE record carries the full raw output (up to 2 MiB of string
+	// copies) and the raw params; guard the construction so a success logged
+	// at the default level does not pay for it — Logger.Log would drop the
+	// record as disabled after evaluating its arguments.
+	if log.Enabled(ctx, levelTrace) {
+		log.Log(ctx, levelTrace, "tool call completed", append(append(append(attrs, "params", rawArgs), "stdout", string(stdout.Bytes())), "stderr", string(stderr.Bytes()))...)
+	}
 	return textResult(combinedOutput, false), nil
 }

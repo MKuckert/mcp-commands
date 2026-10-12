@@ -292,24 +292,30 @@ func TestLogLevelFiltering(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		level     slog.Level
+		wantTrace bool
 		wantDebug bool
 		wantInfo  bool
 		wantWarn  bool
 		wantError bool
 	}{
-		{"debug", slog.LevelDebug, true, true, true, true},
-		{"info", slog.LevelInfo, false, true, true, true},
-		{"warn", slog.LevelWarn, false, false, true, true},
-		{"error", slog.LevelError, false, false, false, true},
+		{"trace", levelTrace, true, true, true, true, true},
+		{"debug", slog.LevelDebug, false, true, true, true, true},
+		{"info", slog.LevelInfo, false, false, true, true, true},
+		{"warn", slog.LevelWarn, false, false, false, true, true},
+		{"error", slog.LevelError, false, false, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			log := slog.New(newLogHandler(&buf, tc.level))
+			log.Log(context.Background(), levelTrace, "trace record")
 			log.Debug("debug record")
 			log.Info("info record")
 			log.Warn("warn record")
 			log.Error("error record")
 			out := buf.String()
+			if got := strings.Contains(out, "trace record"); got != tc.wantTrace {
+				t.Errorf("trace record captured = %v, want %v; output: %q", got, tc.wantTrace, out)
+			}
 			if got := strings.Contains(out, "debug record"); got != tc.wantDebug {
 				t.Errorf("debug record captured = %v, want %v; output: %q", got, tc.wantDebug, out)
 			}
@@ -391,7 +397,7 @@ func TestRunWatchSetupFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 	env.newWatcher = func() (*fsnotify.Watcher, error) {
 		return nil, errors.New("inotify unavailable")
@@ -437,7 +443,7 @@ func TestRunHTTPBindFailure(t *testing.T) {
 	defer blocker.Close()
 	port := blocker.Addr().(*net.TCPAddr).Port
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -487,7 +493,7 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 	for name, port := range map[string]int{"stdio": 0, "http": port} {
 		name, port := name, port
 		t.Run(name, func(t *testing.T) {
-			var stderr strings.Builder
+			var stderr captureWriter
 			env := liveEnvFor(t, io.Discard, &stderr)
 			closed := make(chan error)
 			close(closed)
@@ -515,6 +521,11 @@ func TestRunWatchFatalMidRun(t *testing.T) {
 				// ERROR record from run() (it would have doubled the record).
 				if got := strings.Count(stderr.String(), "ERROR@"); got != 0 {
 					t.Fatalf("run() logged %d ERROR record(s) for the fatal watch termination, want 0:\n%s", got, stderr.String())
+				}
+				// The shutdown record must land with the true reason before
+				// run() returns (the process exits right after).
+				if got := stderr.String(); !strings.Contains(got, "shutting down") || !strings.Contains(got, "reason=watch-error") {
+					t.Fatalf("run() log = %q, want the shutdown record with reason=watch-error", got)
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("run did not return for a fatal watch termination")
@@ -550,7 +561,7 @@ func TestRunStdioWatchServes(t *testing.T) {
 		os.Stdin, os.Stdout = oldStdin, oldStdout
 	}()
 
-	var stderr strings.Builder
+	var stderr captureWriter
 	env := liveEnvFor(t, io.Discard, &stderr)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -585,5 +596,337 @@ func TestRunStdioWatchServes(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not stop after cancel")
+	}
+}
+
+// TestRunStdioClientIdentity covers the client identity on tool-call records
+// over stdio (legacy protocol): the SDK's session carries the clientInfo from
+// the initialize handshake, so req.ClientInfo() resolves it and the tool-call
+// record carries clientName/clientVersion. No "client connected" record is
+// emitted (the transport-boundary capture is gone).
+func TestRunStdioClientIdentity(t *testing.T) {
+	// Not parallel: swaps the process stdin/stdout globals for pipes.
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "alpha.sh"), "#!/bin/bash\necho alpha\n")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+
+	// captureWriter (mutex-guarded): the SDK's stdin reader goroutine and
+	// run() both write to the logger; a plain strings.Builder would race
+	// under -race.
+	var stderr captureWriter
+	env := liveEnvFor(t, io.Discard, &stderr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "stdio-e2e", Version: "9.9.9"}, &mcp.ClientOptions{
+		Capabilities: &mcp.ClientCapabilities{},
+	})
+	session, err := client.Connect(ctx, &mcp.IOTransport{Reader: outR, Writer: inW}, nil)
+	if err != nil {
+		t.Fatalf("client connect over stdio pipe: %v", err)
+	}
+	defer session.Close()
+
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "alpha"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("CallTool returned an error result: %+v", res)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned %v after cancel, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not stop after cancel")
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"tool call completed", "clientName=stdio-e2e", "clientVersion=9.9.9"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr log = %q, want it to contain %s", out, want)
+		}
+	}
+	if strings.Contains(out, "client connected") {
+		t.Errorf("stderr log = %q, want no client-connected record (the transport-boundary capture is gone)", out)
+	}
+}
+
+// TestRunLifecycleLogs pins N9/N10: a signal produces a "shutting down"
+// INFO and a clean serve exit a "server stopped" INFO with the transport,
+// the bound port, and the run duration.
+func TestRunLifecycleLogs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "ok.sh")
+	writeScript(t, path, "#!/bin/bash\necho ok\n")
+	port := freePort(t)
+
+	// captureWriter (mutex-guarded): run() writes from its goroutines;
+	// the read below happens after run() returns, but the locked writer
+	// keeps the capture race-free under -race as well.
+	logBuf := &captureWriter{}
+	var testCancel context.CancelFunc
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			testCancel = c
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, host: "127.0.0.1", port: port})
+	}()
+
+	if !waitForHTTP(t, fmt.Sprintf("http://127.0.0.1:%d", port)) {
+		t.Fatal("server did not come up")
+	}
+	testCancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{
+		"shutting down",
+		"reason=signal",
+		"server stopped",
+		"mode=http",
+		fmt.Sprintf("port=%d", port),
+		"duration=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want it to contain %s", out, want)
+		}
+	}
+}
+
+// TestRunStdioLifecycleLogs pins the stdio side of the N9/N10 lifecycle pair:
+// a signal produces BOTH records, in order.
+func TestRunStdioLifecycleLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+
+	// Not parallel: swaps the process stdin/stdout globals for pipes.
+	// stdin is the READ end (no client writes frames in this test); stdout
+	// is a drained pipe.
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdin, os.Stdout = stdinR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+		stdinR.Close()
+		stdinW.Close()
+		outR.Close()
+		outW.Close()
+	}()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	// captureWriter (mutex-guarded): run() writes from its goroutines while
+	// the polling loop below calls String() concurrently — a plain
+	// bytes.Buffer would race.
+	logBuf := &captureWriter{}
+	var testCancel context.CancelFunc
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			testCancel = c
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir})
+	}()
+
+	// The banner proves the serve goroutine is running before the "signal".
+	buf := logBuf.String()
+	for !strings.Contains(buf, "Starting stdio server") {
+		time.Sleep(10 * time.Millisecond)
+		buf = logBuf.String()
+	}
+	testCancel()
+	// No stdin close: the cancelled context ends the session (the SDK's
+	// conn close unblocks the read); a close here would race the read and
+	// surface as a spurious EBADF.
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	out := logBuf.String()
+	for _, want := range []string{"shutting down", "reason=signal", "server stopped", `mode=stdio`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want it to contain %s", out, want)
+		}
+	}
+	if i, j := strings.Index(out, "shutting down"), strings.Index(out, "server stopped"); i < 0 || j < 0 || i > j {
+		t.Errorf("want \"shutting down\" before \"server stopped\", got:\n%s", out)
+	}
+}
+
+// TestRunStdioShutdownRecordArmRace pins the stdio shutdown record against
+// the select arm race: a fired signal cancels the signal context and the
+// watcher (whose context is that same context) at the same moment, so
+// sigCtx.Done(), watchDone, and serveDone can all be ready together and the
+// select may pick any arm. The "shutting down" record must land exactly once
+// no matter which arm wins.
+// Not parallel: swaps the process stdin/stdout globals for pipes.
+func TestRunStdioShutdownRecordArmRace(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	oldStdin, oldStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = inR, outW
+	defer func() {
+		os.Stdin, os.Stdout = oldStdin, oldStdout
+	}()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+
+	logBuf := &captureWriter{}
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		// Cancel immediately: sigCtx.Done() is ready from t0, so the
+		// watcher's clean stop and the serve exit race it in the select.
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			cctx, c := context.WithCancel(ctx)
+			c()
+			return cctx, c
+		},
+		newWatcher:    prodNewWatcher,
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, watch: true}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return")
+	}
+
+	out := logBuf.String()
+	if n := strings.Count(out, "shutting down"); n != 1 {
+		t.Fatalf("shutdown records = %d, want exactly 1 (whichever select arm wins);\n%s", n, out)
+	}
+	if !strings.Contains(out, "reason=signal") {
+		t.Errorf("log = %q, want reason=signal (the cancellation came from the signal)", out)
+	}
+	if !strings.Contains(out, "server stopped") {
+		t.Errorf("log = %q, want the server stopped record", out)
+	}
+}
+
+// TestRunWatchErrorShutdownReason pins the shutdown record's reason on a
+// non-signal exit: a fatal watch error must not log reason=signal.
+func TestRunWatchErrorShutdownReason(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeScript(t, filepath.Join(tmpDir, "ok.sh"), "#!/bin/bash\necho ok\n")
+	port := freePort(t)
+
+	var logBuf bytes.Buffer
+	env := liveEnv{
+		stdout:           io.Discard,
+		log:              slog.New(newLogHandler(&logBuf, levelTrace)),
+		resolveWrapWidth: prodResolveWrapWidth,
+		clearScreen:      prodClearScreen,
+		notifySignals: func(ctx context.Context, _ ...os.Signal) (context.Context, context.CancelFunc) {
+			return context.WithCancel(ctx)
+		},
+		newWatcher:    func() (*fsnotify.Watcher, error) { return nil, errors.New("watcher exploded") },
+		watcherErrors: prodWatcherErrors,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- run(t.Context(), env, serverConfig{dir: tmpDir, scriptsDir: tmpDir, host: "127.0.0.1", port: port, watch: true})
+	}()
+
+	// No waitForHTTP: a watcher that fails at setup ends run() within
+	// milliseconds — the HTTP server may never bind. run() must simply
+	// return the watch error.
+	err := <-done
+	if err == nil {
+		t.Fatal("run succeeded, want the watch error")
+	}
+	if !strings.Contains(err.Error(), "watcher exploded") {
+		t.Fatalf("run error = %q, want the watch failure", err)
+	}
+
+	out := logBuf.String()
+	if !strings.Contains(out, "shutting down") {
+		t.Errorf("log = %q, want a shutdown record", out)
+	}
+	if !strings.Contains(out, "reason=watch-error") {
+		t.Errorf("log = %q, want reason=watch-error", out)
+	}
+	if strings.Contains(out, "reason=signal") {
+		t.Errorf("log = %q, must NOT claim a signal fired", out)
 	}
 }
