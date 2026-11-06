@@ -18,13 +18,14 @@ Instead of writing custom MCP servers for every utility or integration, `mcp-com
 
 ```bash
 # Homebrew (macOS/Linux) — `brew trust` is required once for non-core taps
+# (shell completion scripts are installed with the formula — docs/reference/shell-completion.md)
 brew trust --formula MKuckert/homebrew-tap/mcp-commands
 brew install MKuckert/homebrew-tap/mcp-commands
 
 # Go — requires a Go toolchain
 go install github.com/mkuckert/mcp-commands@latest
 
-# Prebuilt release — linux/darwin/windows × amd64/arm64 + checksums.txt
+# Prebuilt release — linux/darwin/windows × amd64/arm64 + checksums.txt (tar.gz, zip for Windows)
 # https://github.com/mkuckert/mcp-commands/releases — put the binary on your PATH
 ```
 
@@ -33,6 +34,7 @@ go install github.com/mkuckert/mcp-commands@latest
 ```bash
 #!/bin/bash
 # Description: Prints a greeting message. Accepts a "name" argument.
+# Param: name string optional "Name to greet"
 
 NAME=${2:-World}
 echo "Hello, $NAME!"
@@ -45,9 +47,11 @@ Make it executable (`chmod +x hello-world`) — the server exposes a tool named 
 ```console
 $ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --list-tools
 
-hello-world(name:str)
+hello-world([name:str])
      Prints a greeting message. Accepts a "name" argument. (timeout: 5m0s)
 ```
+
+(Full reference for both diagnostic modes: [Diagnostics](#diagnostics).)
 
 **4. Connect a client.** Local clients (Claude Desktop & co.) expect stdio:
 
@@ -105,6 +109,7 @@ The server validates arguments against the tool's published JSON Schema **before
 
 - **Strings/Numbers:** `{"key": "value"}` ➡️ `--key value`
 - **Booleans:** `{"flag": true}` ➡️ `--flag` (bare flag); `{"flag": false}` ➡️ omitted entirely
+- Example: with `force` and `file` declared, `{"force": true, "file": "data.txt"}` becomes `--file data.txt --force`
 - **Arrays:** not accepted by declared parameters (`string`, `number`, `boolean` only)
 - **Security:** keys must match `^[a-zA-Z][a-zA-Z0-9_-]*$`; invalid keys are rejected to prevent injection
 - **Deterministic ordering:** keys are sorted alphabetically before translation, so the CLI flag order is stable and never reflects the LLM's JSON key order
@@ -134,7 +139,13 @@ mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --port 8080
 ```
 
 - `--host` selects the bind address (default `127.0.0.1`; use `0.0.0.0` to reach other devices).
-- **Non-loopback binds require auth (0.8.0):** binding to a non-loopback address without a token **refuses to start** — an unauthenticated HTTP server is a remote command-execution endpoint. The escape hatch `--insecure-no-auth` starts it anyway with a loud `UNAUTHENTICATED` warning; use it only for trusted networks.
+- **Non-loopback binds require auth (0.8.0):** binding to a non-loopback address (`--host 0.0.0.0`, a LAN IP, a non-IP hostname) without a token **refuses to start** — an unauthenticated HTTP server is a remote command-execution endpoint:
+
+  ```
+  ERROR@10:00:00 refusing to start unauthenticated HTTP server on non-loopback host "0.0.0.0": set --api-key (or MCP_COMMANDS_API_KEY), or pass --insecure-no-auth explicitly to accept the risk
+  ```
+
+  The escape hatch `--insecure-no-auth` starts it anyway with a loud `UNAUTHENTICATED` warning; use it only for trusted networks.
 - The client connects to `http://host:port` and sends `Authorization: Bearer <token>` when auth is enabled ([details](#authentication)).
 - For browser-based clients, configure CORS — [CORS](#cors-browser-clients).
 
@@ -148,7 +159,7 @@ Every tool execution is bounded by a timeout (default: **5 minutes**). When the 
 | **Global** | `--timeout <duration>` flag | Applies to every tool without its own `Timeout:`. Invalid or explicitly empty values exit with an error before the server starts. |
 | **Default** | _(no flag, no frontmatter)_ | 5 minutes. |
 
-The duration is a whitespace-separated list of `<digits><unit>` tokens (units `s`, `m`, `h`; e.g. `5m`, `60s`, `1h 30m 5s`). Sub-second units, decimals, and signs are rejected. `NONE` (case-insensitive) or a result of `0` (e.g. `0s`) mean **no timeout** — but a client abort/cancel still kills the running script; "no timeout" means "no deadline", never "uninterruptible".
+The duration is a whitespace-separated list of `<digits><unit>` tokens (units `s`, `m`, `h`; e.g. `5m`, `60s`, `1h 30m 5s` — whitespace between tokens is optional). Sub-second units, decimals, and signs are rejected, and values that overflow are rejected with a clear error. `NONE` (case-insensitive) or a result of `0` (e.g. `0s`) mean **no timeout** — but a client abort/cancel still kills the running script; "no timeout" means "no deadline", never "uninterruptible".
 
 ```bash
 mcp-commands --dir /path/to/workdir --scripts /path/to/scripts --timeout 10m   # global: 10 minutes
@@ -239,7 +250,7 @@ Both limits are fixed, not flags — generous for the real workload (small JSON 
 
 ### Logging
 
-All diagnostics go to **stderr** as one-line slog records (`<LEVEL>@HH:mm:ss message key=value …`); stdout is reserved for program output (the MCP protocol in stdio mode, the tool list / `--call-tool` result in diagnostics). `--log-level <level>` (or `LOG_LEVEL`) sets the minimum level: `trace`, `debug`, `info` (default), `warn`, `error`.
+All diagnostics go to **stderr** as one-line slog records (`<LEVEL>@HH:mm:ss message key=value …`); stdout is reserved for program output (the MCP protocol in stdio mode, the tool list / `--call-tool` result in diagnostics). `--log-level <level>` (or `LOG_LEVEL`) sets the minimum level — accepted in every mode: `trace`, `debug`, `info` (default), `warn`, `error`.
 
 - **`info`** — startup/shutdown milestones, watch setup, warnings, errors.
 - **`debug`** — discovery summary, file events, rescans that change the tool set, every completed tool call (bounded to 64 KiB of params).
@@ -360,10 +371,10 @@ Container (the included `Containerfile` wraps a prebuilt release binary; configu
 | `MCP_COMMANDS_SCRIPTS` | `/scripts` | Scripts directory |
 | `MCP_COMMANDS_TIMEOUT` | binary's 5m | Per-tool timeout, e.g. `5m` |
 | `MCP_COMMANDS_WATCH` | off | `1`/`true`/`yes` = hot-reload scripts |
-| `MCP_COMMANDS_API_KEY`, `MCP_COMMANDS_ALLOWED_ORIGINS`, `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | — | The binary's native env vars, passed through |
+| `MCP_COMMANDS_API_KEY`, `MCP_COMMANDS_ALLOWED_ORIGINS`, `MCP_COMMANDS_ALLOW_ALL_ORIGINS`, `LOG_LEVEL` | — | The binary's native env vars, passed through |
 
 ```bash
-docker build -t mcp-commands .   # pin a release with --build-arg MCP_COMMANDS_VERSION=<version>
+docker build -t mcp-commands .   # pin a release with --build-arg MCP_COMMANDS_VERSION=<version>, a platform with --platform linux/<amd64|arm64>
 docker run -p 8080:8080 -v ./my-scripts:/scripts -e MCP_COMMANDS_API_KEY=... mcp-commands
 ```
 
