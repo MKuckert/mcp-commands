@@ -124,7 +124,7 @@ func resolveLogLevel(value, source string) (slog.Level, error) {
 }
 
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
-const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-level <level>]"
+const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--config <path>] [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-level <level>]"
 
 func parseCLI(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
@@ -132,6 +132,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	dirFlag := fs.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := fs.String("scripts", "", "Directory containing executable scripts (required)")
+	configFlag := fs.String("config", "", "Path to a .json/.jsonc configuration file (CLI flags and env vars take precedence over file values)")
 	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := fs.Int("port", 0, "Port for HTTP server (0 for stdio mode; must be 1..65535)")
@@ -183,15 +184,36 @@ func parseCLI(args []string) (cliConfig, error) {
 		},
 	}
 
-	// --version works without the required flags and skips all validation.
+	// --version works without the required flags and skips all validation,
+	// including any --config file.
 	if *versionFlag {
 		cfg.version = true
 		return cfg, nil
 	}
 
-	if *dirFlag == "" || *scriptsFlag == "" {
+	var file *fileConfig
+	if *configFlag != "" {
+		var loadErr error
+		file, loadErr = loadConfigFile(*configFlag)
+		if loadErr != nil {
+			return cliConfig{}, loadErr
+		}
+	}
+
+	// dir/scripts precedence: flag > config file; an explicitly empty flag
+	// value is not a usable directory, so it falls through to the file.
+	dirValue, scriptsValue := *dirFlag, *scriptsFlag
+	if dirValue == "" && file != nil && file.Dir != nil {
+		dirValue = *file.Dir
+	}
+	if scriptsValue == "" && file != nil && file.Scripts != nil {
+		scriptsValue = *file.Scripts
+	}
+	if dirValue == "" || scriptsValue == "" {
 		return cliConfig{}, errMissingRequiredFlags
 	}
+	cfg.server.dir, cfg.diagnostic.dir = dirValue, dirValue
+	cfg.server.scriptsDir, cfg.diagnostic.scriptsDir = scriptsValue, scriptsValue
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
@@ -216,6 +238,14 @@ func parseCLI(args []string) (cliConfig, error) {
 		}
 	})
 
+	// watch precedence: flag (visit-tracked, so --watch=false counts as
+	// explicitly set) > config file > default false.
+	watchValue := *watchFlag
+	if !visited["watch"] && file != nil && file.Watch != nil {
+		watchValue = *file.Watch
+	}
+	cfg.server.watch, cfg.diagnostic.watch = watchValue, watchValue
+
 	// The mode is resolved first: server-only validation (CORS, max
 	// concurrent) must not block a diagnostic invocation whose server
 	// flags are documented and reported as ignored.
@@ -232,12 +262,14 @@ func parseCLI(args []string) (cliConfig, error) {
 	}
 
 	// Shared by every mode (fail-fast); run only consumes the resolved
-	// value. Precedence: --log-level > LOG_LEVEL > info; an empty env
-	// value counts as unset.
+	// value. Precedence: --log-level > LOG_LEVEL > config file > info; an
+	// empty env value counts as unset.
 	logLevelValue, logLevelSource := *logLevelFlag, "--log-level"
 	if !logLevelSet {
 		if envValue := os.Getenv(logLevelEnvVar); envValue != "" {
 			logLevelValue, logLevelSource = envValue, logLevelEnvVar
+		} else if file != nil && file.LogLevel != nil {
+			logLevelValue, logLevelSource = *file.LogLevel, "config file log-level"
 		}
 	}
 	logLevel, err := resolveLogLevel(logLevelValue, logLevelSource)
@@ -245,7 +277,11 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cliConfig{}, err
 	}
 	cfg.logLevel = logLevel
-	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	var fileTimeout *string
+	if file != nil {
+		fileTimeout = file.Timeout
+	}
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag, fileTimeout)
 	if err != nil {
 		return cliConfig{}, err
 	}

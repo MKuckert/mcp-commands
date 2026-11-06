@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcp-commands.local/config.schema.json",
+  "title": "mcp-commands configuration file",
+  "description": "Operational settings for mcp-commands, applied when the file is passed via --config. CLI flags and environment variables take precedence over values in this file; a present key counts as explicitly set.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Working directory for tool execution (flag: --dir)"
+    },
+    "scripts": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Directory containing executable scripts (flag: --scripts)"
+    },
+    "watch": {
+      "type": "boolean",
+      "description": "Watch for tool changes: hot-reload in server mode, live re-print with --list-tools (flag: --watch)"
+    },
+    "log-level": {
+      "type": "string",
+      "description": "Minimum log level: trace, debug, info, warn, or error (flag: --log-level)"
+    },
+    "timeout": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Global per-tool timeout as a formatted duration (e.g. \"5m\", \"1h 30m 5s\") or NONE (flag: --timeout)"
+    }
+  }
+}

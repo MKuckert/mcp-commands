@@ -6,7 +6,7 @@
 #
 # Single source of truth: keep the flag set in sync with flags.go.
 # The CI drift check extracts exactly this line.
-_mcp_commands_flags="--dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help"
+_mcp_commands_flags="--dir --scripts --config --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help"
 
 # --log-level accepts only these values (logLevels in flags.go).
 _mcp_commands_log_levels="trace debug info warn error"
@@ -34,7 +34,7 @@ _mcp-commands() {
     _mcp-commands-fill -d -o filenames -- "$cur"
     return 0
     ;;
-  --api-key-file | --tls-cert | --tls-key)
+  --api-key-file | --tls-cert | --tls-key | --config)
     _mcp-commands-fill -f -o filenames -- "$cur"
     return 0
     ;;
