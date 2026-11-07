@@ -26,11 +26,31 @@ const maxConfigFileBytes = 1 << 20 // 1 MiB
 // absent" from "key present with a zero value": key presence is the
 // explicit-set marker that drives precedence (flag > env > file > default).
 type fileConfig struct {
-	Dir      *string `json:"dir"`
-	Scripts  *string `json:"scripts"`
-	Watch    *bool   `json:"watch"`
-	LogLevel *string `json:"log-level"`
-	Timeout  *string `json:"timeout"`
+	Dir      *string           `json:"dir"`
+	Scripts  *string           `json:"scripts"`
+	Watch    *bool             `json:"watch"`
+	LogLevel *string           `json:"log-level"`
+	Timeout  *string           `json:"timeout"`
+	Server   *fileServerConfig `json:"server"` // nil = key absent (or no server section)
+}
+
+// fileServerConfig is the "server" object of the config file. Pointer fields
+// distinguish "key absent" from "key present with a zero value", exactly like
+// the top level: a present-but-false/empty-meaning key (e.g.
+// "allow-all-origins": false, "allowed-origins": []) is an explicit choice
+// that suppresses the env-var fallback.
+type fileServerConfig struct {
+	Host                       *string   `json:"host"`
+	Port                       *int      `json:"port"`
+	APIKey                     *string   `json:"api-key"`
+	APIKeyFile                 *string   `json:"api-key-file"`
+	TLSCert                    *string   `json:"tls-cert"`
+	TLSKey                     *string   `json:"tls-key"`
+	InsecureNoAuth             *bool     `json:"insecure-no-auth"`
+	MaxConcurrent              *int      `json:"max-concurrent"`
+	AllowedOrigins             *[]string `json:"allowed-origins"`
+	AllowAllOrigins            *bool     `json:"allow-all-origins"`
+	DisableLocalhostProtection *bool     `json:"disable-localhost-protection"`
 }
 
 // configSchemaURL is the resource name under which the embedded schema is

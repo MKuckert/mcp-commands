@@ -2,7 +2,7 @@
 
 **Branch:** `feature/config-file` (from `main` @ `b318797`, worktree `/workspace/mcp-commands-config-file`)
 **Relay:** `config-file` (packet: `.pi-web/relays/config-file/`)
-Status: in progress — U1 complete (2026-11-06, relay leg 1)
+Status: in progress — U2 complete (2026-11-06, relay leg 2)
 
 ## Scope
 
@@ -10,7 +10,7 @@ Status: in progress — U1 complete (2026-11-06, relay leg 1)
       cap, JSONC comments) + embedded-JSON-Schema validation + merge of the five top-level
       shared keys (`dir`, `scripts`, `watch`, `log-level`, `timeout`) with
       flag > env > file precedence; completions updated
-- [ ] U2: `server` section keys (`host`, `port`, `api-key`, `api-key-file`, `tls-cert`,
+- [x] U2: `server` section keys (`host`, `port`, `api-key`, `api-key-file`, `tls-cert`,
       `tls-key`, `insecure-no-auth`, `max-concurrent`, `allowed-origins`,
       `allow-all-origins`, `disable-localhost-protection`) with cross-source validation
       (TLS pairing, CORS mutual exclusion across flag+file) and silent-ignore in
@@ -30,7 +30,11 @@ Status: in progress — U1 complete (2026-11-06, relay leg 1)
    fields; a present-but-false/empty-meaning key (e.g. `watch: false`) is distinguishable
    from an absent key and participates in precedence exactly like an explicitly-set flag.
    Precedence chain per key: CLI flag (visit-tracked, so `--watch=false` counts) > env var
-   (where one exists: `LOG_LEVEL`) > config file > built-in default.
+   (where one exists: `LOG_LEVEL`) > config file > built-in default. Where explicit-empty
+   is meaningful (`allowed-origins`, `allow-all-origins`), a *present* file key — even with
+   a zero value (`[]`, `false`) — is an explicit choice that suppresses the env-var
+   fallback, mirroring an explicitly-set flag; the effective chain there is
+   flag > file (present) > env.
 3. **Extension dispatch:** `.json` strict, `.jsonc` comment-stripped (case-insensitive
    extension); any other extension is a startup error. The JSONC stripper replaces comment
    bytes with spaces (newlines kept) so byte offsets in later decode errors still point at
@@ -41,10 +45,9 @@ Status: in progress — U1 complete (2026-11-06, relay leg 1)
    is rejected (mirrors `parseToolArguments`).
 6. **`--version` skips the config load entirely** (works without dir/scripts and without a
    readable config file). `--config` is honored in diagnostic modes for the shared keys;
-   the server-section silent-ignore rule (D2) lands with U2.
-7. **Leg-1 schema deliberately omits `server`**: a file containing it fails validation
-   (unknown key) rather than being silently ignored until U2 adds the section and its
-   merge. Fail-loud, no partial application.
+   the server section is silently ignored there (D2, landed with U2).
+7. ~~Leg-1 schema deliberately omits `server`~~ (superseded by U2): a file containing it
+   now validates against the full schema; unknown keys *inside* `server` are rejected.
 
 ## Verification (per leg)
 
@@ -58,3 +61,16 @@ Status: in progress — U1 complete (2026-11-06, relay leg 1)
   schema), `config.schema.json`, `flags.go` (`--config` flag, five-key merge into
   resolution), `timeout.go` (`resolveTimeout` file tier), completion scripts, tests
   (`config_test.go`, `timeout_test.go` file-tier cases).
+- 2026-11-06 (leg 2): U2 implemented — `config.schema.json` (`server` object,
+  kebab-case, additionalProperties: false), `config.go` (`fileServerConfig`, pointer
+  fields for presence), `http.go` (`resolveAPIKey` config tier with new
+  `apiKeySourceConfig`, shared `readAPIKeyFile`; `resolveCORS` file tier with
+  presence-suppresses-env semantics), `flags.go` (server-section merge in server mode:
+  host/port/max-concurrent/insecure-no-auth/disable-localhost-protection with
+  visit-tracked flag precedence, source-labeled range checks, cross-source TLS pairing
+  + fail-fast file check; diagnostic modes return before the merge, so the section is
+  silently ignored per D2). Tests: `config_test.go` (server-section decode, schema
+  rejections, `TestParseCLIServerSection` merge/precedence/validation/silent-ignore),
+  `http_test.go` (resolveAPIKey/resolveCORS file-tier cases, source String). Built-binary
+  smoke: `.jsonc` server config starts an authenticated HTTP server with file CORS;
+  fail-fast on bad origin, out-of-range port, unpaired TLS.

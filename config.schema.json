@@ -28,6 +28,65 @@
       "type": "string",
       "minLength": 1,
       "description": "Global per-tool timeout as a formatted duration (e.g. \"5m\", \"1h 30m 5s\") or NONE (flag: --timeout)"
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "HTTP server settings. Ignored (silently) in diagnostic modes (--list-tools / --call-tool).",
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IP address for the HTTP server (flag: --host)"
+        },
+        "port": {
+          "type": "integer",
+          "description": "Port for the HTTP server; 0 selects stdio mode, must be 1..65535 (flag: --port)"
+        },
+        "api-key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "API token for HTTP mode (flag: --api-key; precedence: flag > --api-key-file > MCP_COMMANDS_API_KEY > this key)"
+        },
+        "api-key-file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Read the API token from a file (flag: --api-key-file; content is trimmed, trailing newline ok)"
+        },
+        "tls-cert": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TLS certificate file for HTTP mode (PEM); requires a key (flag: --tls-cert)"
+        },
+        "tls-key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TLS key file for HTTP mode (PEM); requires a certificate (flag: --tls-key)"
+        },
+        "insecure-no-auth": {
+          "type": "boolean",
+          "description": "Allow an unauthenticated HTTP server on a non-loopback host (loudly warned; never use in production) (flag: --insecure-no-auth)"
+        },
+        "max-concurrent": {
+          "type": "integer",
+          "description": "Maximum concurrent tool executions; 0 for default, must be 1..256 (flag: --max-concurrent)"
+        },
+        "allowed-origins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Exact origin allowlist for CORS (flag: --allowed-origins); an explicit empty array disables the allowlist and suppresses MCP_COMMANDS_ALLOWED_ORIGINS"
+        },
+        "allow-all-origins": {
+          "type": "boolean",
+          "description": "Echo any Origin header for CORS, dev convenience (flag: --allow-all-origins); an explicit false suppresses MCP_COMMANDS_ALLOW_ALL_ORIGINS"
+        },
+        "disable-localhost-protection": {
+          "type": "boolean",
+          "description": "Disable the SDK's DNS-rebinding protection for loopback servers (flag: --disable-localhost-protection)"
+        }
+      }
     }
   }
 }

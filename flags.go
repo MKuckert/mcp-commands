@@ -305,27 +305,93 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cfg, nil
 	}
 
-	// HTTP mode only.
+	// HTTP mode only. The config file's server section (nil = no --config or
+	// no "server" key) merges in with flag > env > file precedence; reaching
+	// this point means server mode, so in diagnostic modes the section is
+	// silently ignored (no report — unlike server flags).
+	var fileServer *fileServerConfig
+	if file != nil {
+		fileServer = file.Server
+	}
+
+	// host: flag > file (no env var). The flag default 127.0.0.1 is not an
+	// "unset" marker, so visit-tracking decides (like --watch).
+	if !visited["host"] && fileServer != nil && fileServer.Host != nil {
+		cfg.server.host = *fileServer.Host
+	}
+
+	// port: flag > file; the range check applies to file values too, with
+	// the source named in the error.
+	portValue := *portFlag
+	portSource := "--port"
+	if !visited["port"] && fileServer != nil && fileServer.Port != nil {
+		portValue, portSource = *fileServer.Port, "config file server.port"
+	}
+	cfg.server.port = portValue
+	if portValue < 0 || portValue > 65535 {
+		return cliConfig{}, fmt.Errorf("%s must be 0 (stdio) or 1..65535 (got %d)", portSource, portValue)
+	}
+
+	// max-concurrent: flag > file; the range check applies to file values too.
+	maxConcValue := *maxConcurrentFlag
+	maxConcSource := "--max-concurrent"
+	if !visited["max-concurrent"] && fileServer != nil && fileServer.MaxConcurrent != nil {
+		maxConcValue, maxConcSource = *fileServer.MaxConcurrent, "config file server.max-concurrent"
+	}
+	cfg.server.maxConcurrent = maxConcValue
+	if maxConcValue < 0 || maxConcValue > maxConcurrentCap {
+		return cliConfig{}, fmt.Errorf("%s must be 0 (default) or 1..%d (got %d)", maxConcSource, maxConcurrentCap, maxConcValue)
+	}
+
+	// insecure-no-auth: flag > file (visit-tracked, so an explicit
+	// --insecure-no-auth=false counts as set).
+	if !visited["insecure-no-auth"] && fileServer != nil && fileServer.InsecureNoAuth != nil {
+		cfg.server.insecureNoAuth = *fileServer.InsecureNoAuth
+	}
+
+	var fileOrigins *[]string
+	var fileAllowAll *bool
+	if fileServer != nil {
+		fileOrigins = fileServer.AllowedOrigins
+		fileAllowAll = fileServer.AllowAllOrigins
+	}
+	disableLHP := *disableLocalhostProtectionFlag
+	if !visited["disable-localhost-protection"] && fileServer != nil && fileServer.DisableLocalhostProtection != nil {
+		disableLHP = *fileServer.DisableLocalhostProtection
+	}
+
 	var corsErr error
-	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, allowedOriginsSet, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, allowedOriginsSet, fileOrigins, *allowAllOriginsFlag, allowAllSet, fileAllowAll, disableLHP)
 	if corsErr != nil {
 		return cliConfig{}, corsErr
-	}
-	if cfg.server.port < 0 || cfg.server.port > 65535 {
-		return cliConfig{}, fmt.Errorf("--port must be 0 (stdio) or 1..65535 (got %d)", cfg.server.port)
-	}
-	if cfg.server.maxConcurrent < 0 || cfg.server.maxConcurrent > maxConcurrentCap {
-		return cliConfig{}, fmt.Errorf("--max-concurrent must be 0 (default) or 1..%d (got %d)", maxConcurrentCap, cfg.server.maxConcurrent)
 	}
 	// In stdio mode the auth and TLS options are documented as ignored, so
 	// an unreadable --api-key-file or --tls-cert/--tls-key must not block a
 	// stdio server from starting.
 	if cfg.server.port > 0 {
-		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
-		if err == nil && (*tlsCertFlag != "") != (*tlsKeyFlag != "") {
-			err = errors.New("--tls-cert and --tls-key must be given together")
+		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag, fileServer)
+		// TLS paths merge across sources: a flag value wins when non-empty,
+		// otherwise the file's. The pairing check and fail-fast file check
+		// apply to the merged pair.
+		tlsCert := *tlsCertFlag
+		tlsKey := *tlsKeyFlag
+		if fileServer != nil {
+			if tlsCert == "" && fileServer.TLSCert != nil {
+				tlsCert = *fileServer.TLSCert
+			}
+			if tlsKey == "" && fileServer.TLSKey != nil {
+				tlsKey = *fileServer.TLSKey
+			}
 		}
-		for _, tlsFile := range []string{*tlsCertFlag, *tlsKeyFlag} {
+		if err == nil && (tlsCert != "") != (tlsKey != "") {
+			if *tlsCertFlag == "" && *tlsKeyFlag == "" {
+				// Both effective values came from the config file.
+				err = errors.New("config file server.tls-cert and server.tls-key must be given together")
+			} else {
+				err = errors.New("--tls-cert and --tls-key must be given together")
+			}
+		}
+		for _, tlsFile := range []string{tlsCert, tlsKey} {
 			if err == nil && tlsFile != "" {
 				if err = checkTLSFile(tlsFile); err != nil {
 					err = fmt.Errorf("invalid TLS configuration: %w", err)
@@ -333,7 +399,7 @@ func parseCLI(args []string) (cliConfig, error) {
 			}
 		}
 		if err == nil {
-			cfg.server.tlsCert, cfg.server.tlsKey = *tlsCertFlag, *tlsKeyFlag
+			cfg.server.tlsCert, cfg.server.tlsKey = tlsCert, tlsKey
 		}
 	}
 	return cfg, err

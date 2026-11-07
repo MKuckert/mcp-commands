@@ -26,6 +26,7 @@ func TestResolveAPIKey(t *testing.T) {
 		fileMiss   bool // path set but file missing → error
 		wantErr    bool // any explicit-file error (missing, empty, oversized)
 		env        string
+		config     *fileServerConfig // config file server section (nil = no --config)
 		want       string
 		wantSource apiKeySource
 	}{
@@ -38,6 +39,12 @@ func TestResolveAPIKey(t *testing.T) {
 		{name: "oversized_file_errors", file: strings.Repeat("a", maxAPIKeyFileBytes+1), fileSet: true, wantErr: true},
 		{name: "missing_file_errors", fileMiss: true, wantErr: true},
 		{name: "neither_set", want: "", wantSource: apiKeySourceNone},
+		{name: "config_api_key_only", config: &fileServerConfig{APIKey: strPtr("from-config")},
+			want: "from-config", wantSource: apiKeySourceConfig},
+		{name: "env_beats_config_api_key", env: "from-env", config: &fileServerConfig{APIKey: strPtr("from-config")},
+			want: "from-env", wantSource: apiKeySourceEnv},
+		{name: "flag_beats_config_api_key", flag: "from-flag", config: &fileServerConfig{APIKey: strPtr("from-config")},
+			want: "from-flag", wantSource: apiKeySourceFlag},
 	}
 
 	for _, tt := range tests {
@@ -57,7 +64,7 @@ func TestResolveAPIKey(t *testing.T) {
 				}
 			}
 
-			got, err := resolveAPIKey(tt.flag, filePath)
+			got, err := resolveAPIKey(tt.flag, filePath, tt.config)
 			if tt.fileMiss || tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error for %s, got %v", tt.name, got)
@@ -75,6 +82,35 @@ func TestResolveAPIKey(t *testing.T) {
 			}
 		})
 	}
+
+	// Config-file api-key-file: the shared read path (cap, empty check)
+	// with config-file source labels.
+	t.Run("config_api_key_file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "key.txt")
+		if err := os.WriteFile(p, []byte("from-config-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveAPIKey("", "", &fileServerConfig{APIKeyFile: strPtr(p)})
+		if err != nil || got.Token != "from-config-file" || got.Source != apiKeySourceConfig {
+			t.Fatalf("got %v err %v, want from-config-file/config file", got, err)
+		}
+	})
+	t.Run("config_api_key_beats_config_api_key_file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "key.txt")
+		if err := os.WriteFile(p, []byte("from-config-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveAPIKey("", "", &fileServerConfig{APIKey: strPtr("inline"), APIKeyFile: strPtr(p)})
+		if err != nil || got.Token != "inline" {
+			t.Fatalf("got %v err %v, want inline", got, err)
+		}
+	})
+	t.Run("config_api_key_file_missing_errors", func(t *testing.T) {
+		_, err := resolveAPIKey("", "", &fileServerConfig{APIKeyFile: strPtr(filepath.Join(t.TempDir(), "nope"))})
+		if err == nil || !strings.Contains(err.Error(), "config file server.api-key-file") {
+			t.Fatalf("want config-file label in error, got %v", err)
+		}
+	})
 }
 
 func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -440,6 +476,8 @@ func TestResolveCORS(t *testing.T) {
 		allowAllEnv    string
 		allowAllFlag   bool
 		allowAllSet    bool
+		fileOrigins    *[]string // config file server.allowed-origins (nil = key absent)
+		fileAllowAll   *bool     // config file server.allow-all-origins (nil = key absent)
 		disableLocalhp bool
 		wantOrigins    []string
 		wantAllowAll   bool
@@ -491,6 +529,35 @@ func TestResolveCORS(t *testing.T) {
 		{name: "malformed_path", flag: "https://x.example/path", wantErr: true},
 		{name: "malformed_env_origin", originsEnv: "https://a.example, not-a-url", wantErr: true},
 		{name: "allow_all_env_banana", allowAllEnv: "banana", wantErr: true},
+		// Config-file tier: flag > env > file.
+		{name: "file_only", fileOrigins: &[]string{"https://f.example"},
+			wantOrigins: []string{"https://f.example"}},
+		// File key presence is an explicit choice: it suppresses the env
+		// var (mirrors an explicitly-set flag).
+		{name: "file_present_suppresses_env", originsEnv: "https://env.example",
+			fileOrigins: &[]string{"https://f.example"},
+			wantOrigins: []string{"https://f.example"}},
+		{name: "flag_beats_file", flag: "https://flag.example",
+			fileOrigins: &[]string{"https://f.example"},
+			wantOrigins: []string{"https://flag.example"}},
+		// An explicit empty allowed-origins array is a deliberate "no
+		// origins" choice: it suppresses the env var (like an explicit
+		// --allowed-origins=).
+		{name: "explicit_empty_file_suppresses_env", fileOrigins: &[]string{},
+			originsEnv: "https://env.example", wantOrigins: []string{}},
+		{name: "file_allow_all", fileAllowAll: boolPtr(true), wantAllowAll: true},
+		// An explicit false suppresses the env var (like an explicit
+		// --allow-all-origins=false).
+		{name: "explicit_false_file_suppresses_env", fileAllowAll: boolPtr(false),
+			allowAllEnv: "1", wantAllowAll: false},
+		// Cross-source mutual exclusion.
+		{name: "file_origins_and_flag_allow_all", fileOrigins: &[]string{"https://f.example"},
+			allowAllFlag: true, allowAllSet: true, wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "flag_origins_and_file_allow_all", flag: "https://f.example",
+			fileAllowAll: boolPtr(true), wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "file_origins_and_env_allow_all", fileOrigins: &[]string{"https://f.example"},
+			allowAllEnv: "1", wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "malformed_file_origin", fileOrigins: &[]string{"not-a-url"}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -498,7 +565,7 @@ func TestResolveCORS(t *testing.T) {
 			t.Setenv(allowedOriginsEnvVar, tt.originsEnv)
 			t.Setenv(allowAllOriginsEnvVar, tt.allowAllEnv)
 
-			got, err := resolveCORS(tt.flag, tt.originsSet, tt.allowAllFlag, tt.allowAllSet, tt.disableLocalhp)
+			got, err := resolveCORS(tt.flag, tt.originsSet, tt.fileOrigins, tt.allowAllFlag, tt.allowAllSet, tt.fileAllowAll, tt.disableLocalhp)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (%+v)", got)
@@ -1062,6 +1129,7 @@ func TestAPIKeySourceString(t *testing.T) {
 		{name: "flag", src: apiKeySourceFlag, want: "flag"},
 		{name: "file", src: apiKeySourceFile, want: "file"},
 		{name: "env", src: apiKeySourceEnv, want: "env"},
+		{name: "config", src: apiKeySourceConfig, want: "config file"},
 		// Unknown values fail closed to "none", never to a source name.
 		{name: "unknown", src: apiKeySource(99), want: "none"},
 	}

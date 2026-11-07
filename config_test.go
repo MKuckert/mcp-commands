@@ -13,6 +13,8 @@ import (
 
 func strPtr(s string) *string { return &s }
 
+func boolPtr(b bool) *bool { return &b }
+
 // writeConfigFile writes content to a file named name in a fresh temp dir
 // and returns its path.
 func writeConfigFile(t *testing.T, name, content string) string {
@@ -175,13 +177,47 @@ func TestLoadConfigFile(t *testing.T) {
 			name: "null_document", file: "c.json", content: `null`, wantErr: "invalid configuration",
 		},
 		{
-			name: "unknown_key_rejected", file: "c.json", content: `{"server": {"host": "x"}}`, wantErr: "invalid configuration",
+			name: "unknown_key_in_server_rejected", file: "c.json", content: `{"server": {"bogus": 1}}`, wantErr: "invalid configuration",
 		},
 		{
 			name: "wrong_type_rejected", file: "c.json", content: `{"watch": "yes"}`, wantErr: "invalid configuration",
 		},
 		{
 			name: "empty_dir_rejected", file: "c.json", content: `{"dir": ""}`, wantErr: "invalid configuration",
+		},
+		{
+			name: "server_section_decoded", file: "c.json",
+			content: `{"dir": "d", "scripts": "s", "server": {"host": "0.0.0.0", "port": 8443, "api-key": "k", "max-concurrent": 7, "allowed-origins": [], "allow-all-origins": false}}`,
+			check: func(t *testing.T, c *fileConfig) {
+				s := c.Server
+				if s == nil {
+					t.Fatal("server section not decoded")
+				}
+				if s.Host == nil || *s.Host != "0.0.0.0" || s.Port == nil || *s.Port != 8443 {
+					t.Errorf("host/port = %v %v", s.Host, s.Port)
+				}
+				if s.APIKey == nil || *s.APIKey != "k" {
+					t.Errorf("api-key = %v", s.APIKey)
+				}
+				if s.MaxConcurrent == nil || *s.MaxConcurrent != 7 {
+					t.Errorf("max-concurrent = %v", s.MaxConcurrent)
+				}
+				if s.AllowedOrigins == nil || len(*s.AllowedOrigins) != 0 {
+					t.Errorf("allowed-origins = %v, want present empty", s.AllowedOrigins)
+				}
+				if s.AllowAllOrigins == nil || *s.AllowAllOrigins {
+					t.Errorf("allow-all-origins = %v, want present false", s.AllowAllOrigins)
+				}
+				if s.TLSKey != nil || s.InsecureNoAuth != nil {
+					t.Error("absent keys must stay nil")
+				}
+			},
+		},
+		{
+			name: "server_wrong_type_rejected", file: "c.json", content: `{"server": {"port": "8080"}}`, wantErr: "invalid configuration",
+		},
+		{
+			name: "server_origins_not_array_rejected", file: "c.json", content: `{"server": {"allowed-origins": "https://a.example"}}`, wantErr: "invalid configuration",
 		},
 		{
 			name: "unterminated_jsonc_comment", file: "c.jsonc", content: `{"dir": /* oops`, wantErr: "unterminated",
@@ -234,7 +270,7 @@ func TestParseCLIConfig(t *testing.T) {
 	noDirFile := writeConfigFile(t, "nodir.json", `{"log-level": "debug"}`)
 	badLevelFile := writeConfigFile(t, "badlevel.json", `{"dir": "d", "scripts": "s", "log-level": "verbose"}`)
 	badTimeoutFile := writeConfigFile(t, "badtimeout.json", `{"dir": "d", "scripts": "s", "timeout": "soon"}`)
-	unknownKeyFile := writeConfigFile(t, "unknown.json", `{"dir": "d", "scripts": "s", "server": {}}`)
+	unknownKeyFile := writeConfigFile(t, "unknown.json", `{"dir": "d", "scripts": "s", "server": {"bogus": 1}}`)
 
 	tests := []struct {
 		name     string
@@ -360,6 +396,272 @@ func TestParseCLIConfig(t *testing.T) {
 			check: func(t *testing.T, c cliConfig) {
 				if c.server.timeout != defaultToolTimeout {
 					t.Errorf("timeout = %v, want default", c.server.timeout)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup(t)
+			}
+			c, err := parseCLI(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseCLI = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCLI unexpected error: %v", err)
+			}
+			if c.mode != tt.wantMode {
+				t.Fatalf("mode = %v, want %v", c.mode, tt.wantMode)
+			}
+			if tt.check != nil {
+				tt.check(t, c)
+			}
+		})
+	}
+}
+
+// TestParseCLIServerSection: the config file's server section merges into
+// server-mode resolution with flag > env > file precedence, explicit-empty
+// semantics, and cross-source validation. No t.Parallel: t.Setenv for the
+// CORS env vars.
+func TestParseCLIServerSection(t *testing.T) {
+	t.Setenv(logLevelEnvVar, "")
+	t.Setenv(allowedOriginsEnvVar, "")
+	t.Setenv(allowAllOriginsEnvVar, "")
+
+	writeKeyFile := func(t *testing.T, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "key.txt")
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	writePEM := func(t *testing.T, name string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte("pem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	fullServer := `{"dir": "d", "scripts": "s", "server": {"host": "0.0.0.0", "port": 8080, "api-key": "filekey", "max-concurrent": 4, "insecure-no-auth": true, "allowed-origins": ["https://a.example"], "disable-localhost-protection": true}}`
+	fullFile := writeConfigFile(t, "full.json", fullServer)
+	originsFile := writeConfigFile(t, "origins.json", `{"dir": "d", "scripts": "s", "server": {"allowed-origins": ["https://f.example"]}}`)
+	emptyOriginsFile := writeConfigFile(t, "emptyorigins.json", `{"dir": "d", "scripts": "s", "server": {"allowed-origins": []}}`)
+	allowAllFalseFile := writeConfigFile(t, "allowallfalse.json", `{"dir": "d", "scripts": "s", "server": {"allow-all-origins": false}}`)
+	allowAllTrueFile := writeConfigFile(t, "allowalltrue.json", `{"dir": "d", "scripts": "s", "server": {"allow-all-origins": true}}`)
+	apiKeyFileRef := writeKeyFile(t, "from-keyfile\n")
+	apiKeyFileCfg := writeConfigFile(t, "apikeyfile.json", `{"dir": "d", "scripts": "s", "server": {"port": 8080, "api-key-file": "`+apiKeyFileRef+`"}}`)
+	cert := writePEM(t, "cert.pem")
+	key := writePEM(t, "key.pem")
+	tlsSplitFile := writeConfigFile(t, "tlssplit.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": "`+cert+`"}}`)
+	tlsKeyOnlyFile := writeConfigFile(t, "tlskeyonly.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-key": "`+key+`"}}`)
+	tlsBadPathFile := writeConfigFile(t, "tlsbad.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": "`+filepath.Join(t.TempDir(), "nope")+`", "tls-key": "`+key+`"}}`)
+	badPortFile := writeConfigFile(t, "badport.json", `{"dir": "d", "scripts": "s", "server": {"port": 70000}}`)
+	badMaxConcFile := writeConfigFile(t, "badmaxconc.json", `{"dir": "d", "scripts": "s", "server": {"max-concurrent": 257}}`)
+	stdioBadKeyFile := writeConfigFile(t, "stdio.json", `{"dir": "d", "scripts": "s", "server": {"api-key-file": "`+filepath.Join(t.TempDir(), "nope")+`"}}`)
+	diagServerFile := writeConfigFile(t, "diag.json", `{"dir": "d", "scripts": "s", "server": {"port": 8080, "allowed-origins": ["not-a-url"], "allow-all-origins": true}}`)
+
+	tests := []struct {
+		name     string
+		args     []string
+		setup    func(t *testing.T) // per-case environment (runs before parseCLI)
+		wantErr  string             // substring; empty = success
+		wantMode cliMode            // zero value = modeServer
+		check    func(t *testing.T, c cliConfig)
+	}{
+		{
+			name: "file_supplies_server_settings",
+			args: []string{"--config", fullFile},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.host != "0.0.0.0" || c.server.port != 8080 {
+					t.Errorf("host/port = %q/%d", c.server.host, c.server.port)
+				}
+				if c.server.apiKey.Token != "filekey" || c.server.apiKey.Source != apiKeySourceConfig {
+					t.Errorf("apiKey = %v, want filekey/config file", c.server.apiKey)
+				}
+				if c.server.maxConcurrent != 4 {
+					t.Errorf("maxConcurrent = %d", c.server.maxConcurrent)
+				}
+				if !c.server.insecureNoAuth {
+					t.Error("insecure-no-auth not from file")
+				}
+				if len(c.server.cors.origins) != 1 || c.server.cors.origins[0] != "https://a.example" {
+					t.Errorf("cors origins = %v", c.server.cors.origins)
+				}
+				if !c.server.cors.disableLocalhostProtection {
+					t.Error("disable-localhost-protection not from file")
+				}
+			},
+		},
+		{
+			name: "flags_override_file",
+			args: []string{"--config", fullFile, "--host", "127.0.0.1", "--port", "9090", "--max-concurrent", "8", "--api-key", "flagkey"},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.host != "127.0.0.1" || c.server.port != 9090 {
+					t.Errorf("host/port = %q/%d", c.server.host, c.server.port)
+				}
+				if c.server.maxConcurrent != 8 {
+					t.Errorf("maxConcurrent = %d", c.server.maxConcurrent)
+				}
+				if c.server.apiKey.Token != "flagkey" || c.server.apiKey.Source != apiKeySourceFlag {
+					t.Errorf("apiKey = %v", c.server.apiKey)
+				}
+			},
+		},
+		{
+			name: "explicit_false_flag_overrides_file_insecure",
+			args: []string{"--config", fullFile, "--insecure-no-auth=false"},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.insecureNoAuth {
+					t.Error("insecure-no-auth should be false (explicit flag wins)")
+				}
+			},
+		},
+		{
+			name:  "env_beats_file_api_key",
+			args:  []string{"--config", fullFile},
+			setup: func(t *testing.T) { t.Setenv(apiKeyEnvVar, "from-env") },
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.apiKey.Token != "from-env" || c.server.apiKey.Source != apiKeySourceEnv {
+					t.Errorf("apiKey = %v, want from-env/env", c.server.apiKey)
+				}
+			},
+		},
+		{
+			name: "file_api_key_file_resolved",
+			args: []string{"--config", apiKeyFileCfg},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.apiKey.Token != "from-keyfile" || c.server.apiKey.Source != apiKeySourceConfig {
+					t.Errorf("apiKey = %v, want from-keyfile/config file", c.server.apiKey)
+				}
+			},
+		},
+		{
+			name:  "file_present_suppresses_env_origins",
+			args:  []string{"--config", originsFile},
+			setup: func(t *testing.T) { t.Setenv(allowedOriginsEnvVar, "https://env.example") },
+			check: func(t *testing.T, c cliConfig) {
+				if len(c.server.cors.origins) != 1 || c.server.cors.origins[0] != "https://f.example" {
+					t.Errorf("cors origins = %v, want file value (presence suppresses env)", c.server.cors.origins)
+				}
+			},
+		},
+		{
+			name: "cors_flag_beats_file_origins",
+			args: []string{"--config", originsFile, "--allowed-origins", "https://flag.example"},
+			check: func(t *testing.T, c cliConfig) {
+				if len(c.server.cors.origins) != 1 || c.server.cors.origins[0] != "https://flag.example" {
+					t.Errorf("cors origins = %v, want flag value", c.server.cors.origins)
+				}
+			},
+		},
+		{
+			name:  "explicit_empty_file_origins_suppress_env",
+			args:  []string{"--config", emptyOriginsFile},
+			setup: func(t *testing.T) { t.Setenv(allowedOriginsEnvVar, "https://env.example") },
+			check: func(t *testing.T, c cliConfig) {
+				if len(c.server.cors.origins) != 0 || c.server.cors.allowAll {
+					t.Errorf("cors = %v, want empty and not allow-all", c.server.cors)
+				}
+			},
+		},
+		{
+			name:  "explicit_false_file_allow_all_suppress_env",
+			args:  []string{"--config", allowAllFalseFile},
+			setup: func(t *testing.T) { t.Setenv(allowAllOriginsEnvVar, "1") },
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.cors.allowAll {
+					t.Error("allow-all should be false (explicit file value wins over env)")
+				}
+			},
+		},
+		{
+			name: "file_allow_all_true",
+			args: []string{"--config", allowAllTrueFile},
+			check: func(t *testing.T, c cliConfig) {
+				if !c.server.cors.allowAll {
+					t.Error("allow-all not from file")
+				}
+			},
+		},
+		{
+			name:    "cross_source_cors_exclusive_file_origins_flag_allow_all",
+			args:    []string{"--config", originsFile, "--allow-all-origins"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name:    "cross_source_cors_exclusive_flag_origins_file_allow_all",
+			args:    []string{"--config", allowAllTrueFile, "--allowed-origins", "https://f.example"},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "tls_pair_across_sources_flag_cert_file_key",
+			args: []string{"--config", tlsKeyOnlyFile, "--tls-cert", cert},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != cert || c.server.tlsKey != key {
+					t.Errorf("tlsCert/tlsKey = %q/%q", c.server.tlsCert, c.server.tlsKey)
+				}
+			},
+		},
+		{
+			name: "tls_pair_across_sources_file_cert_flag_key",
+			args: []string{"--config", tlsSplitFile, "--tls-key", key},
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.tlsCert != cert || c.server.tlsKey != key {
+					t.Errorf("tlsCert/tlsKey = %q/%q", c.server.tlsCert, c.server.tlsKey)
+				}
+			},
+		},
+		{
+			name:    "tls_file_cert_only_errors_naming_config",
+			args:    []string{"--config", tlsSplitFile},
+			wantErr: "config file server.tls-cert and server.tls-key must be given together",
+		},
+		{
+			name:    "tls_file_bad_path_fails",
+			args:    []string{"--config", tlsBadPathFile},
+			wantErr: "invalid TLS configuration",
+		},
+		{
+			name:    "file_port_out_of_range",
+			args:    []string{"--config", badPortFile},
+			wantErr: "config file server.port must be 0 (stdio) or 1..65535",
+		},
+		{
+			name:    "file_max_concurrent_out_of_range",
+			args:    []string{"--config", badMaxConcFile},
+			wantErr: "config file server.max-concurrent must be 0 (default) or 1..256",
+		},
+		{
+			// Stdio mode (no port) ignores the auth sources: an unreadable
+			// config-file api-key-file must not block startup.
+			name:     "stdio_ignores_file_api_key_file",
+			args:     []string{"--config", stdioBadKeyFile},
+			wantMode: modeServer,
+			check: func(t *testing.T, c cliConfig) {
+				if c.server.port != 0 || c.server.apiKey.Source != apiKeySourceNone {
+					t.Errorf("port/apiKey = %d/%v, want stdio + zero value", c.server.port, c.server.apiKey)
+				}
+			},
+		},
+		{
+			// Diagnostic modes silently ignore the server section (D2): even
+			// invalid values do not fail or get reported.
+			name:     "diagnostic_silently_ignores_server_section",
+			args:     []string{"--config", diagServerFile, "--list-tools"},
+			wantMode: modeListTools,
+			check: func(t *testing.T, c cliConfig) {
+				if len(c.diagnostic.ignoredFlags) != 0 {
+					t.Errorf("ignoredFlags = %v, want empty (file values are not reported)", c.diagnostic.ignoredFlags)
 				}
 			},
 		},
