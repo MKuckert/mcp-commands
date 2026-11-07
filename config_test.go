@@ -247,6 +247,32 @@ func TestLoadConfigFile(t *testing.T) {
 			name: "server_origins_not_array_rejected", file: "c.json", content: `{"server": {"allowed-origins": "https://a.example"}}`, wantErr: "invalid configuration",
 		},
 		{
+			// UseNumber + exact conversion: a fractional literal must fail the
+			// schema's "integer" type instead of being rounded to an integer
+			// (8080.0000000000001 would otherwise silently become 8080).
+			name: "fractional_port_rejected", file: "c.json", content: `{"server": {"port": 8080.0000000000001}}`, wantErr: "invalid configuration",
+		},
+		{
+			// An underflowing literal must not silently become 0 (stdio mode).
+			name: "underflow_port_rejected", file: "c.json", content: `{"server": {"port": 1e-400}}`, wantErr: "invalid configuration",
+		},
+		{
+			// Exponent notation for a valid integer decodes exactly (1e2 = 100).
+			name: "exponent_port_accepted", file: "c.json", content: `{"server": {"port": 1e2}}`,
+			check: func(t *testing.T, c *fileConfig) {
+				if c.Server == nil || c.Server.Port == nil {
+					t.Fatal("server.port missing")
+				}
+				if *c.Server.Port != 100 {
+					t.Errorf("port = %d, want 100", *c.Server.Port)
+				}
+			},
+		},
+		{
+			// A literal too large for int64 is a startup error, not an overflow.
+			name: "overflow_port_rejected", file: "c.json", content: `{"server": {"port": 1e308}}`, wantErr: "out of int64 range",
+		},
+		{
 			name: "unterminated_jsonc_comment", file: "c.jsonc", content: `{"dir": /* oops`, wantErr: "unterminated",
 		},
 	}

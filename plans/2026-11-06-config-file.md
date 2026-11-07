@@ -2,7 +2,8 @@
 
 **Branch:** `feature/config-file` (from `main` @ `b318797`, worktree `/workspace/mcp-commands-config-file`)
 **Relay:** `config-file` (packet: `.pi-web/relays/config-file/`)
-Status: complete — delivered as PR #42 (2026-11-07, relay legs 8–9)
+Status: complete — delivered as PR #42 (2026-11-07, relay legs 8–9); round-2
+review remediation committed (leg 12), re-push pending (leg 13)
 
 ## Scope
 
@@ -106,3 +107,21 @@ Status: complete — delivered as PR #42 (2026-11-07, relay legs 8–9)
   `MCP_COMMANDS_API_KEY` via `t.Setenv`. Regression tests:
   `duplicate_server_keys_last_object_wins`, `file_element_with_comma_rejected`,
   `file_empty_element_rejected`, `file_multi_element`.
+- 2026-11-07 (leg 12, Copilot review round 2 remediation on PR #42): the two
+  in-scope findings fixed; the third ("stop JSONC line comments at CR as well
+  as LF") is excluded by explicit user direction and stays open on the PR.
+  (F-1) Numeric precision: the document decode now uses `UseNumber`, so schema
+  validation sees the exact literal — a fractional port (`8080.0000000000001`)
+  or an underflowing one (`1e-400`) fails the schema's "integer" type instead
+  of being rounded to `8080`/`0` first; schema-valid integers are converted
+  exactly for the struct decode (`normalizeNumbers`, big.Rat: exponent
+  notation like `1e2` still decodes, a literal too large for int64 is a
+  startup error). Tests: `fractional_port_rejected`,
+  `underflow_port_rejected`, `exponent_port_accepted`,
+  `overflow_port_rejected`. (F-2) CORS precedence docs: the code already
+  implements the charter's explicit-empty semantics — a present
+  `server.allowed-origins`/`allow-all-origins` key beats its env var (pinned
+  by `file_present_suppresses_env_origins` et al.) — so the blanket "flag >
+  env > file" statement was corrected to name the CORS exception in the README
+  precedence paragraph, the `--config` flag help, and the
+  `config.schema.json` top-level description.

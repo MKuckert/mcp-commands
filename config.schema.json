@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mcp-commands.local/config.schema.json",
   "title": "mcp-commands configuration file",
-  "description": "Operational settings for mcp-commands, applied when the file is passed via --config. CLI flags and environment variables take precedence over values in this file; a present key counts as explicitly set.",
+  "description": "Operational settings for mcp-commands, applied when the file is passed via --config. CLI flags take precedence over values in this file; environment variables do as well, except that a present server.allowed-origins or allow-all-origins key takes precedence over its environment variable. A present key counts as explicitly set.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

@@ -370,7 +370,7 @@ The file is read and validated at startup, before the server starts; an invalid 
 - **1 MiB size cap** — a larger file fails fast as a likely wrong path.
 - **All keys are optional, kebab-case; unknown keys are rejected.** The file is validated against the JSON Schema shipped at [`config.schema.json`](https://github.com/MKuckert/mcp-commands/blob/main/config.schema.json) in the repository root (and embedded into the binary); point your editor's JSON validation at it for inline errors and autocompletion. The `$schema` property is accepted for editor support (e.g. `"https://raw.githubusercontent.com/MKuckert/mcp-commands/main/config.schema.json"`) and ignored by the server.
 
-**Precedence:** per setting, **CLI flag > environment variable > config file > built-in default**. A *present* key counts as explicitly set — `false`, `0`, or `[]` are deliberate values, exactly like an explicitly-set flag. `--config` is a CLI-only flag and never a key in the file.
+**Precedence:** per setting, **CLI flag > environment variable > config file > built-in default**. The exception is the two CORS keys, where a *present* `server.allowed-origins` / `server.allow-all-origins` key takes precedence over its environment variable — precedence there is **CLI flag > present file key > environment variable > built-in default**, so an explicit `[]` or `false` in the file turns off a globally-set env var. A *present* key counts as explicitly set — `false`, `0`, or `[]` are deliberate values, exactly like an explicitly-set flag. `--config` is a CLI-only flag and never a key in the file.
 
 Top-level keys:
 

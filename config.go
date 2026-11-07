@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,9 +83,12 @@ func compileConfigSchema() *jsonschema.Schema {
 // loadConfigFile reads and validates the --config file: extension dispatch
 // (.json strict / .jsonc with comments), size cap, strict single-document
 // decode, and validation against the embedded schema (unknown keys and wrong
-// types are rejected). Value semantics (duration format, log-level set) are
-// validated by the same resolvers the flags use, so one error format covers
-// every source.
+// types are rejected). Numbers are decoded with UseNumber so the schema sees
+// the literal as written (a fractional or underflowing port fails the
+// "integer" type instead of being rounded first); schema-valid integers are
+// then converted exactly for the struct decode. Value semantics (duration
+// format, log-level set) are validated by the same resolvers the flags use,
+// so one error format covers every source.
 func loadConfigFile(path string) (*fileConfig, error) {
 	jsonc := false
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -114,6 +118,11 @@ func loadConfigFile(path string) (*fileConfig, error) {
 	}
 	var document any
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber preserves the exact numeric literal through schema
+	// validation: without it, 8080.0000000000001 rounds to 8080 and
+	// 1e-400 underflows to 0 before the "integer" type check can reject
+	// them, silently changing the setting.
+	decoder.UseNumber()
 	if err := decoder.Decode(&document); err != nil {
 		return nil, fmt.Errorf("config file %s: invalid JSON: %w", path, err)
 	}
@@ -124,12 +133,16 @@ func loadConfigFile(path string) (*fileConfig, error) {
 	if err := configSchema.Validate(document); err != nil {
 		return nil, fmt.Errorf("config file %s: invalid configuration: %w", path, err)
 	}
+	normalized, err := normalizeNumbers(document)
+	if err != nil {
+		return nil, fmt.Errorf("config file %s: %w", path, err)
+	}
 	// Decode the struct from the validated document, not the raw bytes: the
 	// map decode above already collapsed duplicate keys (last wins), so the
 	// applied config can never retain a value that is absent from the
 	// validated document (a struct decode of the raw bytes would merge
 	// duplicate objects and keep earlier keys).
-	validated, err := json.Marshal(document)
+	validated, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("config file %s: %w", path, err)
 	}
@@ -138,6 +151,46 @@ func loadConfigFile(path string) (*fileConfig, error) {
 		return nil, fmt.Errorf("config file %s: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// normalizeNumbers replaces every json.Number in the validated document with
+// an exact int64. The schema admits integers only for the numeric fields, so
+// a non-integral literal was already rejected by validation; the big.Rat
+// parse additionally handles exponent notation (1e2 -> 100, which a plain
+// int decode would reject) and turns a literal too large for int64 into a
+// startup error instead of an overflow.
+func normalizeNumbers(v any) (any, error) {
+	switch v := v.(type) {
+	case json.Number:
+		rat, ok := new(big.Rat).SetString(string(v))
+		if !ok || !rat.IsInt() {
+			return nil, fmt.Errorf("number %s is not an integer", v)
+		}
+		if !rat.Num().IsInt64() {
+			return nil, fmt.Errorf("number %s is out of int64 range", v)
+		}
+		return rat.Num().Int64(), nil
+	case map[string]any:
+		for k, val := range v {
+			nv, err := normalizeNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			v[k] = nv
+		}
+		return v, nil
+	case []any:
+		for i, val := range v {
+			nv, err := normalizeNumbers(val)
+			if err != nil {
+				return nil, err
+			}
+			v[i] = nv
+		}
+		return v, nil
+	default:
+		return v, nil
+	}
 }
 
 // stripJSONCComments removes // line comments and /* block */ comments from

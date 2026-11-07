@@ -132,7 +132,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	dirFlag := fs.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := fs.String("scripts", "", "Directory containing executable scripts (required)")
-	configFlag := fs.String("config", "", "Path to a .json/.jsonc configuration file (CLI flags and env vars take precedence over file values)")
+	configFlag := fs.String("config", "", "Path to a .json/.jsonc configuration file (CLI flags take precedence over file values; a present server.allowed-origins or allow-all-origins key also takes precedence over its env var)")
 	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := fs.Int("port", 0, "Port for HTTP server (0 for stdio mode; must be 1..65535)")
@@ -306,9 +306,10 @@ func parseCLI(args []string) (cliConfig, error) {
 	}
 
 	// HTTP mode only. The config file's server section (nil = no --config or
-	// no "server" key) merges in with flag > env > file precedence; reaching
-	// this point means server mode, so in diagnostic modes the section is
-	// silently ignored (no report — unlike server flags).
+	// no "server" key) merges in with flag > env > file precedence — except
+	// the two CORS keys, where a present file key also beats the env var;
+	// reaching this point means server mode, so in diagnostic modes the
+	// section is silently ignored (no report — unlike server flags).
 	var fileServer *fileServerConfig
 	if file != nil {
 		fileServer = file.Server
