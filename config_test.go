@@ -180,6 +180,15 @@ func TestLoadConfigFile(t *testing.T) {
 			name: "unknown_key_in_server_rejected", file: "c.json", content: `{"server": {"bogus": 1}}`, wantErr: "invalid configuration",
 		},
 		{
+			name: "schema_meta_key_accepted", file: "c.json",
+			content: `{"$schema": "https://raw.githubusercontent.com/MKuckert/mcp-commands/main/config.schema.json", "dir": "d"}`,
+			check: func(t *testing.T, c *fileConfig) {
+				if c.Dir == nil || *c.Dir != "d" {
+					t.Errorf("dir = %v", c.Dir)
+				}
+			},
+		},
+		{
 			name: "wrong_type_rejected", file: "c.json", content: `{"watch": "yes"}`, wantErr: "invalid configuration",
 		},
 		{
