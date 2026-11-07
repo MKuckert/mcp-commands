@@ -2,7 +2,7 @@
 
 **Branch:** `feature/config-file` (from `main` @ `b318797`, worktree `/workspace/mcp-commands-config-file`)
 **Relay:** `config-file` (packet: `.pi-web/relays/config-file/`)
-Status: in progress — U3 complete (2026-11-06, relay leg 3)
+Status: complete — delivered as PR #42 (2026-11-07, relay legs 8–9)
 
 ## Scope
 
@@ -91,3 +91,18 @@ Status: in progress — U3 complete (2026-11-06, relay leg 3)
   for editor support (accepted, ignored by the server; coupled test in
   `config_test.go`); consistency pass between README statements and the
   error strings/behavior in `flags.go`, `http.go`, `config.go`.
+- 2026-11-07 (leg 9, Copilot review remediation on PR #42): all four
+  comments triaged as real concerns and fixed — (1) duplicate `server` keys:
+  the struct is now decoded from the *validated* document (the map decode
+  collapses duplicate keys, last wins), so the applied config can never
+  retain a value absent from the validated document (an earlier duplicate's
+  `insecure-no-auth` could previously survive); (2) `server.allowed-origins`
+  file array: each element is validated as-is as an exact origin — no CSV
+  comma splitting or empty-entry filtering, so `"a,b"` in one element and
+  `""` now fail fast instead of being silently split/filtered (flag/env CSV
+  semantics unchanged; explicit `[]` still means "no origins"); (3) test
+  fixtures JSON-escape filesystem paths (Windows temp-dir backslashes are
+  invalid JSON escapes); (4) api-key tests isolate an inherited
+  `MCP_COMMANDS_API_KEY` via `t.Setenv`. Regression tests:
+  `duplicate_server_keys_last_object_wins`, `file_element_with_comma_rejected`,
+  `file_empty_element_rejected`, `file_multi_element`.

@@ -287,6 +287,23 @@ func validateOrigin(origin string) error {
 	return nil
 }
 
+// parseCSVOrigins splits flag/env origin input on commas, trims entries,
+// skips empty ones, and validates each as an exact http/https origin.
+func parseCSVOrigins(raw string) ([]string, error) {
+	var origins []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if err := validateOrigin(part); err != nil {
+			return nil, err
+		}
+		origins = append(origins, part)
+	}
+	return origins, nil
+}
+
 // resolveCORS resolves flags over config file and env and validates origins.
 // Returns an error for malformed origins or a contradictory
 // --allowed-origins + --allow-all-origins combination, across any source
@@ -301,17 +318,6 @@ func resolveCORS(allowedOriginsFlag string, allowedOriginsSet bool, fileOrigins 
 	// Precedence per key: flag (visit-tracked) > config file (key present,
 	// even with a zero value — presence is an explicit choice that
 	// suppresses the env var, mirroring an explicitly-set flag) > env var.
-	originsRaw := allowedOriginsFlag
-	originsLabel := "--allowed-origins"
-	if originsRaw == "" && !allowedOriginsSet {
-		if fileOrigins != nil {
-			originsRaw = strings.Join(*fileOrigins, ",")
-			originsLabel = "config file server.allowed-origins"
-		} else {
-			originsRaw = os.Getenv(allowedOriginsEnvVar)
-		}
-	}
-
 	allowAll := allowAllFlag
 	allowAllLabel := "--allow-all-origins"
 	if !allowAllSet {
@@ -327,23 +333,51 @@ func resolveCORS(allowedOriginsFlag string, allowedOriginsSet bool, fileOrigins 
 		}
 	}
 
-	// Check the contradiction before validating origins, so a bad origin
-	// string doesn't mask the more actionable error. The labels name the
-	// effective sources, so a file-vs-file conflict doesn't blame flags.
-	if len(strings.TrimSpace(originsRaw)) > 0 && allowAll {
-		return corsConfig{}, fmt.Errorf("%s and %s are mutually exclusive", originsLabel, allowAllLabel)
-	}
-
+	// The per-source contradiction checks below run before origin
+	// validation, so a bad origin string doesn't mask the more actionable
+	// error. The labels name the effective sources, so a file-vs-file
+	// conflict doesn't blame flags.
 	var origins []string
-	for _, part := range strings.Split(originsRaw, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	switch {
+	case allowedOriginsSet || allowedOriginsFlag != "":
+		// Flag input is CSV. An explicitly-set-but-empty value is a
+		// deliberate "no origins" choice that does not consult the file or
+		// env var (mirrors the allowAllSet rule for the bool flag).
+		if len(strings.TrimSpace(allowedOriginsFlag)) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("--allowed-origins and %s are mutually exclusive", allowAllLabel)
 		}
-		if err := validateOrigin(part); err != nil {
+		var err error
+		origins, err = parseCSVOrigins(allowedOriginsFlag)
+		if err != nil {
 			return corsConfig{}, err
 		}
-		origins = append(origins, part)
+	case fileOrigins != nil:
+		// File input is a JSON array of exact origins: validate each element
+		// as-is, without comma splitting or empty-entry filtering — that
+		// would change element boundaries ("a,b" in one element is an
+		// invalid origin, not two) and let "" pass instead of failing fast.
+		// An explicit empty array is a deliberate "no origins" choice that
+		// suppresses the env var.
+		if len(*fileOrigins) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("config file server.allowed-origins and %s are mutually exclusive", allowAllLabel)
+		}
+		for _, o := range *fileOrigins {
+			if err := validateOrigin(o); err != nil {
+				return corsConfig{}, err
+			}
+			origins = append(origins, o)
+		}
+	default:
+		// Env input is CSV, same as the flag.
+		envRaw := os.Getenv(allowedOriginsEnvVar)
+		if len(strings.TrimSpace(envRaw)) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("--allowed-origins and %s are mutually exclusive", allowAllLabel)
+		}
+		var err error
+		origins, err = parseCSVOrigins(envRaw)
+		if err != nil {
+			return corsConfig{}, err
+		}
 	}
 
 	return corsConfig{

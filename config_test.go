@@ -180,6 +180,24 @@ func TestLoadConfigFile(t *testing.T) {
 			name: "unknown_key_in_server_rejected", file: "c.json", content: `{"server": {"bogus": 1}}`, wantErr: "invalid configuration",
 		},
 		{
+			// Duplicate keys collapse to the last object (map decode); the
+			// applied config must derive from that validated document, so an
+			// earlier duplicate's keys cannot survive into the applied config.
+			name: "duplicate_server_keys_last_object_wins", file: "c.json",
+			content: `{"dir": "d", "server": {"insecure-no-auth": true}, "server": {"host": "0.0.0.0", "port": 8080}}`,
+			check: func(t *testing.T, c *fileConfig) {
+				if c.Server == nil {
+					t.Fatal("server section missing")
+				}
+				if c.Server.InsecureNoAuth != nil {
+					t.Errorf("earlier duplicate key survived: insecure-no-auth = %v", *c.Server.InsecureNoAuth)
+				}
+				if c.Server.Host == nil || *c.Server.Host != "0.0.0.0" {
+					t.Errorf("host = %v, want 0.0.0.0", c.Server.Host)
+				}
+			},
+		},
+		{
 			name: "schema_meta_key_accepted", file: "c.json",
 			content: `{"$schema": "https://raw.githubusercontent.com/MKuckert/mcp-commands/main/config.schema.json", "dir": "d"}`,
 			check: func(t *testing.T, c *fileConfig) {
@@ -443,6 +461,9 @@ func TestParseCLIServerSection(t *testing.T) {
 	t.Setenv(logLevelEnvVar, "")
 	t.Setenv(allowedOriginsEnvVar, "")
 	t.Setenv(allowAllOriginsEnvVar, "")
+	// A token in the caller's environment would otherwise override the
+	// config-file api-key expectations below.
+	t.Setenv(apiKeyEnvVar, "")
 
 	writeKeyFile := func(t *testing.T, content string) string {
 		t.Helper()
@@ -468,15 +489,17 @@ func TestParseCLIServerSection(t *testing.T) {
 	allowAllFalseFile := writeConfigFile(t, "allowallfalse.json", `{"dir": "d", "scripts": "s", "server": {"allow-all-origins": false}}`)
 	allowAllTrueFile := writeConfigFile(t, "allowalltrue.json", `{"dir": "d", "scripts": "s", "server": {"allow-all-origins": true}}`)
 	apiKeyFileRef := writeKeyFile(t, "from-keyfile\n")
-	apiKeyFileCfg := writeConfigFile(t, "apikeyfile.json", `{"dir": "d", "scripts": "s", "server": {"port": 8080, "api-key-file": "`+apiKeyFileRef+`"}}`)
+	// jsonMustMarshal escapes filesystem paths (Windows temp dirs contain
+	// backslashes, which are invalid JSON escapes when interpolated raw).
+	apiKeyFileCfg := writeConfigFile(t, "apikeyfile.json", `{"dir": "d", "scripts": "s", "server": {"port": 8080, "api-key-file": `+string(jsonMustMarshal(t, apiKeyFileRef))+`}}`)
 	cert := writePEM(t, "cert.pem")
 	key := writePEM(t, "key.pem")
-	tlsSplitFile := writeConfigFile(t, "tlssplit.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": "`+cert+`"}}`)
-	tlsKeyOnlyFile := writeConfigFile(t, "tlskeyonly.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-key": "`+key+`"}}`)
-	tlsBadPathFile := writeConfigFile(t, "tlsbad.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": "`+filepath.Join(t.TempDir(), "nope")+`", "tls-key": "`+key+`"}}`)
+	tlsSplitFile := writeConfigFile(t, "tlssplit.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": `+string(jsonMustMarshal(t, cert))+`}}`)
+	tlsKeyOnlyFile := writeConfigFile(t, "tlskeyonly.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-key": `+string(jsonMustMarshal(t, key))+`}}`)
+	tlsBadPathFile := writeConfigFile(t, "tlsbad.json", `{"dir": "d", "scripts": "s", "server": {"port": 8443, "tls-cert": `+string(jsonMustMarshal(t, filepath.Join(t.TempDir(), "nope")))+`, "tls-key": `+string(jsonMustMarshal(t, key))+`}}`)
 	badPortFile := writeConfigFile(t, "badport.json", `{"dir": "d", "scripts": "s", "server": {"port": 70000}}`)
 	badMaxConcFile := writeConfigFile(t, "badmaxconc.json", `{"dir": "d", "scripts": "s", "server": {"max-concurrent": 257}}`)
-	stdioBadKeyFile := writeConfigFile(t, "stdio.json", `{"dir": "d", "scripts": "s", "server": {"api-key-file": "`+filepath.Join(t.TempDir(), "nope")+`"}}`)
+	stdioBadKeyFile := writeConfigFile(t, "stdio.json", `{"dir": "d", "scripts": "s", "server": {"api-key-file": `+string(jsonMustMarshal(t, filepath.Join(t.TempDir(), "nope")))+`}}`)
 	diagServerFile := writeConfigFile(t, "diag.json", `{"dir": "d", "scripts": "s", "server": {"port": 8080, "allowed-origins": ["not-a-url"], "allow-all-origins": true}}`)
 
 	tests := []struct {

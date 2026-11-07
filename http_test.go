@@ -18,6 +18,10 @@ import (
 )
 
 func TestResolveAPIKey(t *testing.T) {
+	// Isolate from the caller's environment: an inherited token would
+	// override the config-file api-key expectations in the subtests below.
+	t.Setenv(apiKeyEnvVar, "")
+
 	tests := []struct {
 		name       string
 		flag       string
@@ -585,6 +589,14 @@ func TestResolveCORS(t *testing.T) {
 			fileAllowAll: boolPtr(true), wantErr: true,
 			errSubstr: "config file server.allowed-origins and config file server.allow-all-origins are mutually exclusive"},
 		{name: "malformed_file_origin", fileOrigins: &[]string{"not-a-url"}, wantErr: true},
+		// File array elements are exact origins: no CSV splitting or
+		// empty-entry filtering (that would change element boundaries and
+		// let "" pass instead of failing fast).
+		{name: "file_element_with_comma_rejected", fileOrigins: &[]string{"https://a.example,https://b.example"},
+			wantErr: true},
+		{name: "file_empty_element_rejected", fileOrigins: &[]string{""}, wantErr: true},
+		{name: "file_multi_element", fileOrigins: &[]string{"https://a.example", "https://b.example"},
+			wantOrigins: []string{"https://a.example", "https://b.example"}},
 	}
 
 	for _, tt := range tests {

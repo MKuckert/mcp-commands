@@ -124,8 +124,17 @@ func loadConfigFile(path string) (*fileConfig, error) {
 	if err := configSchema.Validate(document); err != nil {
 		return nil, fmt.Errorf("config file %s: invalid configuration: %w", path, err)
 	}
+	// Decode the struct from the validated document, not the raw bytes: the
+	// map decode above already collapsed duplicate keys (last wins), so the
+	// applied config can never retain a value that is absent from the
+	// validated document (a struct decode of the raw bytes would merge
+	// duplicate objects and keep earlier keys).
+	validated, err := json.Marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("config file %s: %w", path, err)
+	}
 	var cfg fileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := json.Unmarshal(validated, &cfg); err != nil {
 		return nil, fmt.Errorf("config file %s: %w", path, err)
 	}
 	return &cfg, nil
