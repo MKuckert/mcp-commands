@@ -627,6 +627,11 @@ func TestParseCLIServerSection(t *testing.T) {
 			wantErr: "config file server.tls-cert and server.tls-key must be given together",
 		},
 		{
+			name:    "tls_file_key_only_errors_naming_config",
+			args:    []string{"--config", tlsKeyOnlyFile},
+			wantErr: "config file server.tls-cert and server.tls-key must be given together",
+		},
+		{
 			name:    "tls_file_bad_path_fails",
 			args:    []string{"--config", tlsBadPathFile},
 			wantErr: "invalid TLS configuration",
@@ -659,6 +664,16 @@ func TestParseCLIServerSection(t *testing.T) {
 			name:     "diagnostic_silently_ignores_server_section",
 			args:     []string{"--config", diagServerFile, "--list-tools"},
 			wantMode: modeListTools,
+			check: func(t *testing.T, c cliConfig) {
+				if len(c.diagnostic.ignoredFlags) != 0 {
+					t.Errorf("ignoredFlags = %v, want empty (file values are not reported)", c.diagnostic.ignoredFlags)
+				}
+			},
+		},
+		{
+			name:     "diagnostic_call_tool_silently_ignores_server_section",
+			args:     []string{"--config", diagServerFile, "--call-tool", "hello"},
+			wantMode: modeCallTool,
 			check: func(t *testing.T, c cliConfig) {
 				if len(c.diagnostic.ignoredFlags) != 0 {
 					t.Errorf("ignoredFlags = %v, want empty (file values are not reported)", c.diagnostic.ignoredFlags)

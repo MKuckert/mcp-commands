@@ -73,4 +73,11 @@ Status: in progress — U2 complete (2026-11-06, relay leg 2)
   rejections, `TestParseCLIServerSection` merge/precedence/validation/silent-ignore),
   `http_test.go` (resolveAPIKey/resolveCORS file-tier cases, source String). Built-binary
   smoke: `.jsonc` server config starts an authenticated HTTP server with file CORS;
-  fail-fast on bad origin, out-of-range port, unpaired TLS.
+  fail-fast on bad origin, out-of-range port, unpaired TLS. Quality pass (subagent,
+  report-only) found no blockers; four non-blocking findings fixed: CORS
+  mutual-exclusion error now names the effective sources (e.g. "config file
+  server.allowed-origins and --allow-all-origins"), config-tier api-key-file empty hint
+  no longer promises an env fallback that cannot happen, startup refusal/warning
+  messages mention `server.api-key`, and the untested chain links got direct coverage
+  (env > file api-key-file, flag api-key-file > file api-key, explicit-empty flag +
+  file origins, `--call-tool` silent-ignore, file-only tls-key).

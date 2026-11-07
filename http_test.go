@@ -111,6 +111,27 @@ func TestResolveAPIKey(t *testing.T) {
 			t.Fatalf("want config-file label in error, got %v", err)
 		}
 	})
+	t.Run("env_beats_config_api_key_file", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "key.txt")
+		if err := os.WriteFile(p, []byte("from-config-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(apiKeyEnvVar, "from-env")
+		got, err := resolveAPIKey("", "", &fileServerConfig{APIKeyFile: strPtr(p)})
+		if err != nil || got.Token != "from-env" || got.Source != apiKeySourceEnv {
+			t.Fatalf("got %v err %v, want from-env/env", got, err)
+		}
+	})
+	t.Run("flag_api_key_file_beats_config_api_key", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "key.txt")
+		if err := os.WriteFile(p, []byte("from-flag-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveAPIKey("", p, &fileServerConfig{APIKey: strPtr("inline")})
+		if err != nil || got.Token != "from-flag-file" || got.Source != apiKeySourceFile {
+			t.Fatalf("got %v err %v, want from-flag-file/file", got, err)
+		}
+	})
 }
 
 func (b *bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -492,6 +513,9 @@ func TestResolveCORS(t *testing.T) {
 		// choice: it must not fall back to the env var (flag always wins).
 		{name: "explicit_empty_flag_ignores_env", flag: "", originsSet: true, originsEnv: "https://env.example",
 			wantOrigins: []string{}},
+		{name: "explicit_empty_flag_ignores_file", flag: "", originsSet: true,
+			fileOrigins: &[]string{"https://f.example"},
+			wantOrigins: []string{}},
 		{name: "both_set_flag_wins", flag: "https://flag.example", originsEnv: "https://env.example",
 			wantOrigins: []string{"https://flag.example"}},
 		{name: "neither_set", wantOrigins: []string{}},
@@ -557,6 +581,9 @@ func TestResolveCORS(t *testing.T) {
 			fileAllowAll: boolPtr(true), wantErr: true, errSubstr: "mutually exclusive"},
 		{name: "file_origins_and_env_allow_all", fileOrigins: &[]string{"https://f.example"},
 			allowAllEnv: "1", wantErr: true, errSubstr: "mutually exclusive"},
+		{name: "file_origins_and_file_allow_all_names_config", fileOrigins: &[]string{"https://f.example"},
+			fileAllowAll: boolPtr(true), wantErr: true,
+			errSubstr: "config file server.allowed-origins and config file server.allow-all-origins are mutually exclusive"},
 		{name: "malformed_file_origin", fileOrigins: &[]string{"not-a-url"}, wantErr: true},
 	}
 

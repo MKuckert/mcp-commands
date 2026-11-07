@@ -86,7 +86,7 @@ func resolveAPIKey(flagValue, fileValue string, config *fileServerConfig) (resol
 		return resolvedAPIKey{Token: flagValue, Source: apiKeySourceFlag}, nil
 	}
 	if fileValue != "" {
-		return readAPIKeyFile(fileValue, "--api-key-file", "the flag")
+		return readAPIKeyFile(fileValue, "--api-key-file", "remove the flag to fall back to "+apiKeyEnvVar)
 	}
 	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
 		return resolvedAPIKey{Token: envToken, Source: apiKeySourceEnv}, nil
@@ -98,7 +98,9 @@ func resolveAPIKey(flagValue, fileValue string, config *fileServerConfig) (resol
 		if config.APIKeyFile != nil {
 			// The token file itself is the source of the value, but the
 			// *setting* (which file to read) came from the config file.
-			rk, err := readAPIKeyFile(*config.APIKeyFile, "config file server.api-key-file", "the key")
+			// The env var was already checked above, so removing the key
+			// yields an unauthenticated server, not an env fallback.
+			rk, err := readAPIKeyFile(*config.APIKeyFile, "config file server.api-key-file", "remove the key from the config file to run unauthenticated, or set "+apiKeyEnvVar)
 			if err == nil {
 				rk.Source = apiKeySourceConfig
 			}
@@ -110,8 +112,9 @@ func resolveAPIKey(flagValue, fileValue string, config *fileServerConfig) (resol
 
 // readAPIKeyFile reads a token file with the shared size cap and empty-file
 // check. label names the source in error text (--api-key-file or config file
-// server.api-key-file); removeHint is the noun for the empty-file hint.
-func readAPIKeyFile(path, label, removeHint string) (resolvedAPIKey, error) {
+// server.api-key-file); emptyHint is the parenthetical in the empty-file
+// error, which differs per tier because the fallback after removal differs.
+func readAPIKeyFile(path, label, emptyHint string) (resolvedAPIKey, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return resolvedAPIKey{}, fmt.Errorf("cannot read %s: %w", label, err)
@@ -129,7 +132,7 @@ func readAPIKeyFile(path, label, removeHint string) (resolvedAPIKey, error) {
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return resolvedAPIKey{}, fmt.Errorf("%s %s is empty; a token file must contain a non-empty token (remove %s to fall back to %s)", label, path, removeHint, apiKeyEnvVar)
+		return resolvedAPIKey{}, fmt.Errorf("%s %s is empty; a token file must contain a non-empty token (%s)", label, path, emptyHint)
 	}
 	return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
 }
@@ -172,12 +175,12 @@ func isLoopbackHost(host string) bool {
 func checkHTTPSecurityPolicy(host, apiKey string, cors corsConfig, tlsEnabled, acceptsRisk bool) (warnings []string, err error) {
 	if apiKey == "" && !isLoopbackHost(host) {
 		if !acceptsRisk {
-			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key, %s, or server.api-key in the config file, or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
 		}
 		warnings = append(warnings, fmt.Sprintf("UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host))
 	}
 	if cors.allowAll && apiKey == "" {
-		warnings = append(warnings, "--allow-all-origins with no bearer token (set --api-key or "+apiKeyEnvVar+") — any web page opened in a browser can invoke tools against this server and read their output")
+		warnings = append(warnings, "--allow-all-origins with no bearer token (set --api-key, "+apiKeyEnvVar+", or server.api-key in the config file) — any web page opened in a browser can invoke tools against this server and read their output")
 	}
 	if apiKey != "" && !isLoopbackHost(host) && !tlsEnabled {
 		warnings = append(warnings, fmt.Sprintf("authenticated HTTP server on non-loopback host %q without TLS — the bearer token and every request/response body transit in cleartext; put a TLS-terminating proxy in front or pass --tls-cert/--tls-key", host))
@@ -299,18 +302,22 @@ func resolveCORS(allowedOriginsFlag string, allowedOriginsSet bool, fileOrigins 
 	// even with a zero value — presence is an explicit choice that
 	// suppresses the env var, mirroring an explicitly-set flag) > env var.
 	originsRaw := allowedOriginsFlag
+	originsLabel := "--allowed-origins"
 	if originsRaw == "" && !allowedOriginsSet {
 		if fileOrigins != nil {
 			originsRaw = strings.Join(*fileOrigins, ",")
+			originsLabel = "config file server.allowed-origins"
 		} else {
 			originsRaw = os.Getenv(allowedOriginsEnvVar)
 		}
 	}
 
 	allowAll := allowAllFlag
+	allowAllLabel := "--allow-all-origins"
 	if !allowAllSet {
 		if fileAllowAll != nil {
 			allowAll = *fileAllowAll
+			allowAllLabel = "config file server.allow-all-origins"
 		} else {
 			parsed, err := parseBoolEnv(allowAllOriginsEnvVar, os.Getenv(allowAllOriginsEnvVar))
 			if err != nil {
@@ -321,9 +328,10 @@ func resolveCORS(allowedOriginsFlag string, allowedOriginsSet bool, fileOrigins 
 	}
 
 	// Check the contradiction before validating origins, so a bad origin
-	// string doesn't mask the more actionable error.
+	// string doesn't mask the more actionable error. The labels name the
+	// effective sources, so a file-vs-file conflict doesn't blame flags.
 	if len(strings.TrimSpace(originsRaw)) > 0 && allowAll {
-		return corsConfig{}, fmt.Errorf("--allowed-origins and --allow-all-origins are mutually exclusive")
+		return corsConfig{}, fmt.Errorf("%s and %s are mutually exclusive", originsLabel, allowAllLabel)
 	}
 
 	var origins []string
