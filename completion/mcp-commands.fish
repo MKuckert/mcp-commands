@@ -5,7 +5,7 @@
 #
 # Single source of truth: keep the flag set in sync with flags.go.
 # The CI drift check extracts exactly this line.
-set -l _mcp_commands_flags --dir --scripts --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help
+set -l _mcp_commands_flags --dir --scripts --config --watch --insecure-no-auth --allow-all-origins --disable-localhost-protection --version --no-timeout --list-tools --api-key-file --tls-cert --tls-key --log-level --host --port --api-key --max-concurrent --allowed-origins --timeout --call-tool --params --help
 
 # The conditions query the completion buffer via `commandline`: fish 3.6
 # (our floor) provides no $commandline_tokens variable, and
@@ -36,7 +36,7 @@ complete -c mcp-commands -n '__mcp_commands_token_is_flag' -f -a "(__mcp_command
 # Value-taking flags keep fish's default file+directory completion (the -d
 # entries document the value kind); --log-level completes its fixed set.
 complete -c mcp-commands -n '__mcp_commands_prev_is_flag --dir --scripts' -d 'Directory'
-complete -c mcp-commands -n '__mcp_commands_prev_is_flag --api-key-file --tls-cert --tls-key' -d 'File'
+complete -c mcp-commands -n '__mcp_commands_prev_is_flag --api-key-file --tls-cert --tls-key --config' -d 'File'
 complete -c mcp-commands -n '__mcp_commands_prev_is_flag --log-level' -f -x -a 'trace debug info warn error' -d 'Log level'
 
 # Free-form values: suppress file completion.

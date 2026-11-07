@@ -124,7 +124,7 @@ func resolveLogLevel(value, source string) (slog.Level, error) {
 }
 
 // usageLine is the one-line usage synopsis printed with errMissingRequiredFlags.
-const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-level <level>]"
+const usageLine = "Usage: mcp-commands --dir <directory> --scripts <directory> [--config <path>] [--list-tools [--watch]] | [--call-tool <name> --params <json>] | [--watch] [--host <host>] [--port <port>] [--api-key <token>|--api-key-file <path>] [--tls-cert <path> --tls-key <path>] [--allowed-origins <origin[,origin...]>]|[--allow-all-origins] [--disable-localhost-protection] [--insecure-no-auth] [--max-concurrent <n>] [--timeout <duration>] | [--no-timeout] [--log-level <level>]"
 
 func parseCLI(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("mcp-commands", flag.ContinueOnError)
@@ -132,6 +132,7 @@ func parseCLI(args []string) (cliConfig, error) {
 
 	dirFlag := fs.String("dir", "", "Working directory for tool execution (required)")
 	scriptsFlag := fs.String("scripts", "", "Directory containing executable scripts (required)")
+	configFlag := fs.String("config", "", "Path to a .json/.jsonc configuration file (CLI flags take precedence over file values; a present server.allowed-origins or allow-all-origins key also takes precedence over its env var)")
 	watchFlag := fs.Bool("watch", false, "Watch for tool changes: hot-reload in server mode, live re-print in --list-tools mode (ignored with --call-tool)")
 	hostFlag := fs.String("host", "127.0.0.1", "IP address for HTTP server")
 	portFlag := fs.Int("port", 0, "Port for HTTP server (0 for stdio mode; must be 1..65535)")
@@ -183,15 +184,36 @@ func parseCLI(args []string) (cliConfig, error) {
 		},
 	}
 
-	// --version works without the required flags and skips all validation.
+	// --version works without the required flags and skips all validation,
+	// including any --config file.
 	if *versionFlag {
 		cfg.version = true
 		return cfg, nil
 	}
 
-	if *dirFlag == "" || *scriptsFlag == "" {
+	var file *fileConfig
+	if *configFlag != "" {
+		var loadErr error
+		file, loadErr = loadConfigFile(*configFlag)
+		if loadErr != nil {
+			return cliConfig{}, loadErr
+		}
+	}
+
+	// dir/scripts precedence: flag > config file; an explicitly empty flag
+	// value is not a usable directory, so it falls through to the file.
+	dirValue, scriptsValue := *dirFlag, *scriptsFlag
+	if dirValue == "" && file != nil && file.Dir != nil {
+		dirValue = *file.Dir
+	}
+	if scriptsValue == "" && file != nil && file.Scripts != nil {
+		scriptsValue = *file.Scripts
+	}
+	if dirValue == "" || scriptsValue == "" {
 		return cliConfig{}, errMissingRequiredFlags
 	}
+	cfg.server.dir, cfg.diagnostic.dir = dirValue, dirValue
+	cfg.server.scriptsDir, cfg.diagnostic.scriptsDir = scriptsValue, scriptsValue
 
 	// Resolved and validated here (all modes, fail-fast); run only consumes it.
 	allowAllSet := false
@@ -216,6 +238,14 @@ func parseCLI(args []string) (cliConfig, error) {
 		}
 	})
 
+	// watch precedence: flag (visit-tracked, so --watch=false counts as
+	// explicitly set) > config file > default false.
+	watchValue := *watchFlag
+	if !visited["watch"] && file != nil && file.Watch != nil {
+		watchValue = *file.Watch
+	}
+	cfg.server.watch, cfg.diagnostic.watch = watchValue, watchValue
+
 	// The mode is resolved first: server-only validation (CORS, max
 	// concurrent) must not block a diagnostic invocation whose server
 	// flags are documented and reported as ignored.
@@ -232,12 +262,14 @@ func parseCLI(args []string) (cliConfig, error) {
 	}
 
 	// Shared by every mode (fail-fast); run only consumes the resolved
-	// value. Precedence: --log-level > LOG_LEVEL > info; an empty env
-	// value counts as unset.
+	// value. Precedence: --log-level > LOG_LEVEL > config file > info; an
+	// empty env value counts as unset.
 	logLevelValue, logLevelSource := *logLevelFlag, "--log-level"
 	if !logLevelSet {
 		if envValue := os.Getenv(logLevelEnvVar); envValue != "" {
 			logLevelValue, logLevelSource = envValue, logLevelEnvVar
+		} else if file != nil && file.LogLevel != nil {
+			logLevelValue, logLevelSource = *file.LogLevel, "config file log-level"
 		}
 	}
 	logLevel, err := resolveLogLevel(logLevelValue, logLevelSource)
@@ -245,7 +277,11 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cliConfig{}, err
 	}
 	cfg.logLevel = logLevel
-	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag)
+	var fileTimeout *string
+	if file != nil {
+		fileTimeout = file.Timeout
+	}
+	timeout, err := resolveTimeout(*timeoutFlag, timeoutSet, *noTimeoutFlag, fileTimeout)
 	if err != nil {
 		return cliConfig{}, err
 	}
@@ -269,27 +305,94 @@ func parseCLI(args []string) (cliConfig, error) {
 		return cfg, nil
 	}
 
-	// HTTP mode only.
+	// HTTP mode only. The config file's server section (nil = no --config or
+	// no "server" key) merges in with flag > env > file precedence — except
+	// the two CORS keys, where a present file key also beats the env var;
+	// reaching this point means server mode, so in diagnostic modes the
+	// section is silently ignored (no report — unlike server flags).
+	var fileServer *fileServerConfig
+	if file != nil {
+		fileServer = file.Server
+	}
+
+	// host: flag > file (no env var). The flag default 127.0.0.1 is not an
+	// "unset" marker, so visit-tracking decides (like --watch).
+	if !visited["host"] && fileServer != nil && fileServer.Host != nil {
+		cfg.server.host = *fileServer.Host
+	}
+
+	// port: flag > file; the range check applies to file values too, with
+	// the source named in the error.
+	portValue := *portFlag
+	portSource := "--port"
+	if !visited["port"] && fileServer != nil && fileServer.Port != nil {
+		portValue, portSource = *fileServer.Port, "config file server.port"
+	}
+	cfg.server.port = portValue
+	if portValue < 0 || portValue > 65535 {
+		return cliConfig{}, fmt.Errorf("%s must be 0 (stdio) or 1..65535 (got %d)", portSource, portValue)
+	}
+
+	// max-concurrent: flag > file; the range check applies to file values too.
+	maxConcValue := *maxConcurrentFlag
+	maxConcSource := "--max-concurrent"
+	if !visited["max-concurrent"] && fileServer != nil && fileServer.MaxConcurrent != nil {
+		maxConcValue, maxConcSource = *fileServer.MaxConcurrent, "config file server.max-concurrent"
+	}
+	cfg.server.maxConcurrent = maxConcValue
+	if maxConcValue < 0 || maxConcValue > maxConcurrentCap {
+		return cliConfig{}, fmt.Errorf("%s must be 0 (default) or 1..%d (got %d)", maxConcSource, maxConcurrentCap, maxConcValue)
+	}
+
+	// insecure-no-auth: flag > file (visit-tracked, so an explicit
+	// --insecure-no-auth=false counts as set).
+	if !visited["insecure-no-auth"] && fileServer != nil && fileServer.InsecureNoAuth != nil {
+		cfg.server.insecureNoAuth = *fileServer.InsecureNoAuth
+	}
+
+	var fileOrigins *[]string
+	var fileAllowAll *bool
+	if fileServer != nil {
+		fileOrigins = fileServer.AllowedOrigins
+		fileAllowAll = fileServer.AllowAllOrigins
+	}
+	disableLHP := *disableLocalhostProtectionFlag
+	if !visited["disable-localhost-protection"] && fileServer != nil && fileServer.DisableLocalhostProtection != nil {
+		disableLHP = *fileServer.DisableLocalhostProtection
+	}
+
 	var corsErr error
-	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, allowedOriginsSet, *allowAllOriginsFlag, allowAllSet, *disableLocalhostProtectionFlag)
+	cfg.server.cors, corsErr = resolveCORS(*allowedOriginsFlag, allowedOriginsSet, fileOrigins, *allowAllOriginsFlag, allowAllSet, fileAllowAll, disableLHP)
 	if corsErr != nil {
 		return cliConfig{}, corsErr
-	}
-	if cfg.server.port < 0 || cfg.server.port > 65535 {
-		return cliConfig{}, fmt.Errorf("--port must be 0 (stdio) or 1..65535 (got %d)", cfg.server.port)
-	}
-	if cfg.server.maxConcurrent < 0 || cfg.server.maxConcurrent > maxConcurrentCap {
-		return cliConfig{}, fmt.Errorf("--max-concurrent must be 0 (default) or 1..%d (got %d)", maxConcurrentCap, cfg.server.maxConcurrent)
 	}
 	// In stdio mode the auth and TLS options are documented as ignored, so
 	// an unreadable --api-key-file or --tls-cert/--tls-key must not block a
 	// stdio server from starting.
 	if cfg.server.port > 0 {
-		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag)
-		if err == nil && (*tlsCertFlag != "") != (*tlsKeyFlag != "") {
-			err = errors.New("--tls-cert and --tls-key must be given together")
+		cfg.server.apiKey, err = resolveAPIKey(*apiKeyFlag, *apiKeyFileFlag, fileServer)
+		// TLS paths merge across sources: a flag value wins when non-empty,
+		// otherwise the file's. The pairing check and fail-fast file check
+		// apply to the merged pair.
+		tlsCert := *tlsCertFlag
+		tlsKey := *tlsKeyFlag
+		if fileServer != nil {
+			if tlsCert == "" && fileServer.TLSCert != nil {
+				tlsCert = *fileServer.TLSCert
+			}
+			if tlsKey == "" && fileServer.TLSKey != nil {
+				tlsKey = *fileServer.TLSKey
+			}
 		}
-		for _, tlsFile := range []string{*tlsCertFlag, *tlsKeyFlag} {
+		if err == nil && (tlsCert != "") != (tlsKey != "") {
+			if *tlsCertFlag == "" && *tlsKeyFlag == "" {
+				// Both effective values came from the config file.
+				err = errors.New("config file server.tls-cert and server.tls-key must be given together")
+			} else {
+				err = errors.New("--tls-cert and --tls-key must be given together")
+			}
+		}
+		for _, tlsFile := range []string{tlsCert, tlsKey} {
 			if err == nil && tlsFile != "" {
 				if err = checkTLSFile(tlsFile); err != nil {
 					err = fmt.Errorf("invalid TLS configuration: %w", err)
@@ -297,7 +400,7 @@ func parseCLI(args []string) (cliConfig, error) {
 			}
 		}
 		if err == nil {
-			cfg.server.tlsCert, cfg.server.tlsKey = *tlsCertFlag, *tlsKeyFlag
+			cfg.server.tlsCert, cfg.server.tlsKey = tlsCert, tlsKey
 		}
 	}
 	return cfg, err

@@ -50,6 +50,7 @@ const (
 	apiKeySourceFlag
 	apiKeySourceFile
 	apiKeySourceEnv
+	apiKeySourceConfig
 )
 
 func (s apiKeySource) String() string {
@@ -60,52 +61,80 @@ func (s apiKeySource) String() string {
 		return "file"
 	case apiKeySourceEnv:
 		return "env"
+	case apiKeySourceConfig:
+		return "config file"
 	default:
 		return "none"
 	}
 }
 
 // resolvedAPIKey is the HTTP auth token together with its source
-// (--api-key > --api-key-file > MCP_COMMANDS_API_KEY). The zero value is
-// "no token configured" (unauthenticated).
+// (--api-key > --api-key-file > MCP_COMMANDS_API_KEY > config file). The
+// zero value is "no token configured" (unauthenticated).
 type resolvedAPIKey struct {
 	Token  string
 	Source apiKeySource
 }
 
-// resolveAPIKey resolves the HTTP auth token, returning an error when a
-// --api-key-file was given but unreadable. File content is TrimSpace'd so
-// hand-written files with a trailing newline work.
-func resolveAPIKey(flagValue, fileValue string) (resolvedAPIKey, error) {
+// resolveAPIKey resolves the HTTP auth token across all sources, returning
+// an error when an explicitly-named key file (flag or config) is unreadable.
+// File content is TrimSpace'd so hand-written files with a trailing newline
+// work. config is the file's server section (nil = no --config / no server
+// object); its api-key and api-key-file keys are the lowest-precedence tier.
+func resolveAPIKey(flagValue, fileValue string, config *fileServerConfig) (resolvedAPIKey, error) {
 	if flagValue != "" {
 		return resolvedAPIKey{Token: flagValue, Source: apiKeySourceFlag}, nil
 	}
 	if fileValue != "" {
-		f, err := os.Open(fileValue)
-		if err != nil {
-			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
-		}
-		defer f.Close()
-		// Bound the *read* itself (cap + 1 so an over-size file is detectable)
-		// so a misconfigured path — a multi-GB file, a symlink to /dev/zero —
-		// cannot be slurped into memory and OOM the process at startup.
-		data, err := io.ReadAll(io.LimitReader(f, maxAPIKeyFileBytes+1))
-		if err != nil {
-			return resolvedAPIKey{}, fmt.Errorf("cannot read --api-key-file: %w", err)
-		}
-		if len(data) > maxAPIKeyFileBytes {
-			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s exceeds the %d-byte maximum (wrong file?)", fileValue, maxAPIKeyFileBytes)
-		}
-		token := strings.TrimSpace(string(data))
-		if token == "" {
-			return resolvedAPIKey{}, fmt.Errorf("--api-key-file %s is empty; a token file must contain a non-empty token (remove the flag to fall back to %s)", fileValue, apiKeyEnvVar)
-		}
-		return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
+		return readAPIKeyFile(fileValue, "--api-key-file", "remove the flag to fall back to "+apiKeyEnvVar)
 	}
 	if envToken := os.Getenv(apiKeyEnvVar); envToken != "" {
 		return resolvedAPIKey{Token: envToken, Source: apiKeySourceEnv}, nil
 	}
+	if config != nil {
+		if config.APIKey != nil {
+			return resolvedAPIKey{Token: *config.APIKey, Source: apiKeySourceConfig}, nil
+		}
+		if config.APIKeyFile != nil {
+			// The token file itself is the source of the value, but the
+			// *setting* (which file to read) came from the config file.
+			// The env var was already checked above, so removing the key
+			// yields an unauthenticated server, not an env fallback.
+			rk, err := readAPIKeyFile(*config.APIKeyFile, "config file server.api-key-file", "remove the key from the config file to run unauthenticated, or set "+apiKeyEnvVar)
+			if err == nil {
+				rk.Source = apiKeySourceConfig
+			}
+			return rk, err
+		}
+	}
 	return resolvedAPIKey{}, nil
+}
+
+// readAPIKeyFile reads a token file with the shared size cap and empty-file
+// check. label names the source in error text (--api-key-file or config file
+// server.api-key-file); emptyHint is the parenthetical in the empty-file
+// error, which differs per tier because the fallback after removal differs.
+func readAPIKeyFile(path, label, emptyHint string) (resolvedAPIKey, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return resolvedAPIKey{}, fmt.Errorf("cannot read %s: %w", label, err)
+	}
+	defer f.Close()
+	// Bound the *read* itself (cap + 1 so an over-size file is detectable)
+	// so a misconfigured path — a multi-GB file, a symlink to /dev/zero —
+	// cannot be slurped into memory and OOM the process at startup.
+	data, err := io.ReadAll(io.LimitReader(f, maxAPIKeyFileBytes+1))
+	if err != nil {
+		return resolvedAPIKey{}, fmt.Errorf("cannot read %s: %w", label, err)
+	}
+	if len(data) > maxAPIKeyFileBytes {
+		return resolvedAPIKey{}, fmt.Errorf("%s %s exceeds the %d-byte maximum (wrong file?)", label, path, maxAPIKeyFileBytes)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return resolvedAPIKey{}, fmt.Errorf("%s %s is empty; a token file must contain a non-empty token (%s)", label, path, emptyHint)
+	}
+	return resolvedAPIKey{Token: token, Source: apiKeySourceFile}, nil
 }
 
 // isLoopbackHost reports whether host binds only to the local machine: the
@@ -146,12 +175,12 @@ func isLoopbackHost(host string) bool {
 func checkHTTPSecurityPolicy(host, apiKey string, cors corsConfig, tlsEnabled, acceptsRisk bool) (warnings []string, err error) {
 	if apiKey == "" && !isLoopbackHost(host) {
 		if !acceptsRisk {
-			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key (or %s), or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
+			return nil, fmt.Errorf("refusing to start unauthenticated HTTP server on non-loopback host %q: set --api-key, %s, or server.api-key in the config file, or pass --insecure-no-auth explicitly to accept the risk", host, apiKeyEnvVar)
 		}
 		warnings = append(warnings, fmt.Sprintf("UNAUTHENTICATED HTTP server bound to %q — anyone who can reach it can execute scripts as the server user (authorized via --insecure-no-auth)", host))
 	}
 	if cors.allowAll && apiKey == "" {
-		warnings = append(warnings, "--allow-all-origins with no bearer token (set --api-key or "+apiKeyEnvVar+") — any web page opened in a browser can invoke tools against this server and read their output")
+		warnings = append(warnings, "--allow-all-origins with no bearer token (set --api-key, "+apiKeyEnvVar+", or server.api-key in the config file) — any web page opened in a browser can invoke tools against this server and read their output")
 	}
 	if apiKey != "" && !isLoopbackHost(host) && !tlsEnabled {
 		warnings = append(warnings, fmt.Sprintf("authenticated HTTP server on non-loopback host %q without TLS — the bearer token and every request/response body transit in cleartext; put a TLS-terminating proxy in front or pass --tls-cert/--tls-key", host))
@@ -258,44 +287,97 @@ func validateOrigin(origin string) error {
 	return nil
 }
 
-// resolveCORS resolves flags over env and validates origins. Returns an
-// error for malformed origins or a contradictory --allowed-origins +
-// --allow-all-origins combination. allowedOriginsSet distinguishes an
-// explicit --allowed-origins[=...] from an unset flag: a non-empty flag
-// value always wins, and an explicitly *empty* value is a deliberate
-// "no origins" choice that does not consult the env var (mirrors the
-// allowAllSet rule for the bool flag).
-func resolveCORS(allowedOriginsFlag string, allowedOriginsSet, allowAllFlag, allowAllSet, disableLocalhostProtection bool) (corsConfig, error) {
-	originsRaw := allowedOriginsFlag
-	if originsRaw == "" && !allowedOriginsSet {
-		originsRaw = os.Getenv(allowedOriginsEnvVar)
-	}
-
-	allowAll := allowAllFlag
-	if !allowAllSet {
-		parsed, err := parseBoolEnv(allowAllOriginsEnvVar, os.Getenv(allowAllOriginsEnvVar))
-		if err != nil {
-			return corsConfig{}, err
-		}
-		allowAll = parsed
-	}
-
-	// Check the contradiction before validating origins, so a bad origin
-	// string doesn't mask the more actionable error.
-	if len(strings.TrimSpace(originsRaw)) > 0 && allowAll {
-		return corsConfig{}, fmt.Errorf("--allowed-origins and --allow-all-origins are mutually exclusive")
-	}
-
+// parseCSVOrigins splits flag/env origin input on commas, trims entries,
+// skips empty ones, and validates each as an exact http/https origin.
+func parseCSVOrigins(raw string) ([]string, error) {
 	var origins []string
-	for _, part := range strings.Split(originsRaw, ",") {
+	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
 		if err := validateOrigin(part); err != nil {
-			return corsConfig{}, err
+			return nil, err
 		}
 		origins = append(origins, part)
+	}
+	return origins, nil
+}
+
+// resolveCORS resolves flags over config file and env and validates origins.
+// Returns an error for malformed origins or a contradictory
+// --allowed-origins + --allow-all-origins combination, across any source
+// combination. allowedOriginsSet distinguishes an explicit
+// --allowed-origins[=...] from an unset flag: a non-empty flag value always
+// wins, and an explicitly *empty* value is a deliberate "no origins" choice
+// that does not consult the file or env var (mirrors the allowAllSet rule
+// for the bool flag). fileOrigins/fileAllowAll are the config file's server
+// keys (nil = key absent); a present-but-empty/zero value is explicit and
+// suppresses the env-var fallback, exactly like an explicitly-set flag.
+func resolveCORS(allowedOriginsFlag string, allowedOriginsSet bool, fileOrigins *[]string, allowAllFlag bool, allowAllSet bool, fileAllowAll *bool, disableLocalhostProtection bool) (corsConfig, error) {
+	// Precedence per key: flag (visit-tracked) > config file (key present,
+	// even with a zero value — presence is an explicit choice that
+	// suppresses the env var, mirroring an explicitly-set flag) > env var.
+	allowAll := allowAllFlag
+	allowAllLabel := "--allow-all-origins"
+	if !allowAllSet {
+		if fileAllowAll != nil {
+			allowAll = *fileAllowAll
+			allowAllLabel = "config file server.allow-all-origins"
+		} else {
+			parsed, err := parseBoolEnv(allowAllOriginsEnvVar, os.Getenv(allowAllOriginsEnvVar))
+			if err != nil {
+				return corsConfig{}, err
+			}
+			allowAll = parsed
+		}
+	}
+
+	// The per-source contradiction checks below run before origin
+	// validation, so a bad origin string doesn't mask the more actionable
+	// error. The labels name the effective sources, so a file-vs-file
+	// conflict doesn't blame flags.
+	var origins []string
+	switch {
+	case allowedOriginsSet || allowedOriginsFlag != "":
+		// Flag input is CSV. An explicitly-set-but-empty value is a
+		// deliberate "no origins" choice that does not consult the file or
+		// env var (mirrors the allowAllSet rule for the bool flag).
+		if len(strings.TrimSpace(allowedOriginsFlag)) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("--allowed-origins and %s are mutually exclusive", allowAllLabel)
+		}
+		var err error
+		origins, err = parseCSVOrigins(allowedOriginsFlag)
+		if err != nil {
+			return corsConfig{}, err
+		}
+	case fileOrigins != nil:
+		// File input is a JSON array of exact origins: validate each element
+		// as-is, without comma splitting or empty-entry filtering — that
+		// would change element boundaries ("a,b" in one element is an
+		// invalid origin, not two) and let "" pass instead of failing fast.
+		// An explicit empty array is a deliberate "no origins" choice that
+		// suppresses the env var.
+		if len(*fileOrigins) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("config file server.allowed-origins and %s are mutually exclusive", allowAllLabel)
+		}
+		for _, o := range *fileOrigins {
+			if err := validateOrigin(o); err != nil {
+				return corsConfig{}, err
+			}
+			origins = append(origins, o)
+		}
+	default:
+		// Env input is CSV, same as the flag.
+		envRaw := os.Getenv(allowedOriginsEnvVar)
+		if len(strings.TrimSpace(envRaw)) > 0 && allowAll {
+			return corsConfig{}, fmt.Errorf("--allowed-origins and %s are mutually exclusive", allowAllLabel)
+		}
+		var err error
+		origins, err = parseCSVOrigins(envRaw)
+		if err != nil {
+			return corsConfig{}, err
+		}
 	}
 
 	return corsConfig{

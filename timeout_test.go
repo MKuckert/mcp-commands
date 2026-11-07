@@ -86,6 +86,7 @@ func TestResolveTimeout(t *testing.T) {
 		timeoutFlag string
 		timeoutSet  bool
 		noTimeout   bool
+		fileTimeout *string
 		want        time.Duration
 		wantErr     bool
 	}{
@@ -98,11 +99,16 @@ func TestResolveTimeout(t *testing.T) {
 		{name: "no_timeout_and_invalid_flag_exclusive", timeoutFlag: "bogus", timeoutSet: true, noTimeout: true, wantErr: true},
 		{name: "invalid_flag_errors", timeoutFlag: "bogus", timeoutSet: true, wantErr: true},
 		{name: "explicit_empty_flag_errors", timeoutFlag: "", timeoutSet: true, wantErr: true},
+		{name: "file_value_parsed", fileTimeout: strPtr("1h30m"), want: 90 * time.Minute},
+		{name: "file_none", fileTimeout: strPtr("NONE"), want: 0},
+		{name: "flag_over_file", timeoutFlag: "30s", timeoutSet: true, fileTimeout: strPtr("1h"), want: 30 * time.Second},
+		{name: "no_timeout_over_file", noTimeout: true, fileTimeout: strPtr("5m"), want: 0},
+		{name: "invalid_file_errors", fileTimeout: strPtr("bogus"), wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveTimeout(tt.timeoutFlag, tt.timeoutSet, tt.noTimeout)
+			got, err := resolveTimeout(tt.timeoutFlag, tt.timeoutSet, tt.noTimeout, tt.fileTimeout)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("resolveTimeout(%q, %v) = %v, want error", tt.timeoutFlag, tt.noTimeout, got)

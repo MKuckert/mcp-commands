@@ -87,12 +87,13 @@ func matchTimeoutUnit(s string) (time.Duration, string, bool) {
 	return 0, "", false
 }
 
-// resolveTimeout resolves the global tool timeout from CLI flags, fail-fast
-// before the server starts. --timeout and --no-timeout are mutually exclusive
-// (passing both is a startup error); an explicitly-set --timeout must parse
-// (an explicit --timeout= is therefore rejected); an unset --timeout yields
-// defaultToolTimeout.
-func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Duration, error) {
+// resolveTimeout resolves the global tool timeout, fail-fast before the
+// server starts. Precedence: --no-timeout and --timeout (mutually exclusive,
+// passing both is a startup error) > config file timeout >
+// defaultToolTimeout. An explicitly-set value must parse (an explicit
+// --timeout= is therefore rejected); fileTimeout is nil when no config file
+// supplied the key.
+func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool, fileTimeout *string) (time.Duration, error) {
 	if noTimeout && timeoutSet {
 		return 0, fmt.Errorf("--timeout and --no-timeout are mutually exclusive")
 	}
@@ -101,6 +102,13 @@ func resolveTimeout(timeoutFlag string, timeoutSet, noTimeout bool) (time.Durati
 	}
 	if timeoutSet {
 		return parseTimeoutDuration(timeoutFlag)
+	}
+	if fileTimeout != nil {
+		d, err := parseTimeoutDuration(*fileTimeout)
+		if err != nil {
+			return 0, fmt.Errorf("config file timeout: %w", err)
+		}
+		return d, nil
 	}
 	return defaultToolTimeout, nil
 }
