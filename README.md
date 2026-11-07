@@ -90,6 +90,8 @@ The server requires two primary arguments:
 1. `--dir`: The working directory where the scripts will be executed.
 2. `--scripts`: The directory containing the executable scripts.
 
+Both (and most other operational settings) can also be declared once in a [config file](#config-file) passed via `--config <path>`.
+
 **Standard Mode (stdio)**
 
 ```bash
@@ -318,7 +320,82 @@ One exception: flag-parse and validation failures occur before the logger exists
 
 #### Version
 
-`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation. Release binaries report their release tag (injected at build time); local source builds without injected ldflags report `commit-local`.
+`mcp-commands --version` prints the server version and exits. It works without `--dir`/`--scripts` and skips all other validation, including any `--config` file. Release binaries report their release tag (injected at build time); local source builds without injected ldflags report `commit-local`.
+
+#### Config File
+
+Recurring operational settings can be declared once in a JSON or JSONC file and passed with `--config <path>` instead of being re-typed as flags or environment variables on every invocation:
+
+```bash
+mcp-commands --config ./mcp-commands.jsonc
+```
+
+The file is read and validated at startup, before the server starts; an invalid file (bad JSON, wrong extension, unknown key, out-of-range or invalid value) is a startup error — the server never starts partially configured. `--version` skips the config file entirely.
+
+**Format:**
+
+- **`.json`** (strict JSON) and **`.jsonc`** (JSON plus `//` line and `/* block */` comments; comment sequences inside string literals are untouched). The format is selected by the file extension (case-insensitive); any other extension is a startup error, and comments in a `.json` file are a parse error.
+- **Single JSON document** — content after the closing `}` is rejected.
+- **1 MiB size cap** — a larger file fails fast as a likely wrong path.
+- **All keys are optional, kebab-case; unknown keys are rejected.** The file is validated against the JSON Schema shipped at [`config.schema.json`](https://github.com/MKuckert/mcp-commands/blob/main/config.schema.json) in the repository root (and embedded into the binary); point your editor's JSON validation at it for inline errors and autocompletion. The `$schema` property is accepted for editor support (e.g. `"https://raw.githubusercontent.com/MKuckert/mcp-commands/main/config.schema.json"`) and ignored by the server.
+
+**Precedence:** per setting, **CLI flag > environment variable > config file > built-in default**. A *present* key counts as explicitly set — `false`, `0`, or `[]` are deliberate values, exactly like an explicitly-set flag. `--config` is a CLI-only flag and never a key in the file.
+
+Top-level keys:
+
+| Key | Type | Flag / env equivalent | Meaning |
+|---|---|---|---|
+| `dir` | string, non-empty | `--dir` | Working directory where tool scripts are executed. |
+| `scripts` | string, non-empty | `--scripts` | Directory scanned for executable scripts. |
+| `watch` | boolean | `--watch` | Hot-reload in server mode; live re-print with `--list-tools` (ignored with `--call-tool`). An explicit `--watch=false` still wins over the file. |
+| `log-level` | string: `trace`, `debug`, `info`, `warn`, or `error` | `--log-level` / `LOG_LEVEL` | Minimum log level; the env var is consulted before the file. |
+| `timeout` | string: a duration (`5m`, `1h 30m 5s`) or `NONE` | `--timeout` | Global per-tool timeout ([Timeouts](#timeouts) for the format); `NONE` or `0s` = no deadline. An explicit `--timeout` or `--no-timeout` wins over the file. |
+
+The `server` object carries the HTTP server settings. In diagnostic modes (`--list-tools` / `--call-tool`) it is **silently ignored** — no notice, unlike server *flags*, which keep their existing ignore report.
+
+| Key | Type | Flag / env equivalent | Meaning |
+|---|---|---|---|
+| `host` | string, non-empty | `--host` | Bind address for HTTP mode. |
+| `port` | integer: `0` (stdio) or `1..65535` | `--port` | A non-zero value switches to HTTP mode. |
+| `api-key` | string, non-empty | — | Bearer token; the lowest-precedence link of the chain `--api-key` > `--api-key-file` > `MCP_COMMANDS_API_KEY` > `server.api-key` > `server.api-key-file`. Inline tokens are allowed; for a real secret prefer one of the file-based links. |
+| `api-key-file` | string, non-empty | — | Read the token from a file — content trimmed (trailing newline ok), max **8 KiB**, must be non-empty; same rules as `--api-key-file`. |
+| `tls-cert` / `tls-key` | string, non-empty | `--tls-cert` / `--tls-key` | Serve HTTPS directly (PEM files, required together). A non-empty flag value wins per file; the pairing and startup readability checks apply to the merged pair across sources. |
+| `insecure-no-auth` | boolean | `--insecure-no-auth` | Escape hatch: start an unauthenticated server on a non-loopback host (loudly warned). |
+| `max-concurrent` | integer: `0` (default) or `1..256` | `--max-concurrent` | Cap on simultaneous tool executions. |
+| `allowed-origins` | array of strings | `--allowed-origins` / `MCP_COMMANDS_ALLOWED_ORIGINS` | Exact origin allowlist for CORS ([CORS](#browser-clients-cross-origin-resource-sharing-cors)). A *present* key — even `[]` — is an explicit choice that suppresses the env-var fallback, exactly like `--allowed-origins=`. |
+| `allow-all-origins` | boolean | `--allow-all-origins` / `MCP_COMMANDS_ALLOW_ALL_ORIGINS` | Echo any Origin (dev convenience). A *present* key — even `false` — suppresses the env var, exactly like `--allow-all-origins=false`. A non-empty `allowed-origins` (from any source) combined with an effective `allow-all-origins: true` is a startup error. |
+| `disable-localhost-protection` | boolean | `--disable-localhost-protection` | Disables the SDK's DNS-rebinding protection for loopback servers (no env fallback, deliberate). |
+
+**Examples.** Top-level only — stdio server with hot reload and a longer tool timeout:
+
+```jsonc
+{
+  "dir": "/path/to/workdir",
+  "scripts": "/path/to/scripts",
+  "watch": true,
+  "timeout": "10m"
+}
+```
+
+HTTP server with auth and CORS — everything the flag examples above would pass, in one file:
+
+```jsonc
+{
+  "dir": "/path/to/workdir",
+  "scripts": "/path/to/scripts",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8443,
+    // Inline token — fine for dev; prefer api-key-file for real secrets.
+    "api-key": "my-secret-token",
+    "tls-cert": "/path/to/cert.pem",
+    "tls-key": "/path/to/key.pem",
+    "allowed-origins": ["https://app.example.com"]
+  }
+}
+```
+
+`mcp-commands --config ./mcp-commands.jsonc` starts the authenticated HTTPS server with the origin allowlist; adding `--port 9000` on the command line overrides only the port.
 
 #### Flags and Environment Variables
 
@@ -328,8 +405,9 @@ Essentials and modes:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir <dir>` | _(required)_ | Working directory where tool scripts are executed. |
-| `--scripts <dir>` | _(required)_ | Directory scanned for executable scripts. |
+| `--dir <dir>` | _(required; or in the config file)_ | Working directory where tool scripts are executed. |
+| `--scripts <dir>` | _(required; or in the config file)_ | Directory scanned for executable scripts. |
+| `--config <path>` | _(none)_ | JSON/JSONC file with recurring settings — format, keys, and precedence in the [Config File section](#config-file). |
 | `--watch` | off | Hot-reload in server mode; live re-print in `--list-tools` mode (ignored with `--call-tool`). |
 | `--list-tools` | off | Print a human-readable rendering of the tools the server would register, then exit; no server starts. |
 | `--call-tool <name>` | _(none)_ | Run one discovered tool once and exit (debug mode; no server starts). |
@@ -349,7 +427,7 @@ HTTP server:
 | `--insecure-no-auth` | off | Escape hatch: start an unauthenticated server on a non-loopback host (loudly warned). |
 | `--max-concurrent <n>` | `16` (`0` = default) | Cap on simultaneous tool executions (validated `1..256`); saturated calls get a clean at-capacity error. |
 
-CORS (`--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`) — see the [CORS section](#browser-clients-cross-origin-resource-sharing-cors) for the full reference, including env fallbacks. Timeouts (`--timeout`, `--no-timeout`) — see the [Timeouts section](#timeouts).
+CORS (`--allowed-origins`, `--allow-all-origins`, `--disable-localhost-protection`) — see the [CORS section](#browser-clients-cross-origin-resource-sharing-cors) for the full reference, including env fallbacks. Timeouts (`--timeout`, `--no-timeout`) — see the [Timeouts section](#timeouts). Config file (`--config <path>`) — see the [Config File section](#config-file) for format, keys, and precedence.
 
 Environment variables (each is consulted only when its flag is not set):
 

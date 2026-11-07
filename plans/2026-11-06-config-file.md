@@ -2,7 +2,7 @@
 
 **Branch:** `feature/config-file` (from `main` @ `b318797`, worktree `/workspace/mcp-commands-config-file`)
 **Relay:** `config-file` (packet: `.pi-web/relays/config-file/`)
-Status: in progress — U2 complete (2026-11-06, relay leg 2)
+Status: in progress — U3 complete (2026-11-06, relay leg 3)
 
 ## Scope
 
@@ -15,7 +15,7 @@ Status: in progress — U2 complete (2026-11-06, relay leg 2)
       `allow-all-origins`, `disable-localhost-protection`) with cross-source validation
       (TLS pairing, CORS mutual exclusion across flag+file) and silent-ignore in
       diagnostic modes
-- [ ] U3: README documentation (format, keys, precedence) + schema finalization
+- [x] U3: README documentation (format, keys, precedence) + schema finalization
 
 ## Design decisions
 
@@ -81,3 +81,13 @@ Status: in progress — U2 complete (2026-11-06, relay leg 2)
   messages mention `server.api-key`, and the untested chain links got direct coverage
   (env > file api-key-file, flag api-key-file > file api-key, explicit-empty flag +
   file origins, `--call-tool` silent-ignore, file-only tls-key).
+- 2026-11-06 (leg 3): U3 done — README `Config File` section (format rules,
+  top-level + server key reference tables, precedence with
+  presence/explicit-empty semantics, API-key chain, diagnostic-mode
+  silent-ignore, two worked examples), consolidated-summary and intro
+  pointers; `config.schema.json` finalized — key set verified against the
+  documented reference (five top-level + eleven server keys,
+  additionalProperties: false throughout) and the `$schema` meta-key added
+  for editor support (accepted, ignored by the server; coupled test in
+  `config_test.go`); consistency pass between README statements and the
+  error strings/behavior in `flags.go`, `http.go`, `config.go`.
