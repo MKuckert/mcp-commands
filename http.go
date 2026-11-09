@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -422,22 +421,11 @@ const (
 
 var corsAllowedMethods = []string{http.MethodPost, http.MethodOptions}
 
-func newCORSHandler(next http.Handler, log *slog.Logger, cfg corsConfig) http.Handler {
+func newCORSHandler(next http.Handler, cfg corsConfig) http.Handler {
 	allowed := cfg.originSet()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		isPreflight := r.Method == http.MethodOptions
 		if origin == "" || (!cfg.allowAll && !allowed[canonicalOrigin(origin)]) {
-			// A preflight whose origin was rejected fails closed in the
-			// browser (no CORS headers are echoed); the WARN shows the
-			// operator which origin was blocked and why (N8).
-			if isPreflight && origin != "" {
-				reason := "not-in-allowlist"
-				if canonicalOrigin(origin) == "" {
-					reason = "non-canonical"
-				}
-				log.Warn("CORS preflight rejected", "origin", origin, "reason", reason)
-			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -445,13 +433,7 @@ func newCORSHandler(next http.Handler, log *slog.Logger, cfg corsConfig) http.Ha
 		h.Set("Access-Control-Allow-Origin", origin) // echo, never "*"
 		h.Add("Vary", "Origin")
 		h.Set("Access-Control-Expose-Headers", corsExposedHeaders)
-		if isPreflight { // preflight
-			// An allowed preflight is a routine record at DEBUG (N7).
-			args := []any{"origin", canonicalOrigin(origin), "maxAge", corsAllowMaxAge}
-			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
-				args = append(args, "requestHeaders", achr)
-			}
-			log.Debug("CORS preflight allowed", args...)
+		if r.Method == http.MethodOptions { // preflight
 			h.Set("Access-Control-Allow-Methods", strings.Join(corsAllowedMethods, ", "))
 			if achr := r.Header.Get("Access-Control-Request-Headers"); achr != "" {
 				h.Set("Access-Control-Allow-Headers", achr)
@@ -520,8 +502,8 @@ func (b *bodyReadDeadline) Close() error { return b.in.Close() }
 // wrapped in bearer-token auth middleware;
 // when CORS is enabled it is wrapped (outermost) in the CORS middleware,
 // so preflights bypass auth and 401s carry CORS headers.
-func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors corsConfig) http.Handler {
-	var streamable http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+func buildHTTPHandler(server *mcp.Server, token string, cors corsConfig) http.Handler {
+	var h http.Handler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, &mcp.StreamableHTTPOptions{
 		// Always stateless: the app keeps no per-session state, so protocol
@@ -532,20 +514,22 @@ func buildHTTPHandler(server *mcp.Server, log *slog.Logger, token string, cors c
 		// the app's documented 10 MiB so 4–10 MiB bodies keep working.
 		MaxRequestBodyBytes: maxHTTPBodyBytes,
 	})
-	// Bound request bodies (innermost: below auth and CORS) — a multi-GB
-	// chunked body must not be read into memory, and a body that dribbles
-	// must not pin the handler past the total read deadline.
-	var h http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Bound the total body-read time (innermost: below auth and CORS) — a
+	// body that dribbles must not pin the handler past the read deadline.
+	// The size cap lives in the SDK (MaxRequestBodyBytes), so no
+	// MaxBytesReader of our own is needed here.
+	next := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}, maxHTTPBodyBytes)
+			r.Body = &bodyReadDeadline{w: w, in: r.Body, deadline: time.Now().Add(httpBodyReadTimeout)}
 		}
-		streamable.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 	})
 	if token != "" {
 		h = newBearerAuthHandler(h, token)
 	}
 	if cors.enabled() {
-		h = newCORSHandler(h, log, cors) // outermost: preflight unauthenticated, 401s carry CORS
+		h = newCORSHandler(h, cors) // outermost: preflight unauthenticated, 401s carry CORS
 	}
 	return h
 }

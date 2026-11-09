@@ -1,0 +1,83 @@
+# CodeBoarding — architecture review on pull requests + baseline sync.
+#
+# Two jobs, one file (a second workflow file would be an "older setup" the
+# CodeBoarding dashboard flags and offers to fold into one):
+#
+#   review  — on pull_request / a trusted "/codeboarding" comment: compares the
+#             PR head with its merge base, posts one sticky review comment with
+#             an inline Mermaid architecture diff, and uploads both analyses as
+#             a workflow artifact. Runs only on this repository's own PRs —
+#             fork runs are skipped because they do not receive hosted OIDC
+#             credentials; a trusted collaborator can still trigger a fork PR's
+#             review via the "/codeboarding" comment (the action then runs its
+#             released code from the base repo, never the fork's).
+#
+#   sync    — on push to main: updates the versioned analysis state under
+#             .codeboarding/ on the codeboarding/baseline orphan branch. main is
+#             only read; no code branch is ever written, so no path exclusions
+#             or main-protection exceptions are needed. Every later review
+#             seeds its head analysis from this baseline (or from the PR's own
+#             previous run), so a review covers only the commits pushed since.
+#
+# llm: hosted runs on CodeBoarding's free tier through its OIDC proxy — no
+# LLM secret is stored in this repository. To move to a CodeBoarding plan, set
+# llm: license + license_key: ${{ secrets.CODEBOARDING_LICENSE }} in both jobs;
+# to bring your own provider key, set llm: <provider> + <provider>_api_key.
+# An empty provider key is refused, never a silent fallback to the free tier.
+
+name: CodeBoarding
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+  push:
+    branches: [main]
+
+permissions: {}
+
+# One review at a time per pull request, and one sync at a time per branch.
+# Two pushes in quick succession would otherwise analyze concurrently, both
+# starting from the same older analysis instead of the newer one continuing
+# from its predecessor, and both writing the one sticky comment, so the run
+# for the older commit could win. Queue rather than cancel, so a /codeboarding
+# command waits for a running review instead of killing it.
+concurrency:
+  group: codeboarding-${{ github.event.pull_request.number || github.event.issue.number || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/codeboarding') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read # download the analysis an earlier run published
+      pull-requests: write
+      issues: write
+      id-token: write # mints short-lived hosted-tier credentials per request
+    steps:
+      - uses: CodeBoarding/CodeBoarding-action@v1
+        with:
+          llm: hosted
+
+  sync:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write # writes the codeboarding/baseline orphan branch only
+      actions: read # catch up from an analysis a review saved
+      id-token: write
+    steps:
+      - uses: CodeBoarding/CodeBoarding-action@v1
+        with:
+          mode: sync
+          llm: hosted

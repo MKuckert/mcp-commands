@@ -149,15 +149,7 @@ func watchChanges(ctx context.Context, env liveEnv, scriptsDir string, onRescan 
 				if !matched {
 					continue
 				}
-				relevant := event.Op&watchSpecEvents != 0
-				// Per-file-event record (N11): the raw event stream feeding
-				// the debounced rescan. valid marks the events that arm the
-				// debounce (a create/write/delete/rename on a watched path);
-				// other ops are recorded but inert. Whether the file then
-				// yields a tool is decided by the rescan's own filter.
-				valid := relevant
-				env.log.Debug("watch event", "path", event.Name, "op", event.Op.String(), "valid", valid)
-				if relevant {
+				if event.Op&watchSpecEvents != 0 {
 					if !debounceActive {
 						debounceActive = true
 						debounceTimer.Reset(watchDebounceDelay)

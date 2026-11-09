@@ -37,7 +37,7 @@ go install github.com/mkuckert/mcp-commands@latest
 # Param: name string optional "Name to greet"
 
 NAME=${2:-World}
-echo "Hello, $NAME!"
+echo "Hello, $NAME!" 
 ```
 
 Make it executable (`chmod +x hello-world`) — the server exposes a tool named `hello-world` whose description is the `Description:` line.
